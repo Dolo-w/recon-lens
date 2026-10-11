@@ -20,7 +20,8 @@ import java.util.Set;
 
 /**
  * 规则目录（YAML 文件）的加载器。运行时规则以数据库为准（见 {@code rule.RuleCatalog}），
- * 这里加载到的文件只在「规则库还没有这个 code」时作为初始版本导入（seed），
+ * 这里加载到的文件在启动时用来对齐规则库：库里没有该 code 就作为 v1 导入，
+ * 同名规则内容不一致就按文件覆盖成新版本（见 {@code RuleCatalog#seedFromRuleDirectory}），
  * 所以目录为空不再是致命错误——MySQL profile 下运维可能还没准备 file:./rules/。
  *
  * <p>规则文件可以放在 classpath（打包内置），也可以放在 file: 目录。

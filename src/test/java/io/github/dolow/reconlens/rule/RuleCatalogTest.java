@@ -1,11 +1,14 @@
 package io.github.dolow.reconlens.rule;
 
+import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.domain.JobStatus;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.dsl.FieldRule;
+import io.github.dolow.reconlens.dsl.RuleRegistry;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.store.ReconRepository;
 import io.github.dolow.reconlens.store.RuleRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -18,9 +21,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 规则库：classpath 的 YAML 只在库里没有该规则时导入一次（v1），之后规则的版本由库决定。
- * 三条要验证的关键行为：改规则<b>立刻生效</b>、旧版本<b>仍可回放</b>、任务跑起来之后
- * <b>钉住当时的规则</b>（重跑不会因为规则被改而换语义）。
+ * 规则库：classpath 的 YAML 在启动时与库里的同名规则对齐（没有就 v1 导入，内容不一致就覆盖成新版本）。
+ * 要验证的关键行为：改规则<b>立刻生效</b>、旧版本<b>仍可回放</b>、任务跑起来之后
+ * <b>钉住当时的规则</b>（重跑不会因为规则被改而换语义）、以及规则目录与库的<b>覆盖</b>关系。
  */
 @SpringBootTest(properties = "recon.engine.run-demo-on-startup=false")
 class RuleCatalogTest {
@@ -33,6 +36,12 @@ class RuleCatalogTest {
 
     @Autowired
     private ReconRepository repository;
+
+    @Autowired
+    private RuleRepository ruleRepository;
+
+    @Autowired
+    private ObjectMapper json;
 
     @Test
     void classpathRulesAreImportedAsVersionOne() {
@@ -109,6 +118,59 @@ class RuleCatalogTest {
         assertThat(repository.summaryByType(first.id()))
                 .containsEntry("AMOUNT_MISMATCH", 2L)
                 .doesNotContainKey("STATUS_MISMATCH");
+    }
+
+    @Test
+    void seedingOverwritesTheSameCodeWhenTheFileChanged() {
+        String code = "SEED_OVERWRITE_DEMO";
+        RuleCatalog seeds = seedCatalog();
+
+        seeds.seedFromRuleDirectory();
+        assertThat(seeds.resolve(code).version()).isEqualTo(1);
+        assertThat(fields(seeds.resolve(code))).containsExactly("amount");
+
+        // 有人在库里把它改成了只比 status（v2）—— 再启动时"文件是权威"
+        seeds.defineMap(ruleBody(code, "status", "STATUS_MISMATCH"), "单测手改", "tester");
+        assertThat(fields(seeds.resolve(code))).containsExactly("status");
+
+        seeds.seedFromRuleDirectory();
+        assertThat(seeds.resolve(code).version()).isEqualTo(3);
+        assertThat(fields(seeds.resolve(code))).containsExactly("amount");
+        // 覆盖 = 落新版本：手改的 v2 还在，"旧版本仍可回放"这条没被破坏
+        assertThat(seeds.versions(code)).extracting(RuleRepository.RuleRow::version).containsExactly(3, 2, 1);
+        assertThat(seeds.versions(code)).extracting(RuleRepository.RuleRow::createdBy)
+                .containsExactly("seed:seed-overwrite-demo.yml", "tester", "seed:seed-overwrite-demo.yml");
+
+        // 内容一致时反复"重启"不涨版本
+        seeds.seedFromRuleDirectory();
+        assertThat(seeds.versions(code)).hasSize(3);
+    }
+
+    @Test
+    void seedingDoesNotResurrectADisabledRule() {
+        String code = "SEED_DISABLED_DEMO";
+        RuleCatalog seeds = seedCatalog();
+        seeds.seedFromRuleDirectory();
+        int before = seeds.versions(code).size();
+        assertThat(before).isGreaterThanOrEqualTo(1);
+
+        seeds.disable(code);
+        seeds.seedFromRuleDirectory();
+
+        // 下线是显式动作（DELETE /api/rules/{code}）：规则目录既不覆盖也不复活
+        assertThat(seeds.exists(code)).isFalse();
+        assertThat(seeds.versions(code)).hasSize(before);
+    }
+
+    /**
+     * 一个只加载 {@code classpath:rules-seed/}（单测专用 code，不碰演示规则）的目录，
+     * 用来在同一个测试上下文里反复触发"启动时对齐规则库"这件事。
+     */
+    private RuleCatalog seedCatalog() {
+        ReconProperties props = new ReconProperties();
+        props.setRulesLocation("classpath:rules-seed/");
+        props.setSeedRules(true);
+        return new RuleCatalog(ruleRepository, new RuleRegistry(props), props, json);
     }
 
     private List<String> fields(RuleCatalog.Resolved resolved) {

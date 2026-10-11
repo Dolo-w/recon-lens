@@ -20,6 +20,7 @@
 
 ### 变更
 
+- **规则种子改为覆盖同名规则**：启动时规则目录（`classpath:rules/*.yml` / `file:./rules/`）与 `recon_rule` 里的同名规则对齐 —— 库里没有该 `code` 作 v1 导入；与文件**逐字段相同**就什么都不做（反复重启不涨版本）；不一致就按文件**覆盖**成新版本（追加版本、不删旧版本，历史任务照旧回放），被覆盖的若是人改的版本（`created_by` 不是 `seed:` 开头）会 `WARN` 点出它原来是哪个操作人哪一版；已被 `DELETE /api/rules/{code}` 显式下线过的 `code` 不覆盖也不复活。想让规则库完全自己说了算（库里的改动不再被文件覆盖）就设 `recon.seed-rules=false`，此时启动完全不碰规则库。起因：压测时改了 `rules/s7-*.yml` 不生效、必须先 `DELETE FROM recon_rule WHERE code LIKE 'S7%'` 再重启（`docs/benchmark.md` §3.6 第 4 条）。测试 79 → 81 个（`RuleCatalogTest` 新增"文件变了要覆盖"与"下线过的不复活"两个用例，专用目录 `src/test/resources/rules-seed/`）。
 - **MCP SDK 0.18.4 → 2.0.1**：上游 2.x 把制品拆成 `mcp-core` + 各 JSON 实现，聚合包 `mcp` 只带 Jackson 3；
   本项目跑在 Spring Boot 3（Jackson 2）上，因此显式依赖 `mcp-core` + `mcp-json-jackson2`（代码零改动，
   `io.modelcontextprotocol.json.jackson2.JacksonMcpJsonMapper` 包名未变，依赖树里也不会多出一套 Jackson 3）。

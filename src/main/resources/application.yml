@@ -26,7 +26,7 @@ spring:
 recon:
   # 规则 DSL 所在位置（classpath: 或 file: 前缀），启动时全部加载
   rules-location: classpath:rules/
-  # 是否把上面的 YAML 规则作为"种子"导入规则库（每条只导一次，之后以规则库里的版本为准）
+  # 是否把上面的 YAML 规则与规则库里的同名规则对齐（库里没有的作 v1；不一致按文件覆盖成新版本；已下线的不复活）
   seed-rules: true
   engine:
     # 分片并行度，默认取 min(规则内 parallelism, CPU*2)

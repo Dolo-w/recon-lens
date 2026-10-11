@@ -3,8 +3,9 @@
 一条规则就是一个 YAML 文件，放在 `recon.rules-location` 指向的目录（默认 `classpath:rules/`）。
 启动时全部解析并校验一遍：配置写错会在启动阶段带着"改哪里"的提示直接失败，而不是等跑对账时抛空指针。
 
-规则运行时的权威来源是数据库规则库（`recon_rule`）：目录里的 YAML 只在库里还没有该 `code` 时作为 v1 导入，
-`POST /api/rules` 提交的新版本立即生效、不需要重启（见下文「规则库与版本」）。
+规则运行时的权威来源是数据库规则库（`recon_rule`）：目录里的 YAML 在启动时与库里的同名规则对齐（库里没有的
+`code` 作 v1 导入，内容不一致就按文件覆盖成新版本），`POST /api/rules` 提交的新版本立即生效、不需要重启
+（见下文「规则库与版本」）。
 
 ---
 
@@ -285,7 +286,15 @@ missing: { leftMissingDiffType: MISSING_LEFT, rightMissingDiffType: MISSING_RIGH
 
 ## 规则库与版本
 
-规则的权威来源是数据库表 `recon_rule`，`classpath:rules/*.yml` 只在库里没有该 `code` 时作为 v1 导入一次。
+规则的权威来源是数据库表 `recon_rule`。规则目录（`recon.rules-location`，默认 `classpath:rules/*.yml`）在启动时与库对齐：
+
+1. 库里没有该 `code` → 作为 v1 导入（`created_by` 记 `seed:<文件名>`）；
+2. 最新启用版本与文件内容**逐字段相同** → 什么都不做（重启不会凭空长版本）；
+3. 内容不同 → 按文件**覆盖**成新版本：追加一个版本、不删旧版本，历史任务照旧回放；被覆盖的那一版如果是人改的
+   （`created_by` 不是 `seed:` 开头），日志里会用 `WARN` 点出它原来是哪个操作人哪一版改的；
+4. 该 `code` 已被 `DELETE /api/rules/{code}` 显式下线 → 不覆盖也不复活。
+
+想让规则库完全自己说了算（库里的改动不再被文件覆盖），设 `recon.seed-rules: false` —— 此时启动完全不碰规则库。
 
 | 列 | 说明 |
 | --- | --- |
@@ -324,8 +333,9 @@ curl -X POST http://localhost:8080/api/rules \
 
 - 启动时把 `recon.rules-location`（缺省 `classpath:rules/`，MySQL profile 是 `file:./rules/`）下的 `*.yml`
   里**库里还没有的 `code`** 导入为 v1。
-- 库里已有该 `code` 时 YAML **不覆盖** —— 改规则请走 `POST /api/rules`，不要在文件上改。
-- `recon.seed-rules: false` 可完全关闭导入，规则只以数据库为准。
+- 库里已有该 `code`：内容与文件一致则不动；**不一致就按文件覆盖成新版本**（升级版本，旧版本仍可回放）。
+- 已被 `DELETE /api/rules/{code}` 下线过的 `code` 不会被种子复活。
+- `recon.seed-rules: false` 可完全关闭对齐（启动不碰规则库），此后改规则只走 `POST /api/rules`。
 
 仓库自带 4 个示例规则：
 

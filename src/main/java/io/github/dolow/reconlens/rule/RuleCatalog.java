@@ -21,7 +21,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 运行时规则目录：规则的唯一权威来源是数据库（{@code recon_rule}），
- * classpath 下的 YAML 只在"库里还没有这个 code"时作为 v1 导入一次。
+ * classpath 下的 YAML 在启动时对齐库里的同名规则 —— 库里的最新启用版本与文件内容一致就什么都不做，
+ * 不一致就把文件这一版落成新版本（见 {@link #seedFromRuleDirectory()}）。
  *
  * <p>因此"改一条规则的比对维度"不再需要改代码、重新打包、重启进程：
  * {@link #defineMap} 走的就是 {@link RuleParser#parseMap} 那套校验，写入前先过同一道关。
@@ -53,6 +54,16 @@ public class RuleCatalog {
     public record Resolved(RuleSpec spec, Integer version, String snapshot) {
     }
 
+    /**
+     * 启动时把规则目录（classpath / {@code file:} 下的 YAML）与规则库对齐：
+     * <ul>
+     *   <li>库里没有这个 code → 作为 v1 导入；</li>
+     *   <li>库里的最新启用版本与文件内容<b>逐字段相同</b> → 什么都不做（重启不会凭空长版本）；</li>
+     *   <li>不同 → <b>覆盖</b>：把文件这一版落成一个新版本（覆盖是升级版本，不删旧版本，"文件是权威"）；</li>
+     *   <li>该 code 已被显式下线（{@code DELETE /api/rules/{code}}）→ 不覆盖也不复活。</li>
+     * </ul>
+     * 想让规则库完全自己说了算（库里的改动不被文件覆盖），把 {@code recon.seed-rules} 设为 false。
+     */
     @PostConstruct
     void seedFromRuleDirectory() {
         if (!properties.isSeedRules()) {
@@ -60,20 +71,58 @@ public class RuleCatalog {
             return;
         }
         List<String> imported = new java.util.ArrayList<>();
+        List<String> refreshed = new java.util.ArrayList<>();
+        List<String> untouched = new java.util.ArrayList<>();
+        List<String> disabled = new java.util.ArrayList<>();
         for (RuleRegistry.SeedDocument doc : seedDocuments.documents()) {
-            if (!repository.listVersions(doc.code()).isEmpty()) {
-                continue; // 库里已有（可能是改过的版本），YAML 不再覆盖
-            }
             Map<String, Object> root = parser.readYaml(doc.yaml(), doc.source());
             RuleSpec spec = parser.parseMap(root, doc.source());
-            repository.insert(spec.code(), 1, writeJson(root, doc.source()), "seed:" + doc.source());
-            imported.add(spec.code());
+            String createdBy = "seed:" + doc.source();
+            List<RuleRepository.RuleRow> versions = repository.listVersions(doc.code());
+            if (versions.isEmpty()) {
+                repository.insert(spec.code(), 1, writeJson(root, doc.source()), createdBy);
+                imported.add(spec.code());
+                continue;
+            }
+            Optional<RuleRepository.RuleRow> latest = versions.stream()
+                    .filter(RuleRepository.RuleRow::enabled)
+                    .findFirst();
+            if (latest.isEmpty()) {
+                disabled.add(spec.code()); // 下线是显式动作，重启不该把它复活
+                continue;
+            }
+            RuleRepository.RuleRow current = latest.get();
+            // 比较解析后的规则体而不是字符串：YAML 与 JSON 的字面差异不该算"改过"
+            if (readJson(current.specJson(), "规则库 " + doc.code() + " v" + current.version()).equals(root)) {
+                untouched.add(spec.code());
+                continue;
+            }
+            int version = repository.nextVersion(doc.code());
+            repository.insert(doc.code(), version, writeJson(root, doc.source()), createdBy);
+            evict(doc.code());
+            refreshed.add(doc.code() + " v" + current.version() + "→v" + version);
+            if (!isSeeded(current.createdBy())) {
+                log.warn("规则 {} 的 v{} 是 {} 改的，与规则目录 {} 内容不一致，已按文件覆盖为 v{}"
+                                + "（不想被覆盖就把 recon.seed-rules 设为 false）",
+                        doc.code(), current.version(), current.createdBy(), doc.source(), version);
+            }
         }
         if (!imported.isEmpty()) {
             log.info("规则库首次导入 {} 条规则目录规则: {}", imported.size(), imported);
-        } else {
-            log.info("规则库已有 {} 条规则，跳过规则目录导入", repository.listLatest().size());
         }
+        if (!refreshed.isEmpty()) {
+            log.info("规则目录覆盖了 {} 条与文件不一致的规则: {}", refreshed.size(), refreshed);
+        }
+        if (!disabled.isEmpty()) {
+            log.info("规则 {} 已被显式下线，规则目录既不覆盖也不复活（要恢复请重新定义规则）", disabled);
+        }
+        if (imported.isEmpty() && refreshed.isEmpty()) {
+            log.info("规则目录 {} 条规则与规则库一致，未新增版本", untouched.size());
+        }
+    }
+
+    private static boolean isSeeded(String createdBy) {
+        return createdBy != null && createdBy.startsWith("seed:");
     }
 
     public Resolved resolve(String code) {

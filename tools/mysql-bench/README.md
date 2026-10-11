@@ -88,9 +88,10 @@ JDK 17、Node 18+，`-Xmx256m`。绝对耗时只对这台机器有意义，**看
   `mvnw` 的 `-s settings.xml` 用 `-MavenSettings` 传（默认不传），中央仓库镜像用环境变量 `MVNW_REPOURL`。
 - `rules\s7-*.yml` 是这一轮用到的 5 份规则（窄/宽/函数谓词 8 片/函数谓词 SIGNED/桶列 8 片）。
 
-> **坑：规则种子不会覆盖已有规则。** 引擎启动时会扫规则目录导入，但 `recon_rule` 里**已存在**的 `code`
-> 会被跳过（`RuleCatalog` 里就是 `continue`）。改完 `rules\*.yml` 想让它生效，先清掉旧行再重启：
-> `mysql -h127.0.0.1 -P3307 -uroot -proot bench -e "DELETE FROM recon_rule WHERE code LIKE 'S7%'"`。
+> **坑（已改行为）：规则种子现在会覆盖同名规则。** 引擎启动时把规则目录里的 YAML 与 `recon_rule` 里的同名规则对齐：
+> 内容一致就什么都不做，不一致就按文件**覆盖**成新版本（追加版本，不删旧的）。所以这一轮压测里
+> "改完 `rules\*.yml` 必须先 `DELETE FROM recon_rule WHERE code LIKE 'S7%'`" 的做法**不再需要**，
+> 重启即生效；反过来，如果你在库里手工改过 `S7_*` 而又不想被文件覆盖，就加 `--recon.seed-rules=false`。
 
 ## 四、看结果
 

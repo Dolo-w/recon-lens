@@ -36,7 +36,7 @@
 三条最容易踩的坑：
 
 1. **分片谓词用到的列必须出现在规则投影里**，否则 `Unknown column` —— 引擎把规则 SQL 包成了 `SELECT * FROM (<规则里的 sql>) src WHERE <分片谓词> ORDER BY <keyField>`，函数化谓词也不会被下推回基表（3.3）；
-2. **直接改 `rules/*.yml` 不生效**：规则的权威来源是数据库，YAML 只在"库里没有这个 code"时导入一次（3.6 第 4 条、第四节）；
+2. **改 `rules/*.yml` 要重启才生效**：启动时规则目录会与库里的**同名规则**对齐，内容不一致就按文件覆盖成新版本；改完想立刻生效而不重启，请走 `POST /api/rules`（3.6 第 4 条、第四节）；
 3. **`schema.sql` 不能给 MySQL 用**（`CREATE INDEX IF NOT EXISTS` 是 H2 语法），给 DBA 的是 `src/main/resources/schema-mysql.sql`（3.6 第 5 条）。
 
 > 数字口径：同一配置连跑 4 次波动在 ±10% 以内，隔一轮环境会有 ±25% 的系统性漂移，所以**只把 2 倍以上的差距当结论**。每个结论的证据（计划 + 计数器）见对应小节，边界见第四节。
@@ -256,14 +256,14 @@ min/max，再均分边界）记在 README 的后续计划里 —— 这个限制
 的重试把问题藏起来了，只有日志会告诉你。所以默认值已从 16 调到 24，注释写在 `application.yml`：
 至少 `2 × recon.engine.parallelism`，再加写库与 HTTP 的余量。
 
-### 3.6 跑 MySQL 才暴露出来的 5 个真问题（4 个已修）
+### 3.6 跑 MySQL 才暴露出来的 5 个真问题（5 个已修）
 
 | # | 问题 | 症状 | 处置 |
 | --- | --- | --- | --- |
 | 1 | `JdbcRowCursor` 打开游标失败时漏了 `Connection` | 连接池被打满，后续分片全部重试 | 已修 + `JdbcRowCursorTest` |
 | 2 | `ReconRepository.finishJob` 落库前不截断 `error_msg`（`markShardFailed` 截了） | MySQL 报 `Data too long for column 'error_msg'`，`POST /api/jobs` 直接 500、任务状态没落库 | 已修（截到 1000 字符；失败原因最多拼 3 条 + `共 N 个分片失败`）+ 回归测试 |
 | 3 | 默认连接池 16 = 8 分片 × 2 游标 | 见 3.5 | 默认值调到 24 |
-| 4 | `RuleCatalog` 对"库里已存在"的规则码不再覆盖 | 改了 `rules/` 里的 YAML 不生效，一直报 `Unknown column 'shard_bucket'`（库里还是旧版本） | 压测时先 `DELETE FROM recon_rule WHERE code LIKE 'S7%'` 再重启；**产品行为待定**：种子该不该覆盖同名规则 |
+| 4 | `RuleCatalog` 对"库里已存在"的规则码不再覆盖 | 改了 `rules/` 里的 YAML 不生效，一直报 `Unknown column 'shard_bucket'`（库里还是旧版本） | 压测时先 `DELETE FROM recon_rule WHERE code LIKE 'S7%'` 再重启；**产品行为已定**：种子按文件覆盖同名规则（内容一致不动、不一致落新版本、已下线的不复活、`recon.seed-rules=false` 可关），见 `RuleCatalog.seedFromRuleDirectory()` 与 `RuleCatalogTest` 的两个新用例 |
 | 5 | `schema.sql` 用了 `CREATE INDEX IF NOT EXISTS` | 这句 MySQL 不支持，而 README 又让 DBA "照 `schema.sql` 建表" —— 照着跑会停在这两行 | 已补 `src/main/resources/schema-mysql.sql`（索引写进建表语句，MySQL 8.0.29 上从空库连跑两遍验证通过） |
 
 ### 3.7 附：千万行大表上的纯 SQL 侧对照
@@ -479,9 +479,10 @@ KEY `idx_438d8fa3_1_bucket` (`biz_key_bucket`)
 - **MySQL 建表脚本**：给 DBA 执行的是 `src/main/resources/schema-mysql.sql`（mysql profile 的
   `spring.sql.init.mode=never`，应用不会自动建表）；`schema.sql` 里那些 `CREATE INDEX IF NOT EXISTS`
   只服务 H2，MySQL 会直接报语法错。
-- **规则种子不覆盖同名规则**：`recon.seed-rules=true` 只在"这个 code 一个版本都没有"时导入 YAML，
-  所以直接改规则目录里的文件不会生效 —— 要么走 `POST /api/rules`，要么先删掉 `recon_rule` 里的旧版本。
-  （种子是否该覆盖，行为待定，见 3.6 第 4 条。）
+- ~~**规则种子不覆盖同名规则**~~（已改）：`recon.seed-rules=true` 现在启动时会把规则目录里的 YAML
+  与库里的**同名规则**对齐 —— 内容一致就什么都不做，不一致就按文件**覆盖**成新版本（追加版本，不删旧的），
+  已被显式下线的 code 不覆盖也不复活；想让库完全自己说了算就设 `recon.seed-rules=false`。
+  行为与用例见 `RuleCatalog.seedFromRuleDirectory()` 与 3.6 第 4 条。
 - **极端倾斜下"采样定边界"会失效**：本轮 8 个分位点几乎落在同一个 `tenant_id` 上
   （`b1..b7 = 1,1,1,2,2,3,170`），分片大小完全不可控；倾斜数据要么按真实直方图分桶，
   要么把大租户单独拎出来跑。

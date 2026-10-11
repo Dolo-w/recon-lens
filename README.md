@@ -222,7 +222,7 @@ curl -X POST http://localhost:8080/api/rules \
 
 - `code` 相同 = 升级同一个规则（版本号自增），`code` 不同 = 新增一条规则
 - 每个任务把当时生效的**版本号 + 规则快照**钉在自己身上：之后改规则、停用规则，历史任务重跑和补归因用的仍是当时那份定义，不会出现"同一个 jobId 两种结果"
-- `classpath:rules/*.yml` 只在规则库里没有该 `code` 时作为 v1 导入（`recon.seed-rules: false` 可关闭）；生产上也可以把规则目录挂成 `file:./rules/`
+- `classpath:rules/*.yml` 在启动时与规则库对齐：库里没有该 `code` 就作 v1 导入；已有版本但内容与文件不一致就按文件**覆盖**成新版本（追加，不删旧版本）；被 `DELETE /api/rules/{code}` 下线过的不复活。想让库完全自己说了算就设 `recon.seed-rules: false`（启动不碰规则库）；生产上也可以把规则目录挂成 `file:./rules/`
 - 请求级内联规则：`POST /api/jobs` 带 `rule`（JSON）或 `ruleYaml` 字段、MCP 的 `recon_run` 带 `ruleJson`，用于临时试算 —— 不落库、不产生版本
 
 > 提示：运行时提交规则 = 运行时改 SQL，生产上这个入口要挂在网关鉴权后面（示例里的 `X-Operator` 只是记操作人）。
@@ -275,8 +275,8 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装
 与 `rewriteBatchedStatements=true`（差异批量写入提速）。生产库的表结构给 DBA 执行
 `src/main/resources/schema-mysql.sql`（含 `recon_rule` 规则表，MySQL 8.0.29 上从空库连跑两遍验证通过）；
 `schema.sql` 是 H2 用的，里面的 `CREATE INDEX IF NOT EXISTS` MySQL 不支持。
-改动规则推荐走 `POST /api/rules` 而不是改文件；规则目录也可以挂 `file:./rules/` 当首次导入的种子
-（**只导一次**，同名规则码不会被覆盖）。连接池默认 24：每个分片同时持左右两个游标，池子至少要
+改动规则推荐走 `POST /api/rules`（立即生效、不用重启）；规则目录也可以挂 `file:./rules/` 当种子来源 ——
+启动时与库里的同名规则对齐：库里没有的作 v1，内容不一致就按文件覆盖成新版本（`recon.seed-rules: false` 可关）。连接池默认 24：每个分片同时持左右两个游标，池子至少要
 `2 × recon.engine.parallelism`，否则会出现"8 个分片全在等连接"的假慢（实测慢 6~11 倍，见 `docs/benchmark.md`）。
 
 已经用旧版本建过库的，升上来只要补这一段（`spring.sql.init.mode=never`，DDL 由 DBA 执行）：
@@ -366,7 +366,7 @@ tools/          造数脚本、MCP stdio 冒烟客户端
 ## 开发与贡献
 
 ```bash
-./mvnw test                                             # 79 个用例，CI 跑的就是这条
+./mvnw test                                             # 81 个用例，CI 跑的就是这条
 ./mvnw -DskipTests package                              # 产出 target/recon-lens-0.1.0.jar
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟（Node 18+）
 ```
