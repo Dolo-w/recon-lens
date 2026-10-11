@@ -74,7 +74,7 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar
 一次真实运行的关键输出：
 
 ```
-initialize -> serverInfo={"name":"recon-lens","version":"0.1.0"} protocol=2024-11-05
+initialize -> serverInfo={"name":"recon-lens","version":"0.1.0"} protocol=2025-06-18
 tools/list -> recon_list_rules, recon_run, recon_job_summary, recon_list_diffs, recon_explain_diff, recon_explain_job
 recon_run  -> 任务 #1｜规则 BILL_VS_SETTLE｜批次 mcp-smoke｜状态 SUCCESS
               分片 4/4 完成｜扫描 左=20 右=21｜匹配 19｜差异 6
@@ -99,9 +99,10 @@ if (mcpProfileActive(args)) {
 
 日志本身则由 `logback-spring.xml` 在 `mcp` profile 下全部改道 stderr。
 
-**2. 协议版本由服务端回落。**
-当前 SDK（`io.modelcontextprotocol.sdk:mcp:0.18.4`）支持到 `2024-11-05`：
-客户端请求 `2025-06-18` 时服务端会接受握手但回落到自己支持的版本，并在 stderr 打一行 WARN。协议要求客户端以服务端返回的版本为准，所以不算错误。
+**2. 协议版本。**
+当前 SDK（`io.modelcontextprotocol.sdk:mcp-core` + `mcp-json-jackson2`，2.0.1）支持到 `2025-06-18`，与冒烟客户端同版本，握手不再回落。
+> 2.x 起上游把 `mcp` 拆成了 `mcp-core` + 各 JSON 实现，聚合包 `mcp` 只带 Jackson 3；本项目在 Spring Boot 3（Jackson 2）上，
+> 所以 pom 里显式依赖 `mcp-core` + `mcp-json-jackson2`，避免同时拖进两套 Jackson。
 
 ## 边界
 

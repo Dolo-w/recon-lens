@@ -48,7 +48,7 @@
   <properties>
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <mcp.sdk.version>0.18.4</mcp.sdk.version>
+    <mcp.sdk.version>2.0.1</mcp.sdk.version>
     <!-- 压测用例（@Tag("bench")）默认不跑：mvn test 保持秒级；要跑见 docs/benchmark.md -->
     <surefire.excludedGroups>bench</surefire.excludedGroups>
     <surefire.argLine>-Dfile.encoding=UTF-8</surefire.argLine>
@@ -74,10 +74,17 @@
       <artifactId>snakeyaml</artifactId>
     </dependency>
 
-    <!-- MCP（Model Context Protocol）官方 Java SDK：把对账能力暴露成 Agent 可直接调用的工具 -->
+    <!-- MCP（Model Context Protocol）官方 Java SDK：把对账能力暴露成 Agent 可直接调用的工具。
+         2.x 起上游把制品拆成 mcp-core + 各 JSON 实现，聚合包 mcp 只带 jackson3；
+         本项目跑在 Spring Boot 3（Jackson 2）上，所以显式依赖 jackson2 实现，避免多拖一套 Jackson 3。 -->
     <dependency>
       <groupId>io.modelcontextprotocol.sdk</groupId>
-      <artifactId>mcp</artifactId>
+      <artifactId>mcp-core</artifactId>
+      <version>${mcp.sdk.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.modelcontextprotocol.sdk</groupId>
+      <artifactId>mcp-json-jackson2</artifactId>
       <version>${mcp.sdk.version}</version>
     </dependency>
 

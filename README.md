@@ -194,7 +194,7 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装
 ```
 
 工具：`recon_list_rules` / `recon_run` / `recon_job_summary` / `recon_list_diffs` / `recon_explain_diff` / `recon_explain_job`。
-客户端配置、真实会话输出、以及 stdio 传输的两个坑（logback 状态输出会污染 stdout、协议版本由服务端回落）
+客户端配置、真实会话输出、以及 stdio 传输的两个坑（logback 状态输出会污染 stdout、2.x 起 SDK 的制品拆分）
 见 [docs/mcp.md](docs/mcp.md)。
 
 ## 生产使用（MySQL）
