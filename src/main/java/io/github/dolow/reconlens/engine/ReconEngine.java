@@ -18,7 +18,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.stream.Collectors;
 
 /**
  * 对账任务编排：
@@ -166,12 +165,17 @@ public class ReconEngine {
         long success = shards.stream().filter(s -> s.status() == ShardStatus.SUCCESS).count();
         long failed = shards.stream().filter(s -> s.status() == ShardStatus.FAILED).count();
         JobStatus status = failed == 0 ? JobStatus.SUCCESS : (success > 0 ? JobStatus.PARTIAL_FAILED : JobStatus.FAILED);
-        String errorMsg = shards.stream()
+        // 只留前几条失败原因：分片多时整串会超过 error_msg 列宽，而且根因通常是同一条
+        List<String> failureMessages = shards.stream()
                 .filter(s -> s.status() == ShardStatus.FAILED && s.errorMsg() != null)
                 .map(s -> "分片" + s.shardId() + ": " + s.errorMsg())
-                .collect(Collectors.joining("; "));
+                .limit(3)
+                .toList();
+        String errorMsg = failureMessages.isEmpty() ? null
+                : String.join("; ", failureMessages)
+                        + (failed > failureMessages.size() ? "；共 " + failed + " 个分片失败" : "");
 
-        repository.finishJob(jobId, status, errorMsg.isEmpty() ? null : errorMsg);
+        repository.finishJob(jobId, status, errorMsg);
         ReconJob finished = repository.findJob(jobId).orElseThrow();
         log.info("任务 #{} 结束: status={} 分片成功 {}/{} 左侧 {} 行 右侧 {} 行 差异 {} 条",
                 jobId, status, success, shards.size(), finished.leftRows(), finished.rightRows(), finished.diffRows());

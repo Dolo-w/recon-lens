@@ -8,7 +8,8 @@ spring:
     password: ${MYSQL_PASSWORD:root}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
-      maximum-pool-size: 16
+      # 至少 2 × recon.engine.parallelism（每分片持左右两个游标）再加写库余量，理由见 application.yml 与 docs/benchmark.md
+      maximum-pool-size: 24
       minimum-idle: 2
       connection-timeout: 10000
   sql:

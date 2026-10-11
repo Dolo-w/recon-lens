@@ -95,7 +95,7 @@ public class ReconRepository implements DiffWriter {
                   error_msg = ?,
                   finished_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-                """, status.name(), errorMsg, jobId);
+                """, status.name(), truncate(errorMsg, 1000), jobId);
     }
 
     public Optional<ReconJob> findJob(long jobId) {

@@ -114,4 +114,17 @@ class ReconEngineEndToEndTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("任务不存在");
     }
+
+    @Test
+    void overlongFailureReasonIsTruncatedInsteadOfBlowingUp() {
+        ReconJob job = engine.run("BILL_VS_SETTLE", "it-long-error", "超长失败原因");
+
+        // 真实踩过：分片各自把 SQL 拼进失败原因，汇总后超过 error_msg 列宽(1000)，
+        // MySQL 直接 Data too long，导致创建任务的请求 500、任务状态没落库。
+        repository.finishJob(job.id(), JobStatus.FAILED, "分片0: " + "x".repeat(5_000));
+
+        ReconJob finished = repository.findJob(job.id()).orElseThrow();
+        assertThat(finished.status()).isEqualTo(JobStatus.FAILED);
+        assertThat(finished.errorMsg()).hasSize(1000).startsWith("分片0: ");
+    }
 }

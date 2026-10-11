@@ -29,18 +29,29 @@ public final class JdbcRowCursor implements RowCursor {
 
     public JdbcRowCursor(DataSource dataSource, String sql, int fetchSize) {
         this.fetchSize = fetchSize;
+        Connection openedConnection = null;
+        PreparedStatement openedStatement = null;
+        ResultSet openedResultSet = null;
         try {
-            this.connection = dataSource.getConnection();
-            this.statement = connection.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-            this.statement.setFetchSize(fetchSize);
-            this.resultSet = statement.executeQuery();
-            ResultSetMetaData meta = resultSet.getMetaData();
+            openedConnection = dataSource.getConnection();
+            openedStatement = openedConnection.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+            openedStatement.setFetchSize(fetchSize);
+            openedResultSet = openedStatement.executeQuery();
+            ResultSetMetaData meta = openedResultSet.getMetaData();
             for (int i = 1; i <= meta.getColumnCount(); i++) {
                 columns.add(meta.getColumnLabel(i).toLowerCase(java.util.Locale.ROOT));
             }
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException e) {
+            // 构造函数里失败时对象不会被创建，try-with-resources 也就拿不到它来 close()：
+            // 这里必须自己把已经借出来的连接还回连接池，否则每次"取数失败"都白占一条连接。
+            closeQuietly(openedResultSet);
+            closeQuietly(openedStatement);
+            closeQuietly(openedConnection);
             throw new IllegalStateException("取数失败: " + sql, e);
         }
+        this.connection = openedConnection;
+        this.statement = openedStatement;
+        this.resultSet = openedResultSet;
     }
 
     @Override

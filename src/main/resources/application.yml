@@ -10,7 +10,11 @@ spring:
     password: ""
     driver-class-name: org.h2.Driver
     hikari:
-      maximum-pool-size: 16
+      # 每个分片同时持有左右两个游标，所以池子至少要有 2 × recon.engine.parallelism（默认 8 → 16），
+      # 再留出写差异/写分片状态和 HTTP 请求的余量。实测池 16 在 8 分片时刚好占满：出现
+      # "Connection is not available, request timed out after 10004ms" 并触发分片重试，耗时涨 6~11 倍。
+      # 详见 docs/benchmark.md「默认连接池 16 会在 8 分片 + 并行度 8 时饿死」。
+      maximum-pool-size: 24
   sql:
     init:
       mode: always
