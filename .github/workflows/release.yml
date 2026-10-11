@@ -22,7 +22,7 @@ jobs:
           cache: maven
 
       - name: 测试并打包
-        run: mvn -B --no-transfer-progress package
+        run: ./mvnw -B --no-transfer-progress package
 
       - name: 协议级冒烟（打包产物，不装客户端也能验）
         run: node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar

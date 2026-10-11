@@ -11,7 +11,7 @@ recon-lens 暴露 6 个工具，**和 REST 接口共用同一套 service**（`Re
 ## 启动
 
 ```bash
-mvn -DskipTests package
+./mvnw -DskipTests package
 java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 ```
 

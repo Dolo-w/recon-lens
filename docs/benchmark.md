@@ -11,10 +11,10 @@
 
 ## 一、仓库内可复现：百万级 + 8 分片对照（H2）
 
-不需要装 MySQL，`mvn test` 默认也不会跑它（`@Tag("bench")` 已在 pom 里排除）。
+不需要装 MySQL，`./mvnw test` 默认也不会跑它（`@Tag("bench")` 已在 pom 里排除）。
 
 ```bash
-mvn -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
+./mvnw -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
     -Dsurefire.argLine="-Xmx2g -Dfile.encoding=UTF-8" test
 ```
 
@@ -108,7 +108,7 @@ mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS recon_lens DEFAULT CHARSET utf
 mysql -uroot -p recon_lens < tools/gen_bill_data.sql
 
 # 生产 profile（MySQL），堆限制在 256M
-mvn spring-boot:run -Dspring-boot.run.profiles=mysql \
+./mvnw spring-boot:run -Dspring-boot.run.profiles=mysql \
     -Dspring-boot.run.jvmArguments="-Xmx256m -XX:+UseG1GC"
 
 time curl -s -X POST http://localhost:8080/api/jobs \

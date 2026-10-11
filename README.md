@@ -164,7 +164,7 @@ JDBC 游标（`TYPE_FORWARD_ONLY` + `fetchSize`）保证只驻留有限行 —�
 export RECON_LLM_ENABLED=true
 export RECON_LLM_BASE_URL=https://api.openai.com/v1
 export RECON_LLM_API_KEY=sk-...
-mvn spring-boot:run
+./mvnw spring-boot:run
 ```
 
 ## REST API
@@ -200,7 +200,7 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装
 ## 生产使用（MySQL）
 
 ```bash
-mvn spring-boot:run -Dspring-boot.run.profiles=mysql
+./mvnw spring-boot:run -Dspring-boot.run.profiles=mysql
 ```
 
 `application-mysql.yml` 已带上关键参数 `useCursorFetch=true`（否则 MySQL 驱动会把结果集整体拉进内存，流式取数形同虚设）

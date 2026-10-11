@@ -26,10 +26,10 @@ jobs:
           distribution: temurin
           cache: maven
 
-      - name: mvn test
-        run: mvn -B --no-transfer-progress test
+      - name: 跑测试（用仓库自带的 mvnw，保证本地和 CI 同一套 Maven）
+        run: ./mvnw -B --no-transfer-progress test
 
       - name: 打包并跑 MCP 协议冒烟
         run: |
-          mvn -B --no-transfer-progress -DskipTests package
+          ./mvnw -B --no-transfer-progress -DskipTests package
           node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar

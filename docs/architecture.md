@@ -89,9 +89,9 @@ POST /api/jobs {ruleCode, batchId}
 | `ReconEngineEndToEndTest` | 真 H2 + 真 SQL + 真线程池：6 类差异、幂等重跑、归因、自定义 SQL 规则、未知规则、只重跑失败分片 |
 | `BenchH2Test`（`@Tag("bench")`，默认不跑） | 百万级两张表：分片口径不影响差异、吞吐与堆占用实测，见 [benchmark.md](benchmark.md) |
 | `mcp.ReconMcpToolsTest` | 工具返回的文本是否让人和模型都读得懂：规则清单、任务摘要、差异分页、归因，以及未知规则的报错口径 |
-| `tools/mcp-smoke.mjs`（协议级冒烟，不属于 `mvn test`） | 真按 MCP 协议握手并调 6 个工具，另外断言 **stdout 只有 JSON-RPC**、stdin 关闭后进程自行退出 |
+| `tools/mcp-smoke.mjs`（协议级冒烟，不属于 `./mvnw test`） | 真按 MCP 协议握手并调 6 个工具，另外断言 **stdout 只有 JSON-RPC**、stdin 关闭后进程自行退出 |
 
-CI 配置在 `.github/workflows/build.yml`：`mvn -B test`（压测被 `surefire.excludedGroups=bench` 排除，
+CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `surefire.excludedGroups=bench` 排除，
 所以 CI 只跑秒级的 40 个用例）。
 
 > **踩过的坑：测试资源会遮住主资源目录。** 造数规则一开始放在 `src/test/resources/rules/` 下，

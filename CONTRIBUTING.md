@@ -29,7 +29,7 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar   # MCP 协议级冒烟，�
 - 提交信息用 `<type>: <中文简述>`，type 取 `feat` / `fix` / `docs` / `test` / `refactor` / `chore`，例如
   `fix: 单边缺失的严重级别应该跟随 missing 段配置`
 - PR 描述里写清三件事：**为什么改**（场景 / 复现）、**怎么改的**（关键设计取舍）、**怎么验证的**（跑了哪些命令）
-- CI 必须绿（`mvn test` + MCP 冒烟）；文档有变化时同步更新 `README.md` / `docs/`，用户可见的行为变化记到 [CHANGELOG.md](CHANGELOG.md)
+- CI 必须绿（`./mvnw test` + MCP 冒烟）；文档有变化时同步更新 `README.md` / `docs/`，用户可见的行为变化记到 [CHANGELOG.md](CHANGELOG.md)
 
 ## 报告问题
 
