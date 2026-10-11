@@ -7,6 +7,7 @@ import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.explain.ExplainService;
+import io.github.dolow.reconlens.model.ModelBuilder;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.stereotype.Component;
@@ -29,12 +30,15 @@ public class ReconMcpTools {
     private final ReconEngine engine;
     private final ReconRepository repository;
     private final ExplainService explain;
+    private final ModelBuilder modelBuilder;
 
-    public ReconMcpTools(RuleCatalog catalog, ReconEngine engine, ReconRepository repository, ExplainService explain) {
+    public ReconMcpTools(RuleCatalog catalog, ReconEngine engine, ReconRepository repository, ExplainService explain,
+                         ModelBuilder modelBuilder) {
         this.catalog = catalog;
         this.engine = engine;
         this.repository = repository;
         this.explain = explain;
+        this.modelBuilder = modelBuilder;
     }
 
     /** 列出规则库里的规则，让模型自己挑 ruleCode。 */
@@ -202,6 +206,29 @@ public class ReconMcpTools {
                     .append(" 业务键=").append(diff.bizKey())
                     .append("：").append(orNone(diff.explanation())).append('\n');
         }
+        return sb.toString();
+    }
+
+    /**
+     * 预处理：把规则声明的扫描 + 汇总提前做一次，落成模型表并注册 {@code <code>__MODEL} 规则。
+     * 适合"源数据变化慢、对账跑得频繁"的场景；代价是模型表与源表可能不同步（新鲜度）。
+     */
+    public String buildModel(String ruleCode, Integer shards, String operator) {
+        String code = blankToNull(ruleCode);
+        if (code == null) {
+            throw new IllegalArgumentException("ruleCode 不能为空，先用 recon_list_rules 看有哪些规则");
+        }
+        ModelBuilder.ModelBuild build = modelBuilder.build(code, shards, operator);
+        StringBuilder sb = new StringBuilder();
+        sb.append("已为规则 ").append(build.ruleCode()).append("（v").append(build.ruleVersion())
+                .append("）建好模型表，分片 ").append(build.shards()).append("：\n");
+        for (ModelBuilder.ModelBuild.Table table : build.tables()) {
+            sb.append("- ").append(table.side()).append(" 侧：").append(table.table())
+                    .append("，").append(table.rows()).append(" 行，构建耗时 ").append(table.buildMillis()).append(" ms\n");
+        }
+        sb.append("已注册规则 ").append(build.modelRuleCode()).append("（v").append(build.modelRuleVersion())
+                .append("），现在调 recon_run 传这个 code 就是对模型表做对账，差异口径与原规则一致；")
+                .append("源数据变化后要重新构建（再次调 recon_build_model）模型表才是新的。");
         return sb.toString();
     }
 

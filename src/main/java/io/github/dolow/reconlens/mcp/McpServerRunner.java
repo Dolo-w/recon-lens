@@ -61,7 +61,8 @@ public class McpServerRunner implements ApplicationRunner {
                 .instructions("配置化对账引擎：先 recon_list_rules 看有哪些规则，再 recon_run 跑对账（返回任务号），"
                         + "然后用 recon_list_diffs / recon_explain_job 看差异与归因。"
                         + "要换对账维度或比对字段就调 recon_define_rule 提交新版本（立即生效，不需要改代码或重启）；"
-                        + "只想临时试算可以用 recon_run 的 ruleJson 内联一份规则。")
+                        + "只想临时试算可以用 recon_run 的 ruleJson 内联一份规则。"
+                        + "如果同一份数据要反复对账，可以先用 recon_build_model 把它物化成模型表，之后每轮只读模型表。")
                 .capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
                 .tools(specifications(jsonMapper))
                 .build();
@@ -100,6 +101,23 @@ public class McpServerRunner implements ApplicationRunner {
                  "required":["ruleBody"],"additionalProperties":false}
                 """,
                 a -> tools.defineRule(text(a, "ruleBody", true), text(a, "operator", false))));
+
+        specs.add(tool(jsonMapper, "recon_build_model",
+                "预处理物化：按规则声明的粒度和过滤条件把两侧数据提前汇总/窄化成模型表（带 biz_key 索引，不建主键 —— 重复业务键要留给引擎报 DUPLICATE_KEY），并注册一条读模型表的模型规则（规则 code 加后缀 __MODEL）。"
+                        + "适合源数据变化慢、对账跑得频繁的场景（1000 万行实测每轮 21.5s → 之后 7.8~15.3ms，见 docs/benchmark.md §3.10）；"
+                        + "代价是模型表与源表可能不同步，源数据变了要重建。",
+                """
+                {"type":"object","properties":{
+                  "ruleCode":{"type":"string","description":"规则编码，取自 recon_list_rules"},
+                  "shards":{"type":"integer","description":"可选：模型表分片数（1~1024），默认沿用规则的分片数。两侧用同一个桶函数，保证同一个业务键落在同一片"},
+                  "operator":{"type":"string","description":"可选：操作人标识，记入模型表元信息"}},
+                 "required":["ruleCode"],"additionalProperties":false}
+                """,
+                a -> {
+                    int shards = (int) integer(a, "shards", 0, false);
+                    return tools.buildModel(text(a, "ruleCode", true), shards <= 0 ? null : shards,
+                            text(a, "operator", false));
+                }));
 
         specs.add(tool(jsonMapper, "recon_run",
                 "按规则跑一次对账（同步等待完成），返回任务摘要与差异分类；任务号可用于后续查明细和归因。",

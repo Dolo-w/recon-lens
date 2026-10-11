@@ -216,6 +216,10 @@ shard:
 > 索引用不上，每个分片都得全表扫一遍 —— 百万级数据下 8 分片 37.4 秒、1 分片 4.3 秒，**分片越多越慢**，
 > 但差异结果完全一致。要让分片真的提速，先在库里把分片桶做成索引列（MySQL 8 函数索引
 > `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引），规则里写 `shard_bucket = {index}`。
+> **这条现在有现成实现**：MCP `recon_build_model` / `POST /api/models/{ruleCode}` 会按规则粒度把数据物化成模型表，
+> 桶列是它建的生成列 `biz_key_bucket`（带索引），自动注册的 `<CODE>__MODEL` 规则两侧写
+> `biz_key_bucket = {index} AND biz_key_bucket < {shards}`（两侧同一个桶函数，同一个业务键必然落同一片；
+> `< {shards}` 只是桶号的天然上界）。1000 万行宽表 21.47 s → 7.8 ms，见 [mcp.md](mcp.md) 与 benchmark.md §3.10。
 > 当前 DSL 只有 `{index}` / `{shards}` 两个占位符、所有分片共用一段 where，因此还表达不了
 > "每个分片一段连续键范围"这种最自然的切法（`shard.strategy: RANGE` 在后续计划里）。
 

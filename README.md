@@ -73,7 +73,7 @@ recon-lens 把这件事拆成四件确定的事：
 flowchart LR
     R[rules/*.yml] -->|RuleParser 校验，首次导入 v1| CAT[(recon_rule<br/>规则库 / 版本 / 快照)]
     API[POST /api/jobs<br/>POST · DELETE /api/rules] --> CAT
-    AGENT[Agent / Claude Desktop] -->|stdio JSON-RPC| MCP[MCP server<br/>7 个工具]
+    AGENT[Agent / Claude Desktop] -->|stdio JSON-RPC| MCP[MCP server<br/>8 个工具]
     MCP --> CAT
     MCP --> ENG
     MCP --> DB
@@ -243,6 +243,8 @@ curl -X POST http://localhost:8080/api/rules \
 | GET | `/api/rules/{code}` | 规则详情 + 版本历史 |
 | POST | `/api/rules` | 提交一版新规则（`Content-Type: application/json` 或 `application/yaml`，`X-Operator` 记操作人） |
 | DELETE | `/api/rules/{code}` | 停用规则（版本保留，历史任务仍能用快照重跑） |
+| POST | `/api/models/{ruleCode}?shards=4&operator=ops` | 预处理物化：把大表按该规则的粒度算成模型表，并注册 `<CODE>__MODEL` 规则（等价于 MCP `recon_build_model`） |
+| GET | `/api/models` | 已物化的模型表清单（规则 / 版本 / 粒度 / 行数 / 构建耗时 / 构建时间） |
 
 ## 用 MCP 让 Agent 直接调对账
 
@@ -252,12 +254,14 @@ REST 是给人和系统的，MCP 是给 Agent 的：模型自己决定调 `recon
 
 ```bash
 ./mvnw -DskipTests package
-java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp     # stdio，7 个工具
+java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp     # stdio，8 个工具
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装客户端也能验证
 ```
 
-工具：`recon_list_rules` / `recon_define_rule` / `recon_run` / `recon_job_summary` / `recon_list_diffs` / `recon_explain_diff` / `recon_explain_job`。
-其中 `recon_define_rule` 让 Agent 自己提交一版新规则（换对账维度、换比对字段，立即生效），`recon_run` 的 `ruleJson` 参数可以内联一份规则临时试算。
+工具：`recon_list_rules` / `recon_define_rule` / `recon_run` / `recon_build_model` / `recon_job_summary` / `recon_list_diffs` / `recon_explain_diff` / `recon_explain_job`。
+其中 `recon_define_rule` 让 Agent 自己提交一版新规则（换对账维度、换比对字段，立即生效），`recon_run` 的 `ruleJson` 参数可以内联一份规则临时试算，
+`recon_build_model` 把大表按规则粒度提前物化成模型表（之后每轮只读模型表，实测 21.47 s → 7.8 ms，见 [docs/benchmark.md](docs/benchmark.md) §3.10）；
+注意它只对"每轮都要重付的源侧扫描 + 汇总"有收益：汇总口径的规则在真实 MySQL 200 万行上实测 3.6 s → 0.16 s，而纯行级明细规则物化后行数不变，建一次 28.6 s、之后每轮还更慢（5 s → 12 s），**这种规则不要建模型表**（§3.10.2）。
 客户端配置、真实会话输出、以及 stdio 传输的两个坑（logback 状态输出会污染 stdout、2.x 起 SDK 的制品拆分）
 见 [docs/mcp.md](docs/mcp.md)。
 
@@ -339,8 +343,9 @@ src/main/java/io/github/dolow/reconlens/
 ├── engine/     归并匹配、容差比较、分片规划、并行编排、流式游标
 ├── store/      JdbcTemplate 持久化（任务 / 分片 / 差异 / 规则版本）
 ├── explain/    归因：规则模板 + 大模型，统一入口 ExplainService
-├── web/        REST 接口（对账任务 + 规则 CRUD）
-├── mcp/        MCP server（stdio）：把对账能力暴露成 Agent 可调用的 7 个工具
+├── web/        REST 接口（对账任务 + 规则 CRUD + 模型表构建）
+├── model/      预处理物化：把大表按规则粒度提前算成模型表（影子表切换，MySQL / H2 方言只在这里）
+├── mcp/        MCP server（stdio）：把对账能力暴露成 Agent 可调用的 8 个工具
 └── bootstrap/  启动演示
 docs/           架构说明、规则 DSL 手册、MCP 接入、压测方法
 tools/          造数脚本、MCP stdio 冒烟客户端
@@ -352,6 +357,8 @@ tools/          造数脚本、MCP stdio 冒烟客户端
 - [ ] `shard.strategy: RANGE`：按业务键范围切分。当前 where 模板只有 `{index}` / `{shards}` 两个占位符，
       所有分片共用一段 where，表达不了"每个分片一段连续键"，而键范围才是真正走索引的切法 ——
       这个缺口是这次百万级压测逼出来的
+- [ ] 模型表的刷新策略：现在源数据变了要手动再调一次 `recon_build_model`（全量重算 + 影子表切换），
+      `recon_model` 里只记了 `created_at` 能看新鲜度，还没有"定时刷新 / 增量刷新 / 过期自动失效"
 - [ ] 差异结果导出（CSV / 飞书表格）与按批次对比
 - [ ] 规则的多环境发布（草稿 → 审核 → 生效）与操作审计
 - [ ] 归因结果回写人工标注，做一个"差异原因"知识库
@@ -359,7 +366,7 @@ tools/          造数脚本、MCP stdio 冒烟客户端
 ## 开发与贡献
 
 ```bash
-./mvnw test                                             # 68 个用例，CI 跑的就是这条
+./mvnw test                                             # 79 个用例，CI 跑的就是这条
 ./mvnw -DskipTests package                              # 产出 target/recon-lens-0.1.0.jar
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟（Node 18+）
 ```

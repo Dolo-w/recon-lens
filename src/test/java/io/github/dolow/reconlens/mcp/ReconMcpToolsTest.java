@@ -27,7 +27,8 @@ class ReconMcpToolsTest {
     void listRulesTellsTheAgentWhatItCanRun() {
         String text = tools.listRules();
 
-        assertThat(text).contains("规则库里有 4 条对账规则")
+        // 不断言精确条数：测试之间共享同一个 H2 实例（DB_CLOSE_DELAY=-1），别的用例也会往规则库里加规则
+        assertThat(text).containsPattern("规则库里有 \\d+ 条对账规则")
                 .contains("BILL_VS_SETTLE").contains("CUSTOMER_SUM_RECON")
                 .contains("RESOURCE_VS_BILL").contains("CUSTOMER_STATUS_RECON")
                 .contains("左侧：").contains("右侧：")

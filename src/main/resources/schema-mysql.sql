@@ -73,6 +73,26 @@ CREATE TABLE IF NOT EXISTS recon_rule (
   UNIQUE KEY uk_rule_code_version (code, version)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ============ 预处理模型表：把"每次对账都要重做的扫描 + 汇总"提前做一次 ============
+-- 模型表本身（recon_model_<规则>_l/r）由 recon_build_model 动态建，这里只登记元信息。
+-- dimension/aggregated 记的是构建时用的粒度，row_count/build_ms 是实测成本，方便对比与排查新鲜度。
+CREATE TABLE IF NOT EXISTS recon_model (
+  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+  rule_code       VARCHAR(64)   NOT NULL,
+  rule_version    INT           NOT NULL,
+  model_rule_code VARCHAR(64)   NOT NULL,
+  side            VARCHAR(8)    NOT NULL,
+  model_table     VARCHAR(128)  NOT NULL,
+  dimension       VARCHAR(512),
+  aggregated      BOOLEAN       NOT NULL,
+  shards          INT           NOT NULL,
+  row_count       BIGINT        NOT NULL,
+  build_ms        BIGINT        NOT NULL,
+  created_by      VARCHAR(64),
+  created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_model_rule (rule_code, side)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ============ 演示数据表（只有 demo/联调需要；生产上就是被对账的业务表）============
 CREATE TABLE IF NOT EXISTS bill_left (
   id          BIGINT        PRIMARY KEY,

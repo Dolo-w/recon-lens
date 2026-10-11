@@ -23,8 +23,10 @@ io.github.dolow.reconlens
 │                RuleRepository：recon_rule 规则表读写与版本号分配（JdbcTemplate）
 ├── explain/     DiffExplainer 接口 + RuleBasedExplainer（离线模板）+ LlmDiffExplainer（OpenAI 兼容）
 │                ExplainService 是统一入口，负责"大模型优先、模板兜底、绝不留空"
-├── web/         JobController / DiffController / RuleController
-├── mcp/         ReconMcpTools（对账能力 → 7 个 MCP 工具）+ McpServerRunner（stdio 会话）
+├── web/         JobController / DiffController / RuleController / ModelController
+├── model/       预处理物化：ModelBuilder（影子表 → 改名切换 → 登记 recon_model）、ModelDdl（方言差异只在这里）、
+│                ModelRuleWriter（把原规则改写成读模型表的 `<CODE>__MODEL` 规则）
+├── mcp/         ReconMcpTools（对账能力 → 8 个 MCP 工具）+ McpServerRunner（stdio 会话）
 │                只在 --spring.profiles.active=mcp 下启动，和 REST 共用同一套 service
 └── bootstrap/   DemoRunner：启动时跑一遍演示规则并把报告打到日志
 ```
@@ -110,11 +112,13 @@ POST /api/jobs {ruleCode, batchId}                 （也可用 rule / ruleYaml 
 | `web.RuleApiTest` | 规则接口（MockMvc）：YAML/JSON 提交、版本历史、停用、400/404 口径、任务内联规则 |
 | `BenchH2Test`（`@Tag("bench")`，默认不跑） | 百万级两张表：分片口径不影响差异、吞吐与堆占用实测，见 [benchmark.md](benchmark.md) |
 | `mcp.ReconMcpToolsTest` | 工具返回的文本是否让人和模型都读得懂：规则清单、任务摘要、差异分页、归因，以及未知规则的报错口径 |
+| `model.ModelBuilderTest` | 模型表不只是"建出来"：读模型表跑出来的差异分类/行数与原规则逐条一致（行级规则的重复键、聚合规则的维度粒度都覆盖），重建走影子表切换 |
+| `web.ModelApiTest` | 物化的 REST 入口：建模型表 → 用生成的 `<CODE>__MODEL` 规则发起对账（差异分类计数与原规则一致）→ 回看模型表清单；未知规则与越界 `shards` 是 400 不是 500 |
 | `MermaidDocsTest` | 对外渲染的 markdown 里的 ```` ```mermaid ```` 块不含花括号（GitHub 会把标签里的 `{` 当 diamond 起始符，整张图渲染失败），并断言确实扫到了图 |
-| `tools/mcp-smoke.mjs`（协议级冒烟，不属于 `./mvnw test`） | 真按 MCP 协议握手并调 6 个工具（`recon_define_rule` 只在 `tools/list` 里校验声明，不会改规则库），另外断言 **stdout 只有 JSON-RPC**、stdin 关闭后进程自行退出 |
+| `tools/mcp-smoke.mjs`（协议级冒烟，不属于 `./mvnw test`） | 真按 MCP 协议握手并调 8 次工具（覆盖 7 个工具；`recon_define_rule` 只在 `tools/list` 里校验声明，不会改规则库），另外断言 **stdout 只有 JSON-RPC**、stdin 关闭后进程自行退出 |
 
 CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `surefire.excludedGroups=bench` 排除，
-所以 CI 只跑秒级的 68 个用例）。
+所以 CI 只跑秒级的 79 个用例）。
 
 > **踩过的坑：测试资源会遮住主资源目录。** 造数规则一开始放在 `src/test/resources/rules/` 下，
 > 结果 `classpath:rules/` 只解析到了 `test-classes/rules`（类路径里 test-classes 排在 classes 前面），
@@ -131,7 +135,8 @@ CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `suref
 
 - 检查点粒度是分片，不是分片内部的游标位置：一个分片失败后从头重算（因为结果幂等，重算比续跑更简单可靠）。
 - 分片谓词若写成"列上套函数"（`MOD(SUBSTRING(...))`）就用不到索引，每个分片全表扫一遍；
-  实测 8 分片比 1 分片慢 8.6 倍（[benchmark.md](benchmark.md)）。要提速得先把分片桶落成索引列。
+  实测 8 分片比 1 分片慢 8.6 倍（[benchmark.md](benchmark.md)）。要提速得先把分片桶落成索引列 ——
+  `recon_build_model` 就是自动化这条路：模型表把桶落成生成列 + 索引，代价是一次预处理，以及源数据变了要重建。
 - 规则以数据库为准、支持热更新：改规则是往 `recon_rule` 追加一个新版本（REST `POST /api/rules` 或 MCP `recon_define_rule`），
   立即对后续任务生效，不用重启。`classpath` / `file:` 下的 yml（`recon.rules-location`）只在规则库里还没有该 `code` 时
   导入一次 v1（受 `recon.seed-rules` 开关控制），之后不再覆盖；`RuleCatalog` 对已解析规则按 `code` 做缓存，定义或下线时失效。

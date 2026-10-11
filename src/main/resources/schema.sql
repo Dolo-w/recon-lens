@@ -67,6 +67,26 @@ CREATE TABLE IF NOT EXISTS recon_rule (
 -- 规则版本：同一个 code 的每一版都留档，任务表把生效版本钉住，重跑才能复现当时的语义
 CREATE UNIQUE INDEX IF NOT EXISTS uk_rule_code_version ON recon_rule (code, version);
 
+-- ============ 预处理模型表：把"每次对账都要重做的扫描 + 汇总"提前做一次 ============
+-- 模型表本身（recon_model_<规则>_l/r）由 recon_build_model 动态建，这里只登记元信息。
+-- dimension/aggregated 记的是构建时用的粒度，row_count/build_ms 是实测成本，方便对比与排查新鲜度。
+CREATE TABLE IF NOT EXISTS recon_model (
+  id              BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  rule_code       VARCHAR(64)   NOT NULL,
+  rule_version    INT           NOT NULL,
+  model_rule_code VARCHAR(64)   NOT NULL,
+  side            VARCHAR(8)    NOT NULL,
+  model_table     VARCHAR(128)  NOT NULL,
+  dimension       VARCHAR(512),
+  aggregated      BOOLEAN       NOT NULL,
+  shards          INT           NOT NULL,
+  row_count       BIGINT        NOT NULL,
+  build_ms        BIGINT        NOT NULL,
+  created_by      VARCHAR(64),
+  created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_model_rule ON recon_model (rule_code, side);
+
 -- ============ 演示数据：账单（我方）与结算（对方）============
 CREATE TABLE IF NOT EXISTS bill_left (
   id          BIGINT        PRIMARY KEY,

@@ -91,10 +91,12 @@ try {
   const listed = await send('tools/list', {});
   const names = listed.result.tools.map((tool) => tool.name);
   console.log('tools/list -> ' + names.join(', '));
-  const expected = ['recon_list_rules', 'recon_define_rule', 'recon_run', 'recon_job_summary', 'recon_list_diffs', 'recon_explain_diff', 'recon_explain_job'];
-  check(expected.every((name) => names.includes(name)), '七个工具都在 tools/list 里');
+  const expected = ['recon_list_rules', 'recon_define_rule', 'recon_run', 'recon_build_model', 'recon_job_summary', 'recon_list_diffs', 'recon_explain_diff', 'recon_explain_job'];
+  check(expected.every((name) => names.includes(name)), '八个工具都在 tools/list 里');
   const defineTool = listed.result.tools.find((tool) => tool.name === 'recon_define_rule');
   check(defineTool?.inputSchema?.required?.includes('ruleBody'), 'recon_define_rule 的 inputSchema 声明了必填 ruleBody');
+  const modelTool = listed.result.tools.find((tool) => tool.name === 'recon_build_model');
+  check(modelTool?.inputSchema?.required?.includes('ruleCode'), 'recon_build_model 的 inputSchema 声明了必填 ruleCode');
   const runTool = listed.result.tools.find((tool) => tool.name === 'recon_run');
   const runProps = Object.keys(runTool?.inputSchema?.properties ?? {});
   check(['ruleCode', 'ruleJson', 'batchId', 'remark'].every((name) => runProps.includes(name)),
@@ -120,6 +122,15 @@ try {
 
   const one = await call('recon_explain_diff', { diffId });
   check(!one.isError && one.text.includes('归因'), 'recon_explain_diff 能解释单条差异');
+
+  // 预处理物化：建模型表 → 用生成的 <CODE>__MODEL 规则再跑一次，差异必须逐条一致
+  const built = await call('recon_build_model', { ruleCode: 'BILL_VS_SETTLE', shards: 4, operator: 'mcp-smoke' });
+  check(!built.isError && built.text.includes('已注册规则 BILL_VS_SETTLE__MODEL'), 'recon_build_model 建表并注册了模型规则');
+  const modelled = await call('recon_run', { ruleCode: 'BILL_VS_SETTLE__MODEL', batchId: 'mcp-smoke-model', remark: '读模型表' });
+  const classification = (text) => (text.match(/差异分类：(.*)/) || [])[1] ?? '';
+  check(classification(modelled.text) !== '' && classification(modelled.text) === classification(run.text),
+    '读模型表跑出来的差异分类与原始规则一致：' + classification(modelled.text));
+  check(modelled.text.includes('扫描 左=20 右=21'), '读模型表时两侧行数不变（左=20 右=21）');
 
   const badRule = await call('recon_run', { ruleCode: 'NOT_A_RULE' });
   check(badRule.isError && badRule.text.includes('未找到规则'), '未知规则被包成 isError 而不是断开连接');
