@@ -246,8 +246,66 @@ min/max，再均分边界）记在 README 的后续计划里 —— 这个限制
 | 表达式分组的聚合 | `GROUP BY` 纯列 + 同列 `ORDER BY`（有索引）**13.72 s**，不落临时表 | 表达式键 G≈15 万 **7.37 s**、G≈100 万 **48.96 s**、G≈1000 万 **52.62 s**（都落临时表）；把 `temptable_max_ram` 从 1 GB 压到 128 MB 后 G≈100 万涨到 **69.82 s** |
 | 8 分片各片 `COUNT(*)` | 函数谓词 8 片：1.22 ~ 2.77 s/片 | 生成列桶 + 索引后 **0.145 ~ 0.160 s/片**（8~12 倍）；分片均衡度 max/avg = **1.040** |
 | 分区表的裁剪 | 裁到单月 + `ORDER BY order_no`：**2.10 s**（只扫 708,163 行） | 不裁剪：**49.95 s**；同样的"单月"谓词打在非分区表上是 **26.05 s**（全表扫 1000 万行） |
-| 数据倾斜 | 值域等宽 8 段：最重段（868 万行）**51.39 s**，最轻段 **0.88 s** | `MOD(tenant_id,8)` 哈希桶 max/avg = **4.149**；按采样定边界在本例中失效（8 个分位点几乎全落在同一个 `tenant_id` 上：`b1..b7 = 1,1,1,2,2,3,170`） |
-| 表达式替换的边界 | `MOD(CAST(SUBSTRING(order_no,10,2) **AS UNSIGNED**),8)` 与生成列定义一致 → `type=ref, key=idx_shard_bucket, rows=2,513,520`：**1.16 s** | 只把类型换成 **`AS SIGNED`**：`type=index, key=idx_order_no, rows=9,744,530`：**1.58 s** |
+| 数据倾斜 | 值域等宽 8 段：最重段（868 万行）**51.39 s**，最轻段 **0.88 s** | `MOD(tenant_id,8)` 哈希桶 max/avg = **4.149**；按采样定边界在本例中失效（8 个分位点几乎全落在同一个 `tenant_id` 上：`b1..b7 = 1,1,1,2,2,3,170`）；按这几个分位点切出的 8 段真实行数是 4,999,999 / 0 / 0 / 2,000,000 / 0 / 1,000,000 / 750,021 / 1,249,980 —— max/avg = **4.00** 且留下 **3 个空段**，最重段取 5M 行 + `ORDER BY order_no` 仍要单独跑 **12.01 s**（`18_s6b_sampled.sql`） |
+| 表达式替换的边界 | `MOD(CAST(SUBSTRING(order_no,10,2) **AS UNSIGNED**),8)` 与生成列定义一致 → `type=ref, key=idx_shard_bucket, rows=2,513,520`：**1.16 s** | 只把类型换成 **`AS SIGNED`**：`type=index, key=idx_order_no, rows=9,744,530`：**1.58 s**（计数器上这一格差 **7.7 倍读放大**：命中桶列时 `Innodb_rows_read` 只涨 1,300,000，替换失败时要涨 10,000,000，见 3.8） |
+
+### 3.8 附：状态计数器的可归因增量
+
+`EXPLAIN ANALYZE` 回答"每个算子花了多久"，**状态计数器**回答"读了多少行、排了多少行、落了几次临时表"。两者放在一起，才能把"为什么慢"落到机制上（这一节就是 3.1~3.7 各条结论的计数器证据）。
+
+读法（很重要）：`SHOW GLOBAL STATUS` 是**累计值**，`FLUSH STATUS` 只清会话计数器 ⇒ 只有"两张状态表相减"才是某条语句的增量。而每个场景文件的头部都跑过 `ALTER TABLE ADD INDEX` / `ANALYZE TABLE` / `CREATE TABLE ... SELECT`，这些开销会落进该文件的**第一张**状态表，首块因此不可归因。所以这一节的数字来自两处：
+
+- `24_counter_probe.sql`：文件内**没有任何 DDL**，把各场景的"首块"重测一遍，逐块可归因（跑法见下面的复现清单）；
+- 各场景文件**第 2 块起**的差值（两块之间只有一条 `EXPLAIN ANALYZE`）。
+
+两点读数约定：每块都会固定 `Created_tmp_tables +1`（`EXPLAIN`/`SHOW` 自身的基线噪声），所以下面表里只写**减掉噪声后**的值，判别落盘看 `Created_tmp_disk_tables`；`Innodb_rows_read` 是 InnoDB 交给上层的行数（回表、索引扫描都算），它比墙钟稳定，适合做归因。
+
+**排序与投影**（同一张 1000 万行表）：
+
+| 口径 | 根算子 | ΔInnodb_rows_read | ΔSort_rows | ΔSort_merge_passes | 墙钟 |
+| --- | --- | --- | --- | --- | --- |
+| `ORDER BY id`（物理有序） | `Index scan on t50 using PRIMARY` | 10,000,000 | **0** | 0 | 11.24 s |
+| 覆盖索引 `ORDER BY order_no` 取 3 列 | `Covering index scan on t50 using idx_cov` | 10,000,000 | **0** | 0 | 1.42 s |
+| 同上但多取一列 `fee`（覆盖被破坏） | `Sort: t50.order_no` ← `Table scan` | 10,000,000 | 10,000,000 | 645 | 7.79 s |
+| 窄行 `ORDER BY order_no` 取 3 列（无覆盖索引） | `Sort: t50.order_no` ← `Table scan` | 10,000,000 | 10,000,000 | 581 | 8.32 s |
+| `SELECT *`（50 列）同一个排序键 | `Sort: t50.order_no` ← `Table scan` | 10,000,000 | 10,000,000 | **2,651** | 37.74 s |
+| 派生表达式键 `concat(customer_id,'\|',status)` | `Sort: concat(...)` ← `Table scan` | 10,000,000 | 10,000,000 | **2,666** | 56.73 s |
+
+读法：**读的行数完全一样，差别全在 `Sort_merge_passes`**。同样排 1000 万行，窄行 581 趟归并、50 列宽行 2,651 趟、派生表达式 2,666 趟 —— 排序缓冲按行宽切，行越宽每趟能装的行越少，归并趟数就上去了。这也是"投影宽度会换掉执行计划"（3.4）在计数器上的样子：覆盖索引那一行 `ΔSort_rows = 0`，排序压根没发生。
+
+**临时表与分组基数**（`GROUP BY` 表达式键，G = 分组基数）：
+
+| 口径 | ΔCreated_tmp_tables | ΔCreated_tmp_disk_tables | ΔSort_rows | ΔInnodb_rows_read | 墙钟 |
+| --- | --- | --- | --- | --- | --- |
+| G≈15 万，**键有索引**（流式分组） | 0 | 0 | **0** | 10,000,000 | 13.56 s |
+| G≈15 万（表达式键） | 1 | 0 | 50,000 | 10,000,000 | 7.37 s |
+| G≈100 万（表达式键） | 1 | **1** | 1,000,000 | **20,000,000** | 48.96 s |
+| G≈1000 万（表达式键） | 1 | **1** | 10,000,000 | **20,000,000** | 52.62 s |
+| G≈100 万，`temptable_max_ram` 压到 128 MB | 1 | **1** | 1,000,000 | 20,000,000 | 69.82 s |
+| G≈15 万，同样 128 MB 限额 | 1 | 0 | 50,000 | 10,000,000 | — |
+
+读法：键上有索引时是**流式分组**（临时表 0、排序 0）；换成表达式键就必须走临时表，`G` 一过内存限额就 `Created_tmp_disk_tables = 1`（落盘），`Innodb_rows_read` 也从 10M 变 20M —— 表达式键让优化器放弃索引，变成"全表扫一遍、临时表再读一遍"。把 `temptable_max_ram` 从 1 GB 压到 128 MB 并没有多出一次落盘（都还是 1 次），墙钟却从 48.96 s 涨到 69.82 s。
+
+**分片与分区裁剪**：
+
+| 口径 | 根算子 | ΔInnodb_rows_read | ΔSort_rows | 墙钟 |
+| --- | --- | --- | --- | --- |
+| 单分片 `COUNT(*)`，函数谓词 `AS UNSIGNED`（与生成列定义一致） | `Aggregate` ← `Index lookup ... idx_shard_bucket` | **1,300,000** | 0 | 1.49 s |
+| 同一查询改成 `AS SIGNED`（同长度、类型不同 ⇒ 替换失败） | `Aggregate` ← `Filter` ← `Covering index scan ... idx_order_no` | **10,000,000** | 0 | 1.79 s |
+| 桶列单分片取数：`WHERE shard_bucket = 0 ORDER BY order_no` | `Sort` ← `Index lookup ... idx_shard_bucket` | 1,300,000 | 1,300,000 | 5.31 s |
+| 引擎真机：建分片局部覆盖索引后的分片取数 | `Using index`（无 filesort） | **260,000** | 0 | 6.37 s 级 |
+| 分区表裁剪到单月 + `ORDER BY order_no` | `Sort` ← `Filter` ← `Table scan on t50p` | **708,163** | 656,475 | 2.07 s |
+| 同一个"单月"谓词打在非分区表 `t50` 上 | `Sort` ← `Filter` ← `Table scan on t50` | **10,000,000** | 656,475 | 12.95 s |
+
+读法两句话：**分区裁剪不是"跑得更快"，是"读得更少"** —— 最后两行的排序量一模一样（656,475 行），`Innodb_rows_read` 是 708,163 vs 10,000,000（14.1 倍）。**表达式替换失败也不是"多算一点"** —— 输出都是 130 万行，`AS SIGNED` 必须先扫完 1000 万行的 `idx_order_no` 再逐行 `Filter`（7.7 倍读放大）；注意那 10M 行是**覆盖索引扫描**而不是全表读，所以墙钟只差 0.3 s（1.49 s vs 1.79 s），差距在 IO 上，冷缓存或小缓冲池下会放大。
+
+**不能归因的块**（写出来是为了让数字可复核）：
+
+- `S4-2` / `S4-3`：块内各有 8 条 `EXPLAIN ANALYZE`（8 个分片），两块之间不止一条语句；
+- `S4-5`：它与上一张状态表之间隔着 `S4-4` 的两条普通 `SELECT`（按桶分组的全索引扫，2 × 1000 万行），那一行 21,300,000 里绝大部分是 S4-4 的开销（`S4-6` 与 `S4-5` 之间只有一条语句，干净：1,300,000）；
+- `17_s4b_substitution.sql`：`S4b-2` 是物化生成列 + 建索引的 DDL 且没有状态表，之后各块整体错位一格 ⇒ 该文件的**计时**结论（1.16 s vs 1.58 s）保留，**计数器**改用本节的 `PROBE-8/9`；
+- 每个场景文件的**首块**：头部 DDL 的开销混在里面（`24_counter_probe.sql` 复测替代）；
+- `16_s6_skew.sql`：本来是纯计时文件，块里没有 `SHOW GLOBAL STATUS`，因此没有计数器。
 
 ### 复现清单
 
@@ -259,6 +317,9 @@ min/max，再均分边界）记在 README 的后续计划里 —— 这个限制
 .\tools\mysql-bench\run_all.ps1
 .\tools\mysql-bench\run.ps1 -File 14_s4_shard.sql -Tag s4      # 单独跑某个场景
 
+# 2b) 状态计数器（3.8）：这个文件里没有任何 DDL，逐块可归因；约 1~2 分钟
+.\tools\mysql-bench\run.ps1 -File 24_counter_probe.sql -Tag 24_probe
+
 # 3) 引擎真机对账：自建 jar → 起应用（-Xmx256m）→ 跑 4 个口径 → 打印"连接饥饿证据"
 .\tools\mysql-bench\_s7_rerun.ps1                                              # 池 24（默认）
 .\tools\mysql-bench\_s7_rerun.ps1 -Pool 16 -Cases S7_NARROW_FUNC8,S7_NARROW_BUCKET8   # 复现 3.5
@@ -267,6 +328,9 @@ min/max，再均分边界）记在 README 的后续计划里 —— 这个限制
 - 每个分片扫了多少行在 `recon_shard`（`scanned_left / scanned_right / matched_rows / diff_rows`），
   差异明细在 `recon_diff`，任务状态在 `recon_job`；四个口径跑的都是同一份数据。
 - 覆盖索引实验：`22_s7_cover_index.sql`；引擎真实 SQL 的计划：`23_s7_engine_sql_plans.sql`。
+- 读计数器：`FLUSH STATUS` 只清会话计数器，所以要把日志里**相邻两张** `SHOW GLOBAL STATUS` 相减；
+  场景文件头部的 `ALTER/ANALYZE/CTAS` 会污染首块，首块用 `24_counter_probe.sql` 复测。
+  批量提取：`python tools/mysql-bench/extract_counters.py`（只输出可归因块，并自动减掉每块固定 +1 的噪声）。
 - **量级参考的小心话**：同一配置连跑 4 次的波动在 ±10% 以内，但隔一轮环境（比如刚建完索引、
   缓冲池被换过一轮）会有 ±25% 的系统性漂移。所以这一节只把**2 倍以上**的差距当结论，
   个位数百分比不当结论；`Bucket8` 建索引前后那组是同一脚本内的前后对照，不受这个漂移影响。

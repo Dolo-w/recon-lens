@@ -42,7 +42,7 @@ JDK 17、Node 18+，`-Xmx256m`。绝对耗时只对这台机器有意义，**看
 3. `mysql.exe` 默认取 PATH 上的；不在 PATH 上就加 `-MysqlExe D:\...\bin\mysql.exe`，或设环境变量
    `MYSQL_EXE`。连接默认 `127.0.0.1:3307`、`root/root`、库 `bench`，可用 `-DbHost/-Port/-User/-DbPassword` 改。
 
-## 二、跑纯 SQL 场景（对应 docs/benchmark.md 3.7）
+## 二、跑纯 SQL 场景（对应 docs/benchmark.md 3.7~3.8）
 
 ```powershell
 .\run_all.ps1                     # 依次跑 10~16，单线程，互不抢 IO；每步一份日志
@@ -53,7 +53,7 @@ JDK 17、Node 18+，`-Xmx256m`。绝对耗时只对这台机器有意义，**看
 | 脚本 | 回答的问题 |
 | --- | --- |
 | `10_s1a_sort_no_index.sql` | 还没有二级索引时，排序/宽行/派生键的执行计划与耗时（`ORDER BY id` 10.75s vs 派生表达式键 56.73s） |
-| `11_s2a_order_index.sql` | 给排序键建普通索引：走索引序不排序了，但 `SELECT *` 变成千万次回表 |
+| `11_s2a_order_index.sql` | 给排序键建普通索引的**反面教材**：优化器仍然选 `Table scan + Sort`（7.09s），普通索引没消掉排序；消掉排序的是覆盖索引（见下一行） |
 | `12_s2b_cover_index.sql` | 覆盖索引：同一查询、只是把要比的列也放进索引（7.09s → 2.19s） |
 | `13_s3_agg.sql` | 聚合口径：`GROUP BY` 表达式键，分组基数 15 万 / 100 万 / 1000 万，临时表与落盘怎么变 |
 | `14_s4_shard.sql` | 分片谓词：`MOD(CAST(SUBSTRING(...)))` 函数谓词 vs 生成列桶 + 索引 |
@@ -62,6 +62,12 @@ JDK 17、Node 18+，`-Xmx256m`。绝对耗时只对这台机器有意义，**看
 | `17_s4b_substitution.sql` | 表达式等价替换：`CAST(... AS INT / SIGNED / UNSIGNED)` 哪个能命中生成列索引 |
 | `18_s6b_sampled.sql` | 采样边界的真实落地（重尾数据下 8 段行数差到 170 倍） |
 | `23_s7_engine_sql_plans.sql` | 把引擎**真正发出去**的 SQL 原样 `EXPLAIN ANALYZE`（判明派生表外包一层会让函数谓词失效） |
+| `24_counter_probe.sql` | 状态计数器补测：`SHOW GLOBAL STATUS` 是累计值，场景文件头部的 `ALTER/ANALYZE` 会污染该文件首块，这个文件没有任何 DDL，逐块可归因 |
+
+> 计数器怎么读：`FLUSH STATUS` 只清会话计数器，所以「两张 `SHOW GLOBAL STATUS` 之间差多少」才是那条语句的开销。
+> `24_counter_probe.sql` 就是为了给场景文件的首块补一份干净的增量（跑法：`.\run.ps1 -File 24_counter_probe.sql -Tag 24_probe`）。
+> 批量提取：`python extract_counters.py`（默认读本目录 `out\`，只输出「两块之间恰好一条 `EXPLAIN ANALYZE`」的可归因块，
+> 并自动减掉每块固定 +1 的 `Created_tmp_tables` 基线噪声；日志目录可以当第一个参数传）。
 
 ## 三、跑引擎真机对账（对应 docs/benchmark.md 3.1~3.5）
 
