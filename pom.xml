@@ -48,7 +48,7 @@
   <properties>
     <java.version>17</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <mcp.sdk.version>0.18.4</mcp.sdk.version>
+    <mcp.sdk.version>2.0.1</mcp.sdk.version>
     <!-- 压测用例（@Tag("bench")）默认不跑：mvn test 保持秒级；要跑见 docs/benchmark.md -->
     <surefire.excludedGroups>bench</surefire.excludedGroups>
     <surefire.argLine>-Dfile.encoding=UTF-8</surefire.argLine>
