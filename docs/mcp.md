@@ -3,9 +3,9 @@
 REST 接口是给"人"和"调用方系统"用的：你得知道 URL、参数、返回值长什么样。
 但运营问的那句话是**"这批账单和结算到底差在哪、为什么差"**——这种问题现在多半是丢给 Agent 的。
 MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模型自己决定调 `recon_run` 跑对账、
-调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因，全程不用人拼 URL。
+调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因、调 `recon_define_rule` 换一套对账维度，全程不用人拼 URL。
 
-recon-lens 暴露 6 个工具，**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService`），
+recon-lens 暴露 7 个工具，**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService`），
 所以两条路的结果必然一致，不存在两套逻辑。
 
 ## 启动
@@ -46,27 +46,88 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 
 | 工具 | 入参 | 返回 |
 | --- | --- | --- |
-| `recon_list_rules` | 无 | 已加载规则的编码、两侧数据源、比对字段、分片与重试配置 |
-| `recon_run` | `ruleCode`（必填）、`batchId`、`remark` | 同步跑完一次对账，返回任务号、扫描量、差异分类、分片明细 |
-| `recon_job_summary` | `jobId` | 任务状态 / 分片完成度 / 差异分类与级别 / 分片明细 / 错误原因 / 耗时 |
+| `recon_list_rules` | 无 | 列出规则库里的对账规则（版本、两侧数据源、对账维度、比对字段、分片与重试配置） |
+| `recon_define_rule` | `ruleBody`（必填）、`operator` | 提交一份规则体（JSON 或 YAML）落库为新版本，立即生效、不用重启也不用改代码；返回新版本号与解析后的两侧维度 |
+| `recon_run` | `ruleCode`、`ruleJson`、`batchId`、`remark`（**都非必填**） | 同步跑完一次对账，返回任务号、扫描量、差异分类、分片明细 |
+| `recon_job_summary` | `jobId`（必填） | 任务状态 / 分片完成度 / 差异分类与级别 / 分片明细 / 错误原因 / 耗时 |
 | `recon_list_diffs` | `jobId`（必填）、`diffType`、`offset`、`limit` | 差异明细：业务键、字段、左右值、相对偏差、已有归因 |
-| `recon_explain_diff` | `diffId` | 单条差异的归因说明 |
+| `recon_explain_diff` | `diffId`（必填） | 单条差异的归因说明 |
 | `recon_explain_job` | `jobId`（必填）、`limit` | 批量补归因并回显前几条 |
 
 工具返回的是**给人看的中文文本**，不是 JSON —— Agent 拿到就能直接转述给运营，不用再解释字段含义。
 参数缺失、规则不存在、任务号不存在这类错误都会被包成 `isError=true` 的结果文本，而不是让服务端崩掉。
 
+## 换对账维度 / 临时试算
+
+对账维度（`dimension` / `measures` 等，完整字段见 [rule-dsl.md](rule-dsl.md)）本来就是规则体的一部分，
+所以"换一套维度"= 提交一份新规则：调 `recon_define_rule` 提交规则体就落库为新版本，**立即对后续任务生效，不用改代码、不用重启**。
+
+`recon_define_rule` 只接两个参数：`ruleBody`（必填，规则体原文，JSON 或 YAML 都行 —— 工具按首个字符是不是 `{` 判断走哪种解析）和 `operator`（可选，只记进版本历史，缺省记作 `mcp`）。下面这份规则体把"按订单号逐笔比金额"换成"按 客户+状态 汇总比金额"：
+
+```json
+{
+  "code": "CUSTOMER_STATUS_TRIAL",
+  "name": "客户+状态汇总对账",
+  "left": {
+    "label": "账单",
+    "table": "bill_left",
+    "keyType": "STRING",
+    "dimension": ["customer_id", "status"],
+    "measures": { "amount": "SUM(amount)" }
+  },
+  "right": {
+    "label": "结算",
+    "table": "bill_right",
+    "keyType": "STRING",
+    "dimension": ["customer_id", "status"],
+    "measures": { "amount": "SUM(amount)" }
+  },
+  "shard": { "count": 1, "parallelism": 1 },
+  "compare": [
+    { "field": "amount", "type": "DECIMAL", "tolerance": 0.01, "diffType": "AMOUNT_MISMATCH", "severity": "HIGH" }
+  ],
+  "missing": { "leftMissingDiffType": "MISSING_LEFT", "rightMissingDiffType": "MISSING_RIGHT", "severity": "HIGH" }
+}
+```
+
+`ruleBody` 是一个**字符串**（不是嵌套对象），所以调用时要把规则体序列化成一个字符串传进去：
+
+```json
+{"ruleBody": "{\"code\":\"CUSTOMER_STATUS_TRIAL\",\"name\":\"客户+状态汇总对账\",\"left\":{\"label\":\"账单\",\"table\":\"bill_left\",\"keyType\":\"STRING\",\"dimension\":[\"customer_id\",\"status\"],\"measures\":{\"amount\":\"SUM(amount)\"}},\"right\":{\"label\":\"结算\",\"table\":\"bill_right\",\"keyType\":\"STRING\",\"dimension\":[\"customer_id\",\"status\"],\"measures\":{\"amount\":\"SUM(amount)\"}},\"shard\":{\"count\":1,\"parallelism\":1},\"compare\":[{\"field\":\"amount\",\"type\":\"DECIMAL\",\"tolerance\":0.01,\"diffType\":\"AMOUNT_MISMATCH\",\"severity\":\"HIGH\"}],\"missing\":{\"leftMissingDiffType\":\"MISSING_LEFT\",\"rightMissingDiffType\":\"MISSING_RIGHT\",\"severity\":\"HIGH\"}}",
+  "operator": "ops-alice"}
+```
+
+校验不过（和规则文件走同一套 `RuleParser` 校验）会返回 `isError` 并指出改哪里；通过则返回类似"规则 CUSTOMER_STATUS_TRIAL 已落库为 v1，对账维度：左 bill_left(维度=[customer_id, status])…"，
+之后 `recon_list_rules` 能看到这条规则的新版本，`recon_run` 用 `ruleCode: "CUSTOMER_STATUS_TRIAL"` 就按新维度跑。
+同一个 `code` 每提交一次就多一个版本（`version = max(version) + 1`），`recon_run` 默认取最新的启用版本。
+
+**只想临时试算、不想落规则库**，就把规则体塞进 `recon_run` 的 `ruleJson`（同样是 JSON 或 YAML 原文）：
+
+```json
+{"ruleJson": "{\"code\":\"TEMP_AMOUNT_ONLY\",\"left\":{\"label\":\"账单\",\"table\":\"bill_left\",\"keyType\":\"STRING\",\"dimension\":[\"order_no\"]},\"right\":{\"label\":\"结算\",\"table\":\"bill_right\",\"keyType\":\"STRING\",\"dimension\":[\"order_no\"]},\"shard\":{\"count\":1,\"parallelism\":1},\"compare\":[{\"field\":\"amount\",\"type\":\"DECIMAL\",\"tolerance\":0.01,\"diffType\":\"AMOUNT_MISMATCH\",\"severity\":\"HIGH\"}],\"missing\":{\"leftMissingDiffType\":\"MISSING_LEFT\",\"rightMissingDiffType\":\"MISSING_RIGHT\",\"severity\":\"HIGH\"}}",
+  "batchId": "trial-20260101", "remark": "临时只比金额"}
+```
+
+`ruleCode` 与 `ruleJson` 二选一：给了 `ruleJson` 就按内联规则跑（不写 `recon_rule` 表）；两个都不给会返回 `isError`，提示可以用 `recon_list_rules` 看有哪些规则。`batchId` 不填时自动生成 `mcp-<毫秒时间戳>`。
+
+**规则版本和任务快照是两件事。**
+
+- **规则版本**是规则库的当前状态：每次 `recon_define_rule` 追加一版，只影响**之后**创建的任务。
+- **任务快照**是这一跑当时用的那份规则：任务落库时把 `rule_version` + `rule_snapshot` 一起写进 `recon_job`，
+  重跑（和差异归因）优先用快照解析。所以**改了规则，历史任务重跑仍按旧快照执行**，语义不会漂移。
+  内联规则（`ruleJson`）不落规则库、没有版本号，但同样存快照，临时试算的任务也能原样重跑。
+
 ## 自己验证（不用装客户端）
 
-仓库里带了一个 30 行的 stdio 冒烟脚本，直接对着协议说话：
+仓库里带了一个直接对着协议说话的 stdio 冒烟脚本：
 
 ```bash
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar
 ```
 
-它依次做 `initialize` → `tools/list` → 6 个工具的真实调用，并断言：
+它依次做 `initialize` → `tools/list` → 6 个工具的真实调用（`recon_define_rule` 只在 `tools/list` 里校验存在，不会真的改规则库），并断言：
 
-- `tools/list` 里有 6 个工具，`recon_run` 的 `inputSchema` 声明了必填 `ruleCode`
+- `tools/list` 里有 7 个工具，`recon_define_rule` 声明了必填 `ruleBody`，`recon_run` 的四个参数都非必填
 - 未知规则被包成 `isError`，而不是抛异常断开连接
 - **stdout 全程只有 JSON-RPC**（有 0 行噪声才通过）
 - 关闭 stdin 后进程自行退出（`exit code=0`）
@@ -75,7 +136,7 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar
 
 ```
 initialize -> serverInfo={"name":"recon-lens","version":"0.1.0"} protocol=2025-06-18
-tools/list -> recon_list_rules, recon_run, recon_job_summary, recon_list_diffs, recon_explain_diff, recon_explain_job
+tools/list -> recon_list_rules, recon_define_rule, recon_run, recon_job_summary, recon_list_diffs, recon_explain_diff, recon_explain_job
 recon_run  -> 任务 #1｜规则 BILL_VS_SETTLE｜批次 mcp-smoke｜状态 SUCCESS
               分片 4/4 完成｜扫描 左=20 右=21｜匹配 19｜差异 6
               差异分类：AMOUNT_MISMATCH=2，DUPLICATE_KEY=1，MISSING_LEFT=1，MISSING_RIGHT=1，STATUS_MISMATCH=1
@@ -109,3 +170,6 @@ if (mcpProfileActive(args)) {
 - **不做鉴权**：stdio 进程由调用它的客户端拉起，权限边界就是父子进程边界；对外暴露请走 REST + 网关
 - **不做 HTTP/SSE 传输**：多客户端共享一个服务实例的场景应该用 REST 接口
 - **只用 tools**：resources / prompts / sampling 都没接，因为对账这个场景就是"调工具拿结果"
+- **规则以数据库为准**：`classpath` 下的 yml 只在规则库里还没有该 `code` 时作为 v1 导入一次，
+  改规则走 `recon_define_rule`（或 REST 的 `POST /api/rules`），落新版本即生效、不需要重启；
+  历史任务重跑用各自钉住的 `rule_snapshot`，不会被后来的规则改动改掉语义

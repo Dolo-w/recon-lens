@@ -91,10 +91,15 @@ try {
   const listed = await send('tools/list', {});
   const names = listed.result.tools.map((tool) => tool.name);
   console.log('tools/list -> ' + names.join(', '));
-  const expected = ['recon_list_rules', 'recon_run', 'recon_job_summary', 'recon_list_diffs', 'recon_explain_diff', 'recon_explain_job'];
-  check(expected.every((name) => names.includes(name)), '六个工具都在 tools/list 里');
+  const expected = ['recon_list_rules', 'recon_define_rule', 'recon_run', 'recon_job_summary', 'recon_list_diffs', 'recon_explain_diff', 'recon_explain_job'];
+  check(expected.every((name) => names.includes(name)), '七个工具都在 tools/list 里');
+  const defineTool = listed.result.tools.find((tool) => tool.name === 'recon_define_rule');
+  check(defineTool?.inputSchema?.required?.includes('ruleBody'), 'recon_define_rule 的 inputSchema 声明了必填 ruleBody');
   const runTool = listed.result.tools.find((tool) => tool.name === 'recon_run');
-  check(runTool?.inputSchema?.required?.includes('ruleCode'), 'recon_run 的 inputSchema 声明了必填 ruleCode');
+  const runProps = Object.keys(runTool?.inputSchema?.properties ?? {});
+  check(['ruleCode', 'ruleJson', 'batchId', 'remark'].every((name) => runProps.includes(name)),
+    'recon_run 暴露 ruleCode/ruleJson/batchId/remark 四个参数');
+  check((runTool?.inputSchema?.required ?? []).length === 0, 'recon_run 的四个参数都可选（支持只传 batchId/remark，或用 ruleJson 内联规则）');
 
   const rules = await call('recon_list_rules', {});
   check(!rules.isError && rules.text.includes('BILL_VS_SETTLE'), 'recon_list_rules 能列出规则');

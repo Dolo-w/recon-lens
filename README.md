@@ -9,8 +9,9 @@
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-**配置化的对账引擎**：YAML 写规则 → 分片并行归并对账 → 差异自动分类 → 规则模板 / 大模型给出归因；
-同时是一个 MCP server，Agent 可以直接调这些能力。
+**配置化的对账引擎**：规则描述"对账维度 + 要对的字段"（复合键、聚合口径都能声明），存进规则库提交即生效 →
+分片并行归并对账 → 差异自动分类 → 规则模板 / 大模型给出归因；
+同时是一个 MCP server，Agent 可以直接调这些能力，也能自己提交一版新规则。
 
 > Reconciliation engine for money pipelines: rule-as-YAML, shard-parallel merge join, streamed cursors,
 > idempotent re-runs, and diff attribution (rule templates + optional OpenAI-compatible LLM).
@@ -26,7 +27,7 @@ recon-lens 把这件事拆成四件确定的事：
 
 | 传统脚本 | recon-lens |
 | --- | --- |
-| 对账逻辑写在代码里，改规则要发版 | 规则是 YAML，改完重启即生效，且上线前被 DSL 校验拦一遍 |
+| 对账逻辑写在代码里，改规则要发版 | 规则即数据：对账维度（复合键 / 聚合口径）与比对字段都声明式描述，提交新版本立即生效，落库前先被 DSL 校验拦一遍 |
 | 全量 `SELECT` 进内存再比对 | 按业务键升序流式取数 + 双指针归并，内存与数据量无关 |
 | 失败只能整批重跑，差异表越跑越脏 | 按分片记录进度，只重跑失败分片；先删本分片旧差异再写，重跑天然幂等 |
 | 只给差异数量，原因靠人猜 | 每条差异自动分类 + 生成归因（规则模板兜底，可接大模型） |
@@ -39,7 +40,8 @@ recon-lens 把这件事拆成四件确定的事：
 ./mvnw spring-boot:run          # 或 mvn spring-boot:run
 ```
 
-启动日志里会直接打出一份演示对账报告（H2 内存库自带 20 条账单 / 21 条结算数据，埋了 5 类典型差异）：
+启动日志里会直接打出一份演示对账报告（H2 内存库自带 20 条账单 / 21 条结算数据 + 8/9 条资源数据，
+埋了 5 类典型差异；仓库自带 4 个演示规则，启动时作为 v1 导入规则库）：
 
 ```
 ================ recon-lens 启动演示 ================
@@ -69,12 +71,13 @@ recon-lens 把这件事拆成四件确定的事：
 
 ```mermaid
 flowchart LR
-    R[rules/*.yml] -->|RuleParser 启动期校验| REG[RuleRegistry]
-    API[POST /api/jobs] --> ENG[ReconEngine]
-    AGENT[Agent / Claude Desktop] -->|stdio JSON-RPC| MCP[MCP server<br/>6 个工具]
+    R[rules/*.yml] -->|RuleParser 校验，首次导入 v1| CAT[(recon_rule<br/>规则库 / 版本 / 快照)]
+    API[POST /api/jobs<br/>POST · DELETE /api/rules] --> CAT
+    AGENT[Agent / Claude Desktop] -->|stdio JSON-RPC| MCP[MCP server<br/>7 个工具]
+    MCP --> CAT
     MCP --> ENG
     MCP --> DB
-    REG --> ENG
+    CAT --> ENG[ReconEngine]
     ENG -->|ShardPlanner 替换<br/>{shards} {index}| SP[分片计划 ×N]
     SP --> POOL[ThreadPool<br/>min 规则并行度, 全局并行度]
     POOL --> RUN[ShardRunner 每个分片]
@@ -129,6 +132,43 @@ left:
   sql: SELECT customer_id AS biz_key, SUM(amount) AS amount, COUNT(*) AS bill_count FROM bill_left GROUP BY customer_id
 ```
 
+更彻底一点：**不写 SQL 也能自定义对账维度**。用 `dimension` 声明"一笔业务靠什么区分"，用 `measures` 声明聚合口径：
+
+```yaml
+# 复合维度：账号 + 资源ID（src/main/resources/rules/resource-recon.yml）
+left:
+  label: 资源清单
+  table: resource_left
+  keyType: STRING
+  dimension: [account_id, resource_id]   # 引擎生成 CONCAT(account_id, '|', resource_id) AS __biz_key
+
+# 聚合维度：按「客户 + 状态」汇总后再比对（src/main/resources/rules/customer-status-recon.yml）
+left:
+  table: bill_left
+  dimension: [customer_id, status]
+  measures:
+    amount: SUM(amount)                  # compare 里只能比 measures 产出的别名
+    order_count: COUNT(*)
+```
+
+声明式维度下引擎生成的取数 SQL（分片条件仍套在最内层，作用于原始数据）：
+
+```sql
+-- 非聚合
+SELECT CONCAT(account_id, '|', resource_id) AS __biz_key, src.*
+  FROM (SELECT * FROM (SELECT * FROM resource_left) src WHERE <分片条件>) src
+ ORDER BY __biz_key
+-- 聚合
+SELECT CONCAT(customer_id, '|', status) AS __biz_key, SUM(amount) AS amount, COUNT(*) AS order_count
+  FROM (SELECT * FROM bill_left) src
+ GROUP BY CONCAT(customer_id, '|', status) ORDER BY __biz_key
+```
+
+- `dimension` 与 `keyField` 二选一：声明了维度就**不用（也不许）写 `orderBy`**，引擎固定按生成的 `__biz_key` 升序取数
+- 维度既可以是列名列表（多列用 `CONCAT` 拼起来，单列直接用列名、还能命中索引），也可以是任意 SQL 表达式：`dimension: "CONCAT(customer_id, '#', status)"`
+- 配了 `measures` 就是聚合维度：引擎先 `GROUP BY __biz_key` 再逐字段比对，`compare` 的字段必须是 `measures` 里的别名，否则启动期直接报错
+- **分片条件不能把同一个分组切开**：按 `customer_id` 分片安全，按 `status` 分片会把一个分组劈成两半分到不同分片，两侧各算一半 → 假差异
+
 ### 2. 归并式对账 + 流式游标
 
 两侧数据都按业务键升序取，引擎用双指针推进：键相等就比对字段，左边小就是右侧缺失，右边小就是左侧缺失。
@@ -141,7 +181,7 @@ JDBC 游标（`TYPE_FORWARD_ONLY` + `fetchSize`）保证只驻留有限行 —�
 - **幂等**：每次分片执行前先 `DELETE FROM recon_diff WHERE job_id=? AND shard_id=?`，重跑不会让差异表翻倍
 - 重跑只做 `FAILED` 的分片，已经跑完的分片一次都不重复计算
 
-> **切分口径必须统一**：分片条件只能依赖业务键（`where` 里出现 `keyField`），不能让两侧各按自己的代理主键
+> **切分口径必须统一**：分片条件只能依赖对账维度（`keyField` 或 `dimension` 里的列），不能让两侧各按自己的代理主键
 > （如 `MOD(id, {shards}) = {index}`）切分 —— 那样同一笔业务会被切到不同分片，两边都看不到对方，结果是一堆
 > 假缺失。解析器会在 `where` 完全不引用业务键时打 WARN 提醒。
 
@@ -167,19 +207,39 @@ export RECON_LLM_API_KEY=sk-...
 ./mvnw spring-boot:run
 ```
 
+## 规则库：换对账维度不用改代码、不用重启
+
+规则本身也是数据，存在 `recon_rule` 表里。提交一次就是**一版新规则**，立即生效：
+
+```bash
+curl -X POST http://localhost:8080/api/rules \
+     -H 'Content-Type: application/yaml' -H 'X-Operator: alice' \
+     --data-binary @src/main/resources/rules/resource-recon.yml
+```
+
+- `code` 相同 = 升级同一个规则（版本号自增），`code` 不同 = 新增一条规则
+- 每个任务把当时生效的**版本号 + 规则快照**钉在自己身上：之后改规则、停用规则，历史任务重跑和补归因用的仍是当时那份定义，不会出现"同一个 jobId 两种结果"
+- `classpath:rules/*.yml` 只在规则库里没有该 `code` 时作为 v1 导入（`recon.seed-rules: false` 可关闭）；生产上也可以把规则目录挂成 `file:./rules/`
+- 请求级内联规则：`POST /api/jobs` 带 `rule`（JSON）或 `ruleYaml` 字段、MCP 的 `recon_run` 带 `ruleJson`，用于临时试算 —— 不落库、不产生版本
+
+> 提示：运行时提交规则 = 运行时改 SQL，生产上这个入口要挂在网关鉴权后面（示例里的 `X-Operator` 只是记操作人）。
+
 ## REST API
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/jobs` | 发起对账，`{"ruleCode":"BILL_VS_SETTLE","batchId":"2026-10-11","sync":true}` |
+| POST | `/api/jobs` | 发起对账，`{"ruleCode":"BILL_VS_SETTLE","batchId":"2026-10-11","sync":true}`；也可用 `rule` / `ruleYaml` 内联一份不落库的规则 |
 | GET | `/api/jobs` | 任务列表 |
-| GET | `/api/jobs/{id}` | 任务详情 + 每个分片状态 + 差异分类汇总 |
-| POST | `/api/jobs/{id}/retry?onlyFailed=true` | 断点续跑 |
+| GET | `/api/jobs/{id}` | 任务详情（含生效的 `ruleVersion`）+ 每个分片状态 + 差异分类汇总 |
+| POST | `/api/jobs/{id}/retry?onlyFailed=true` | 断点续跑（按任务自带的规则快照执行） |
 | GET | `/api/diffs?jobId=1&diffType=AMOUNT_MISMATCH&offset=0&limit=50` | 差异分页查询 |
 | GET | `/api/diffs/summary?jobId=1` | 差异按类型 / 严重级别汇总 |
 | POST | `/api/diffs/{id}/explain` | 单条归因 |
 | POST | `/api/diffs/explain?jobId=1&limit=200` | 批量补齐归因 |
-| GET | `/api/rules` | 当前实例加载了哪些规则 |
+| GET | `/api/rules` | 规则库列表（每个 `code` 的最新版本 + 对账维度） |
+| GET | `/api/rules/{code}` | 规则详情 + 版本历史 |
+| POST | `/api/rules` | 提交一版新规则（`Content-Type: application/json` 或 `application/yaml`，`X-Operator` 记操作人） |
+| DELETE | `/api/rules/{code}` | 停用规则（版本保留，历史任务仍能用快照重跑） |
 
 ## 用 MCP 让 Agent 直接调对账
 
@@ -189,11 +249,12 @@ REST 是给人和系统的，MCP 是给 Agent 的：模型自己决定调 `recon
 
 ```bash
 ./mvnw -DskipTests package
-java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp     # stdio，6 个工具
+java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp     # stdio，7 个工具
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装客户端也能验证
 ```
 
-工具：`recon_list_rules` / `recon_run` / `recon_job_summary` / `recon_list_diffs` / `recon_explain_diff` / `recon_explain_job`。
+工具：`recon_list_rules` / `recon_define_rule` / `recon_run` / `recon_job_summary` / `recon_list_diffs` / `recon_explain_diff` / `recon_explain_job`。
+其中 `recon_define_rule` 让 Agent 自己提交一版新规则（换对账维度、换比对字段，立即生效），`recon_run` 的 `ruleJson` 参数可以内联一份规则临时试算。
 客户端配置、真实会话输出、以及 stdio 传输的两个坑（logback 状态输出会污染 stdout、2.x 起 SDK 的制品拆分）
 见 [docs/mcp.md](docs/mcp.md)。
 
@@ -204,8 +265,30 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装
 ```
 
 `application-mysql.yml` 已带上关键参数 `useCursorFetch=true`（否则 MySQL 驱动会把结果集整体拉进内存，流式取数形同虚设）
-与 `rewriteBatchedStatements=true`（差异批量写入提速）。生产库的表结构见 `src/main/resources/schema.sql`，
-规则目录建议挂 `file:./rules/`，改规则不用重新构建。
+与 `rewriteBatchedStatements=true`（差异批量写入提速）。生产库的表结构见 `src/main/resources/schema.sql`
+（含 `recon_rule` 规则表），改动规则推荐走 `POST /api/rules` 而不是改文件；规则目录也可以挂 `file:./rules/` 当首次导入的种子。
+
+已经用旧版本建过库的，升上来只要补这一段（`spring.sql.init.mode=never`，DDL 由 DBA 执行）：
+
+```sql
+-- 任务钉住"跑的时候用的是哪一版规则"，重跑与归因都按它还原
+ALTER TABLE recon_job ADD COLUMN rule_version INT NULL;
+ALTER TABLE recon_job ADD COLUMN rule_snapshot VARCHAR(8000) NULL;
+
+-- 规则库：同一个 code 多版本共存，任务创建后改规则不影响已跑完的任务
+CREATE TABLE recon_rule (
+    id         BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    code       VARCHAR(64)  NOT NULL,
+    version    INT          NOT NULL,
+    spec_json  VARCHAR(8000) NOT NULL,
+    enabled    BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_by VARCHAR(64),
+    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX uk_rule_code_version ON recon_rule (code, version);
+```
+
+MySQL 没有 `IF NOT EXISTS` 的加列语法，重复执行会报 `Duplicate column name`，属预期。
 
 千万级数据的造数与压测方法见 [docs/benchmark.md](docs/benchmark.md)。
 
@@ -229,12 +312,13 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装
 
 ```
 src/main/java/io/github/dolow/reconlens/
-├── dsl/        规则解析与校验（YAML → RuleSpec，错误配置在这里就被拦住）
+├── dsl/        规则解析与校验（YAML / JSON → RuleSpec，错误配置在这里就被拦住；含声明式维度 DSL）
+├── rule/       规则库（RuleCatalog）：版本、缓存、内联规则、classpath 种子导入
 ├── engine/     归并匹配、容差比较、分片规划、并行编排、流式游标
-├── store/      JdbcTemplate 持久化（任务 / 分片 / 差异）
+├── store/      JdbcTemplate 持久化（任务 / 分片 / 差异 / 规则版本）
 ├── explain/    归因：规则模板 + 大模型，统一入口 ExplainService
-├── web/        REST 接口
-├── mcp/        MCP server（stdio）：把对账能力暴露成 Agent 可调用的 6 个工具
+├── web/        REST 接口（对账任务 + 规则 CRUD）
+├── mcp/        MCP server（stdio）：把对账能力暴露成 Agent 可调用的 7 个工具
 └── bootstrap/  启动演示
 docs/           架构说明、规则 DSL 手册、MCP 接入、压测方法
 tools/          造数脚本、MCP stdio 冒烟客户端
@@ -247,13 +331,13 @@ tools/          造数脚本、MCP stdio 冒烟客户端
       所有分片共用一段 where，表达不了"每个分片一段连续键"，而键范围才是真正走索引的切法 ——
       这个缺口是这次百万级压测逼出来的
 - [ ] 差异结果导出（CSV / 飞书表格）与按批次对比
-- [ ] 规则热重载（不重启刷 `file:` 目录）
+- [ ] 规则的多环境发布（草稿 → 审核 → 生效）与操作审计
 - [ ] 归因结果回写人工标注，做一个"差异原因"知识库
 
 ## 开发与贡献
 
 ```bash
-./mvnw test                                             # 40 个用例，CI 跑的就是这条
+./mvnw test                                             # 67 个用例，CI 跑的就是这条
 ./mvnw -DskipTests package                              # 产出 target/recon-lens-0.1.0.jar
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟（Node 18+）
 ```
