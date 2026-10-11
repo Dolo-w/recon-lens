@@ -78,7 +78,7 @@ flowchart LR
     MCP --> ENG
     MCP --> DB
     CAT --> ENG[ReconEngine]
-    ENG -->|ShardPlanner 替换<br/>{shards} {index}| SP[分片计划 ×N]
+    ENG -->|ShardPlanner 替换 shards / index 占位符| SP[分片计划 ×N]
     SP --> POOL[ThreadPool<br/>min 规则并行度, 全局并行度]
     POOL --> RUN[ShardRunner 每个分片]
     RUN -->|先删本分片旧差异| DB[(recon_job /<br/>recon_shard /<br/>recon_diff)]
