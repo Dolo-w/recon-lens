@@ -1,0 +1,25 @@
+name: 功能建议
+description: 希望 recon-lens 支持什么
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 先描述场景，不急着给方案 —— 很多时候规则 DSL 已经能表达，只是文档没说清
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你设想的做法
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 现在怎么绕过的
+      description: 比如用自定义 SQL 两侧聚合、把桶做成索引列、拆成多条规则跑
+  - type: textarea
+    id: scale
+    attributes:
+      label: 数据量级与频率
+      description: 单次对账多少行、多久跑一次、几个分片 —— 决定这个需求该做成配置还是做成策略

@@ -15,7 +15,35 @@
   <artifactId>recon-lens</artifactId>
   <version>0.1.0</version>
   <name>recon-lens</name>
-  <description>配置化对账引擎：规则 DSL + 分片并行 + 差异分类 + LLM 归因</description>
+  <description>配置化对账引擎：规则 DSL + 分片并行 + 差异分类 + LLM 归因（同时是一个 MCP server）</description>
+  <url>https://github.com/Dolo-w/recon-lens</url>
+
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>Dolo-w</id>
+      <name>Dolo-w</name>
+      <url>https://github.com/Dolo-w</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:https://github.com/Dolo-w/recon-lens.git</connection>
+    <developerConnection>scm:git:git@github.com:Dolo-w/recon-lens.git</developerConnection>
+    <url>https://github.com/Dolo-w/recon-lens</url>
+  </scm>
+
+  <issueManagement>
+    <system>GitHub Issues</system>
+    <url>https://github.com/Dolo-w/recon-lens/issues</url>
+  </issueManagement>
 
   <properties>
     <java.version>17</java.version>

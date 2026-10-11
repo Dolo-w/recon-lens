@@ -1,0 +1,8 @@
+# 统一换行与二进制判定：脚本类保持 LF（mvnw 在 Linux/macOS 上必须是 LF），Windows 批处理用 CRLF
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+mvnw text eol=lf
+*.jar binary
+*.zip binary
+*.png binary

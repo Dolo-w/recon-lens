@@ -1,5 +1,14 @@
 # recon-lens
 
+<p>
+  <a href="https://github.com/Dolo-w/recon-lens/actions/workflows/build.yml"><img alt="build" src="https://github.com/Dolo-w/recon-lens/actions/workflows/build.yml/badge.svg"></a>
+  <a href="https://github.com/Dolo-w/recon-lens/releases"><img alt="release" src="https://img.shields.io/github/v/release/Dolo-w/recon-lens?sort=semver"></a>
+  <img alt="java" src="https://img.shields.io/badge/Java-17-orange">
+  <img alt="spring boot" src="https://img.shields.io/badge/Spring%20Boot-3.3-6db33f">
+  <img alt="mcp" src="https://img.shields.io/badge/MCP-stdio-6f42c1">
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+</p>
+
 **配置化的对账引擎**：YAML 写规则 → 分片并行归并对账 → 差异自动分类 → 规则模板 / 大模型给出归因；
 同时是一个 MCP server，Agent 可以直接调这些能力。
 
@@ -24,8 +33,10 @@ recon-lens 把这件事拆成四件确定的事：
 
 ## 30 秒跑起来
 
+需要 JDK 17+。没装 Maven 就用仓库自带的 wrapper（Windows 用 `mvnw.cmd`）：
+
 ```bash
-mvn spring-boot:run
+./mvnw spring-boot:run          # 或 mvn spring-boot:run
 ```
 
 启动日志里会直接打出一份演示对账报告（H2 内存库自带 20 条账单 / 21 条结算数据，埋了 5 类典型差异）：
@@ -51,7 +62,7 @@ mvn spring-boot:run
 ```
 
 ```bash
-mvn test        # 单元测试 + 端到端测试（真 H2、真 SQL、真并发）
+./mvnw test     # 单元测试 + 端到端测试（真 H2、真 SQL、真并发）
 ```
 
 ## 核心设计
@@ -177,7 +188,7 @@ REST 是给人和系统的，MCP 是给 Agent 的：模型自己决定调 `recon
 结果必然一致。
 
 ```bash
-mvn -DskipTests package
+./mvnw -DskipTests package
 java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp     # stdio，6 个工具
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装客户端也能验证
 ```
@@ -201,7 +212,7 @@ mvn spring-boot:run -Dspring-boot.run.profiles=mysql
 ## 压测：百万级实测（仓库内可复现，不需要 MySQL）
 
 ```bash
-mvn -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
+./mvnw -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
     -Dsurefire.argLine="-Xmx2g -Dfile.encoding=UTF-8" test
 ```
 
@@ -238,6 +249,18 @@ tools/          造数脚本、MCP stdio 冒烟客户端
 - [ ] 差异结果导出（CSV / 飞书表格）与按批次对比
 - [ ] 规则热重载（不重启刷 `file:` 目录）
 - [ ] 归因结果回写人工标注，做一个"差异原因"知识库
+
+## 开发与贡献
+
+```bash
+./mvnw test                                             # 40 个用例，CI 跑的就是这条
+./mvnw -DskipTests package                              # 产出 target/recon-lens-0.1.0.jar
+node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟（Node 18+）
+```
+
+CI（[build.yml](.github/workflows/build.yml)）在每次 push / PR 上跑测试 + MCP 冒烟；推一个 `v*` tag 会触发
+[release.yml](.github/workflows/release.yml) 自动发 Release 并附上可执行 jar。改动记录见
+[CHANGELOG.md](CHANGELOG.md)，提 PR 前请读一下 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 

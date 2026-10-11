@@ -1,0 +1,39 @@
+name: Bug 报告
+description: 跑不起来、结果不对、报错
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提 issue 前请先确认 `./mvnw test` 是绿的；报错请贴到**根因**那一行，不要只贴最外层异常。
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 你期望发生什么、实际发生了什么
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现方式
+      description: 命令、规则 YAML、数据量级。能给最小复现最好 —— 通常问题就出在规则配置或分片口径上
+      placeholder: |
+        ./mvnw spring-boot:run
+        curl -X POST localhost:8080/api/jobs -H 'Content-Type: application/json' \
+          -d '{"ruleCode":"BILL_VS_SETTLE","batchId":"t1","sync":true}'
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错日志 / 对账结果
+      render: shell
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: 操作系统、JDK 版本、数据库与版本、recon-lens 版本或提交号
+      placeholder: Windows 11 / Temurin 17.0.20 / H2 2.2.224 / v0.1.0
+    validations:
+      required: true

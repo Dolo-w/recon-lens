@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+
+      - name: 测试并打包
+        run: mvn -B --no-transfer-progress package
+
+      - name: 协议级冒烟（打包产物，不装客户端也能验）
+        run: node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar
+
+      - name: 发布 Release 并附上可执行 jar
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/recon-lens-*.jar
+          generate_release_notes: true
+          body: |
+            完整变更见 [CHANGELOG.md](https://github.com/Dolo-w/recon-lens/blob/main/CHANGELOG.md)。
+
+            下载 `recon-lens-0.1.0.jar` 后：
+
+            ```bash
+            java -jar recon-lens-0.1.0.jar                        # 起服务，启动日志里有一份演示对账报告
+            java -jar recon-lens-0.1.0.jar --spring.profiles.active=mcp   # 作为 MCP server（stdio）
+            ```
