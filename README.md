@@ -186,9 +186,12 @@ JDBC 游标（`TYPE_FORWARD_ONLY` + `fetchSize`）保证只驻留有限行 —�
 > 假缺失。解析器会在 `where` 完全不引用业务键时打 WARN 提醒。
 
 > **切分谓词要能命中索引**：`WHERE MOD(SUBSTRING(order_no, …)) = {index}` 这类"列上套函数"的谓词用不了索引，
-> 每个分片都要全表扫一遍。用百万级数据实测（`docs/benchmark.md`）：同一份数据，8 分片 37.4 秒、1 分片 4.3 秒，
-> **差异结果完全一致，但分片越多越慢**。要让分片真的提速，先把分片桶做成索引列
-> （MySQL 8 函数索引 `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引），规则里只引用这个列。
+> 每个分片都要全表扫一遍。用百万级数据实测（`docs/benchmark.md`）：H2 上同一份数据 8 分片 37.4 秒、1 分片 4.3 秒，
+> **差异结果完全一致，但分片越多越慢**；换到独立 MySQL 进程上则是 8 分片 2.3 秒、1 分片 6.4 秒 ——
+> 并行全表扫的收益盖过了重复读，但把分片桶做成索引列后还能再快一倍（8 分片 1.08 秒）。
+> 要让分片真的提速，先把分片桶做成索引列
+> （MySQL 8 函数索引 `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引，或数据写入时就物化这一列），规则里只引用这个列，
+> 而且最好让"桶列 + 排序键 + 要比较的列"共用一个复合覆盖索引。
 
 ### 4. 差异分类 + 归因
 
@@ -265,8 +268,12 @@ node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装
 ```
 
 `application-mysql.yml` 已带上关键参数 `useCursorFetch=true`（否则 MySQL 驱动会把结果集整体拉进内存，流式取数形同虚设）
-与 `rewriteBatchedStatements=true`（差异批量写入提速）。生产库的表结构见 `src/main/resources/schema.sql`
-（含 `recon_rule` 规则表），改动规则推荐走 `POST /api/rules` 而不是改文件；规则目录也可以挂 `file:./rules/` 当首次导入的种子。
+与 `rewriteBatchedStatements=true`（差异批量写入提速）。生产库的表结构给 DBA 执行
+`src/main/resources/schema-mysql.sql`（含 `recon_rule` 规则表，MySQL 8.0.29 上从空库连跑两遍验证通过）；
+`schema.sql` 是 H2 用的，里面的 `CREATE INDEX IF NOT EXISTS` MySQL 不支持。
+改动规则推荐走 `POST /api/rules` 而不是改文件；规则目录也可以挂 `file:./rules/` 当首次导入的种子
+（**只导一次**，同名规则码不会被覆盖）。连接池默认 24：每个分片同时持左右两个游标，池子至少要
+`2 × recon.engine.parallelism`，否则会出现"8 个分片全在等连接"的假慢（实测慢 6~11 倍，见 `docs/benchmark.md`）。
 
 已经用旧版本建过库的，升上来只要补这一段（`spring.sql.init.mode=never`，DDL 由 DBA 执行）：
 
@@ -292,7 +299,7 @@ MySQL 没有 `IF NOT EXISTS` 的加列语法，重复执行会报 `Duplicate col
 
 千万级数据的造数与压测方法见 [docs/benchmark.md](docs/benchmark.md)。
 
-## 压测：百万级实测（仓库内可复现，不需要 MySQL）
+## 压测：百万级实测（H2 一键复现 + 独立 MySQL 真机数字）
 
 ```bash
 ./mvnw -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
@@ -307,6 +314,20 @@ MySQL 没有 `IF NOT EXISTS` 的加列语法，重复执行会报 `Duplicate col
 两次的差异分类逐项相同（`AMOUNT_MISMATCH=400 / STATUS_MISMATCH=100 / MISSING_RIGHT=100 / MISSING_LEFT=100 / DUPLICATE_KEY=100`），
 测试里就是这么断言的：**分片只影响耗时，不影响结果**。8 分片反而更慢，原因与解法见
 [docs/benchmark.md](docs/benchmark.md)。
+
+### 独立 MySQL 进程上的真机数字（引擎对 2M×2，堆压 `-Xmx256m`）
+
+| 口径（都是 501 条差异，结果逐条一致） | 分片 | 墙钟 | 备注 |
+| --- | --- | --- | --- |
+| 窄投影 4 列 | 1 | 6,367 / 6,482 ms | 覆盖索引有序读，没有排序 |
+| 宽投影 51 列（`SELECT *`） | 1 | 67,268 / 67,593 ms | 优化器退化成全表扫 + filesort，**10.6 倍** |
+| 函数谓词 `MOD(CAST(SUBSTRING…) AS UNSIGNED)` | 8 | 2,106 ~ 2,329 ms | 每片读全表 199.99 万行 |
+| 桶列 `shard_bucket = {index}` + 复合覆盖索引 | 8 | 1,083 ~ 1,159 ms | 每片只读 26 万行 |
+| 桶列口径 + 连接池 16（改默认值之前） | 8 | 11,928 ms | 分片全在等连接，见 benchmark.md 3.5 |
+
+`-Xmx256m` 跑完四个口径：991 次 GC、**0 次 Full GC**、GC 后堆 2~38 MB（形态是锯齿，不随扫描行数上升）。
+装置（SQL / PowerShell 脚本 / 规则）原样入库在 [`tools/mysql-bench/`](tools/mysql-bench/)，
+完整数字、EXPLAIN 原文与"被压测逼出来的 5 个问题"见 [docs/benchmark.md](docs/benchmark.md)。
 
 ## 项目结构
 

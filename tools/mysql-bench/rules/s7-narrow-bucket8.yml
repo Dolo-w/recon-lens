@@ -1,0 +1,42 @@
+code: S7_NARROW_BUCKET8
+name: S7 窄口径 8 分片（生成列桶 + 索引）
+description: 把 MOD(...) 物化成 STORED 生成列 shard_bucket 并建索引，分片谓词变成列等值比较
+left:
+  label: 账单
+  # 注意：分片谓词是加在这层投影**外面**的（SELECT * FROM (<这里>) src WHERE ...），
+  # 所以分片要用的 shard_bucket 必须出现在投影里，否则就是 Unknown column
+  sql: SELECT id, order_no, amount, status, shard_bucket FROM bill_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+right:
+  label: 结算
+  sql: SELECT id, order_no, amount, status, shard_bucket FROM bill_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+shard:
+  count: 8
+  parallelism: 8
+  whereLeft: shard_bucket = {index} AND {shards} = {shards}
+  whereRight: shard_bucket = {index} AND {shards} = {shards}
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: status
+    type: STRING
+    ignoreCase: true
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 2

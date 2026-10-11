@@ -9,3 +9,5 @@ target/
 data/
 *.mv.db
 *.trace.db
+# 压测装置的运行产物（日志、应用输出）
+tools/mysql-bench/out/

@@ -1,0 +1,37 @@
+code: S7_WIDE
+name: S7 宽口径（整表 51 列）
+description: 与窄口径同一份数据、同一个维度，只是取数层把 51 列全拖出来
+left:
+  label: 账单
+  table: bill_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+right:
+  label: 结算
+  table: bill_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+shard:
+  count: 1
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: status
+    type: STRING
+    ignoreCase: true
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 2

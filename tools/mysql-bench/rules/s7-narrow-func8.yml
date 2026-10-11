@@ -1,0 +1,40 @@
+code: S7_NARROW_FUNC8
+name: S7 窄口径 8 分片（函数谓词，就是演示规则的写法）
+description: 分片谓词对 order_no 做 SUBSTRING+MOD，索引失效，每片全表扫
+left:
+  label: 账单
+  sql: SELECT id, order_no, amount, status FROM bill_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+right:
+  label: 结算
+  sql: SELECT id, order_no, amount, status FROM bill_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+shard:
+  count: 8
+  parallelism: 8
+  whereLeft: MOD(CAST(SUBSTRING(order_no, 10, 2) AS UNSIGNED), {shards}) = {index}
+  whereRight: MOD(CAST(SUBSTRING(order_no, 10, 2) AS UNSIGNED), {shards}) = {index}
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: status
+    type: STRING
+    ignoreCase: true
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 2
