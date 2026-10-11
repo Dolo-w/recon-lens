@@ -4,10 +4,10 @@ import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
 import io.github.dolow.reconlens.dsl.FieldRule;
-import io.github.dolow.reconlens.dsl.RuleRegistry;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.explain.ExplainService;
+import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.stereotype.Component;
 
@@ -19,33 +19,37 @@ import java.util.stream.Collectors;
  * MCP 工具的落地实现：Agent 通过这些方法跑对账、查差异、拿归因。
  *
  * <p>这一层只做"把引擎能力翻译成人和模型都读得懂的文本"，不引入任何对账逻辑：
- * 规则来自 {@link RuleRegistry}，执行走 {@link ReconEngine}，查询走 {@link ReconRepository}，
+ * 规则来自 {@link RuleCatalog}，执行走 {@link ReconEngine}，查询走 {@link ReconRepository}，
  * 归因走 {@link ExplainService} —— 与 REST 接口共用同一套服务，所以两边结果永远一致。
  */
 @Component
 public class ReconMcpTools {
 
-    private final RuleRegistry rules;
+    private final RuleCatalog catalog;
     private final ReconEngine engine;
     private final ReconRepository repository;
     private final ExplainService explain;
 
-    public ReconMcpTools(RuleRegistry rules, ReconEngine engine, ReconRepository repository, ExplainService explain) {
-        this.rules = rules;
+    public ReconMcpTools(RuleCatalog catalog, ReconEngine engine, ReconRepository repository, ExplainService explain) {
+        this.catalog = catalog;
         this.engine = engine;
         this.repository = repository;
         this.explain = explain;
     }
 
-    /** 列出已加载的规则，让模型自己挑 ruleCode。 */
+    /** 列出规则库里的规则，让模型自己挑 ruleCode。 */
     public String listRules() {
-        List<RuleSpec> all = rules.all();
+        List<RuleCatalog.Resolved> all = catalog.allResolved();
         StringBuilder sb = new StringBuilder();
-        sb.append("已加载 ").append(all.size()).append(" 条对账规则，调 recon_run 时把 code 作为 ruleCode：\n");
-        for (RuleSpec rule : all) {
+        sb.append("规则库里有 ").append(all.size()).append(" 条对账规则，调 recon_run 时把 code 作为 ruleCode：\n");
+        for (RuleCatalog.Resolved resolved : all) {
+            RuleSpec rule = resolved.spec();
             sb.append("\n- ").append(rule.code());
+            if (resolved.version() != null) {
+                sb.append("（v").append(resolved.version()).append("）");
+            }
             if (rule.name() != null && !rule.name().isBlank()) {
-                sb.append("（").append(rule.name()).append("）");
+                sb.append(" ").append(rule.name());
             }
             sb.append('\n');
             if (rule.description() != null && !rule.description().isBlank()) {
@@ -58,19 +62,56 @@ public class ReconMcpTools {
                     .append("，并行 ").append(rule.shard().effectiveParallelism())
                     .append("，单分片最多重试 ").append(rule.maxAttempts()).append(" 次");
         }
+        sb.append("\n\n要改对账维度或比对字段，直接调 recon_define_rule 提交新版本（不用改代码、不用重启）。");
         return sb.toString();
     }
 
-    /** 同步跑一次对账，直接返回任务摘要。 */
-    public String runReconciliation(String ruleCode, String batchId, String remark) {
-        RuleSpec rule = rules.get(ruleCode);
+    /**
+     * 定义/修改一条规则：body 是规则文件里的那份配置（JSON 或 YAML 都行）。
+     * 提交后会立刻对后续任务生效，跑过的任务仍按自己的快照执行。
+     */
+    public String defineRule(String ruleBody, String operator) {
+        String body = blankToNull(ruleBody);
+        if (body == null) {
+            throw new IllegalArgumentException("ruleBody 不能为空");
+        }
+        String who = blankToNull(operator) == null ? "mcp" : operator;
+        boolean json = body.startsWith("{");
+        RuleCatalog.Resolved resolved = json
+                ? catalog.defineJson(body, "MCP 提交的 JSON 规则", who)
+                : catalog.defineYaml(body, "MCP 提交的 YAML 规则", who);
+        return "规则 " + resolved.spec().code() + " 已落库为 v" + resolved.version() + "，对账维度：左 " + resolved.spec().left().describe()
+                + "，右 " + resolved.spec().right().describe()
+                + "，比对字段 " + resolved.spec().compare().stream().map(FieldRule::field).collect(Collectors.joining("、"))
+                + "。\n下一次 recon_run 用 ruleCode=" + resolved.spec().code() + " 就是这一版。";
+    }
+
+    /** 同步跑一次对账，直接返回任务摘要。ruleJson 非空时用内联规则（不落规则库）。 */
+    public String runReconciliation(String ruleCode, String ruleJson, String batchId, String remark) {
+        RuleCatalog.Resolved resolved = resolveRun(ruleCode, ruleJson);
         String batch = blankToNull(batchId);
         if (batch == null) {
             batch = "mcp-" + System.currentTimeMillis();
         }
         String note = blankToNull(remark) == null ? "由 MCP 工具发起" : remark;
-        ReconJob job = engine.run(rule.code(), batch, note);
-        return jobSummary(job.id()) + "\n下一步：recon_list_diffs 看差异明细，recon_explain_job 生成归因。";
+        ReconJob job = engine.run(resolved, batch, note);
+        String rule = resolved.spec().code() + "（" + (resolved.version() == null ? "内联规则" : "v" + resolved.version()) + "）";
+        return "规则 " + rule + "\n" + jobSummary(job.id())
+                + "\n下一步：recon_list_diffs 看差异明细，recon_explain_job 生成归因。";
+    }
+
+    private RuleCatalog.Resolved resolveRun(String ruleCode, String ruleJson) {
+        String inline = blankToNull(ruleJson);
+        if (inline != null) {
+            return inline.startsWith("{")
+                    ? catalog.inlineJson(inline, "MCP 内联的 JSON 规则")
+                    : catalog.inlineYaml(inline, "MCP 内联的 YAML 规则");
+        }
+        String code = blankToNull(ruleCode);
+        if (code == null) {
+            throw new IllegalArgumentException("ruleCode 不能为空（也可以用 ruleJson 内联一份规则，或用 recon_list_rules 看有哪些规则）");
+        }
+        return catalog.resolve(code);
     }
 
     /** 任务总览：状态、扫描量、差异分类、分片明细。 */

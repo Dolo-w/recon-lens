@@ -55,9 +55,30 @@ public final class RuleParser {
         } catch (RuntimeException e) {
             throw RuleException.at(source, "YAML 语法错误: " + e.getMessage());
         }
-        Map<String, Object> root = asMap(loaded, source, "顶层");
+        return parseMap(asMap(loaded, source, "顶层"), source);
+    }
+
+    /**
+     * 把规则原文（YAML）读成 Map：规则库首次导入时需要"原文留档"，
+     * 先读成 Map 再 {@link #parseMap} 校验，存进库里的就是能原样回放的那份配置。
+     */
+    public Map<String, Object> readYaml(String text, String source) {
+        Object loaded;
+        try {
+            loaded = yaml.load(text);
+        } catch (RuntimeException e) {
+            throw RuleException.at(source, "YAML 语法错误: " + e.getMessage());
+        }
+        return asMap(loaded, source, "顶层");
+    }
+
+    /**
+     * 规则体的唯一校验/归一化入口：classpath 的 YAML seed、REST 的 JSON 体、MCP 的参数都走这里。
+     * 保证"接口传进来的规则"和"写在文件里的规则"共用同一套校验，不会出现两套宽松度。
+     */
+    public RuleSpec parseMap(Map<String, Object> root, String source) {
         if (root == null) {
-            throw RuleException.at(source, "文件为空");
+            throw RuleException.at(source, "规则体为空");
         }
 
         String code = requiredString(root, "code", source);
@@ -82,6 +103,8 @@ public final class RuleParser {
         }
 
         validateDiffTypes(source, compare, missing, duplicate);
+        validateMeasureCoverage(source, compare, left);
+        validateMeasureCoverage(source, compare, right);
         warnIfShardMaySplitTheSameKey(source, left, right, shard);
 
         String name = optionalString(root, "name", code);
@@ -102,11 +125,20 @@ public final class RuleParser {
             if (where == null) {
                 continue;
             }
-            if (!where.contains(left.keyField()) && !where.contains(right.keyField())) {
-                LOG.warn("[{}] {} 没有引用业务键 {} / {}，请确认两侧用的是同一个切分口径（例如按 id 取模会把同一笔业务切到不同分片）: {}",
-                        source, side[0], left.keyField(), right.keyField(), where);
+            if (!mentionsAny(where, left.keyHints()) && !mentionsAny(where, right.keyHints())) {
+                LOG.warn("[{}] {} 没有引用业务键维度 {} / {}，请确认两侧用的是同一个切分口径（例如按各自表的 id 取模会把同一笔业务切到不同分片）: {}",
+                        source, side[0], left.keyExpression(), right.keyExpression(), where);
             }
         }
+    }
+
+    private boolean mentionsAny(String where, List<String> hints) {
+        for (String hint : hints) {
+            if (hint != null && !hint.isBlank() && where.contains(hint)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private SideSpec parseSide(Map<String, Object> root, String key, String source) {
@@ -119,16 +151,130 @@ public final class RuleParser {
         if ((table == null) == (sql == null)) {
             throw RuleException.at(source, key + " 必须且只能配置 table 或 sql 之一");
         }
-        String keyField = requiredString(side, "keyField", source + "." + key);
-        FieldType keyType = FieldType.from(optionalString(side, "keyType", "STRING"));
 
-        String orderBy = optionalString(side, "orderBy", keyField);
-        if (!orderBy.equalsIgnoreCase(keyField)) {
-            throw RuleException.at(source, key + ".orderBy 必须等于 keyField（归并式对账依赖按业务键升序取数），当前 orderBy="
-                    + orderBy + ", keyField=" + keyField);
+        Dimension dimension = parseDimension(side, key, source);
+        String keyField = optionalString(side, "keyField", null);
+        FieldType keyType = FieldType.from(optionalString(side, "keyType", "STRING"));
+        Map<String, String> measures = parseMeasures(side, key, source);
+        String where = optionalString(side, "where", null);
+        if (where != null && (where.contains("{index}") || where.contains("{shards}"))) {
+            throw RuleException.at(source, key + ".where 是两侧各自的静态过滤条件，不支持 {index}/{shards} 占位符："
+                    + "分片条件请写 shard.whereLeft / shard.whereRight");
         }
+        String orderBy = optionalString(side, "orderBy", null);
         String label = optionalString(side, "label", key);
-        return new SideSpec(label, table, sql, keyField, keyType, orderBy);
+
+        if (dimension != null && keyField != null) {
+            throw RuleException.at(source, key + " 只能配置 keyField 或 dimension 之一：dimension 描述的就是"
+                    + "「这一笔业务靠什么区分」");
+        }
+        if (dimension == null && keyField == null) {
+            throw RuleException.at(source, "缺少 " + key + ".keyField（也可以改用 dimension 声明对账维度）");
+        }
+
+        if (dimension == null) {
+            if (!measures.isEmpty()) {
+                throw RuleException.at(source, key + ".measures 需要配合 dimension 使用（聚合维度）：把 keyField 改写成 dimension: "
+                        + keyField + " 即可");
+            }
+            if (orderBy == null) {
+                orderBy = keyField;
+            }
+            if (!orderBy.equalsIgnoreCase(keyField)) {
+                throw RuleException.at(source, key + ".orderBy 必须等于 keyField（归并式对账依赖按业务键升序取数），当前 orderBy="
+                        + orderBy + ", keyField=" + keyField);
+            }
+            return new SideSpec(label, table, sql, keyField, keyType, orderBy, null, List.of(),
+                    SideSpec.DEFAULT_DIMENSION_SEPARATOR, Map.of(), where);
+        }
+
+        if (orderBy != null) {
+            throw RuleException.at(source, key + ".orderBy 不需要配置：声明了 dimension 时引擎固定按生成的 "
+                    + SideSpec.KEY_ALIAS + " 升序取数");
+        }
+        return new SideSpec(label, table, sql, SideSpec.KEY_ALIAS, keyType, SideSpec.KEY_ALIAS,
+                dimension.expression(), dimension.columns(), dimension.separator(), measures, where);
+    }
+
+    /** 解析出来的对账维度：要么是一组列（自动拼分隔符），要么是一段 SQL 表达式。 */
+    private record Dimension(String expression, List<String> columns, String separator) {
+    }
+
+    private Dimension parseDimension(Map<String, Object> side, String key, String source) {
+        Object raw = side.get("dimension");
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof List<?> list) {
+            List<String> columns = new ArrayList<>();
+            for (Object item : list) {
+                String column = item == null ? null : String.valueOf(item).trim();
+                if (column == null || column.isEmpty()) {
+                    throw RuleException.at(source, key + ".dimension 列表里不能出现空列名");
+                }
+                columns.add(column);
+            }
+            if (columns.isEmpty()) {
+                throw RuleException.at(source, key + ".dimension 至少配置一列");
+            }
+            String separator = optionalString(side, "dimensionSeparator", SideSpec.DEFAULT_DIMENSION_SEPARATOR);
+            return new Dimension(concat(columns, separator), List.copyOf(columns), separator);
+        }
+        String expression = String.valueOf(raw).trim();
+        if (expression.isEmpty()) {
+            throw RuleException.at(source, key + ".dimension 不能为空");
+        }
+        return new Dimension(expression, List.of(), SideSpec.DEFAULT_DIMENSION_SEPARATOR);
+    }
+
+    /**
+     * 复合维度拼成一个字符串键：{@code CONCAT(a, '|', b)}。
+     * 不用 {@code ||}，因为它在 MySQL 里默认是逻辑或而不是字符串拼接。
+     * 只有一列时直接用该列（不套 CONCAT），这样条件与排序都作用在列本身，还能用上索引。
+     */
+    private String concat(List<String> columns, String separator) {
+        if (columns.size() == 1) {
+            return columns.get(0);
+        }
+        String quoted = separator.replace("'", "''");
+        StringBuilder expression = new StringBuilder("CONCAT(");
+        for (int i = 0; i < columns.size(); i++) {
+            if (i > 0) {
+                expression.append(", '").append(quoted).append("', ");
+            }
+            expression.append(columns.get(i));
+        }
+        return expression.append(")").toString();
+    }
+
+    private Map<String, String> parseMeasures(Map<String, Object> side, String key, String source) {
+        Map<String, Object> raw = asMap(side.get("measures"), source, key + ".measures");
+        if (raw == null) {
+            return Map.of();
+        }
+        Map<String, String> measures = new LinkedHashMap<>();
+        raw.forEach((alias, value) -> {
+            String field = alias == null ? "" : alias.trim();
+            String expression = value == null ? "" : String.valueOf(value).trim();
+            if (field.isEmpty() || expression.isEmpty()) {
+                throw RuleException.at(source, key + ".measures 必须写成 别名: SQL 表达式，例如 amount: SUM(amount)");
+            }
+            measures.put(field, expression);
+        });
+        return measures;
+    }
+
+    /** 聚合维度下比对字段必须由 measures 产出，否则结果集里根本没有这一列。 */
+    private void validateMeasureCoverage(String source, List<FieldRule> compare, SideSpec side) {
+        if (!side.aggregated()) {
+            return;
+        }
+        for (FieldRule rule : compare) {
+            if (!side.measures().containsKey(rule.field())) {
+                throw RuleException.at(source, side.describe() + " 用了聚合维度（measures），比对字段 " + rule.field()
+                        + " 必须出现在 measures 里，例如 " + rule.field() + ": SUM(" + rule.field() + ")");
+            }
+        }
     }
 
     private ShardSpec parseShard(Map<String, Object> root, String source) {

@@ -59,7 +59,9 @@ public class McpServerRunner implements ApplicationRunner {
         McpSyncServer server = McpServer.sync(transport)
                 .serverInfo(SERVER_NAME, SERVER_VERSION)
                 .instructions("配置化对账引擎：先 recon_list_rules 看有哪些规则，再 recon_run 跑对账（返回任务号），"
-                        + "然后用 recon_list_diffs / recon_explain_job 看差异与归因。")
+                        + "然后用 recon_list_diffs / recon_explain_job 看差异与归因。"
+                        + "要换对账维度或比对字段就调 recon_define_rule 提交新版本（立即生效，不需要改代码或重启）；"
+                        + "只想临时试算可以用 recon_run 的 ruleJson 内联一份规则。")
                 .capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
                 .tools(specifications(jsonMapper))
                 .build();
@@ -83,22 +85,34 @@ public class McpServerRunner implements ApplicationRunner {
         List<McpServerFeatures.SyncToolSpecification> specs = new ArrayList<>();
 
         specs.add(tool(jsonMapper, "recon_list_rules",
-                "列出已加载的对账规则：规则编码、两侧数据源、比对字段、分片与重试配置。",
+                "列出规则库里的对账规则（版本、两侧数据源、对账维度、比对字段、分片与重试配置）。",
                 """
                 {"type":"object","properties":{},"additionalProperties":false}
                 """,
                 a -> tools.listRules()));
 
+        specs.add(tool(jsonMapper, "recon_define_rule",
+                "定义或修改一条对账规则：提交规则体（JSON 或 YAML，结构与规则文件一致），立刻落为新版本并对后续任务生效，不需要改代码或重启。",
+                """
+                {"type":"object","properties":{
+                  "ruleBody":{"type":"string","description":"规则体：JSON 或 YAML 文本，字段见 recon_list_rules 的输出（code/left/right/compare/missing/shard/options）"},
+                  "operator":{"type":"string","description":"可选：操作人标识，记入规则版本历史"}},
+                 "required":["ruleBody"],"additionalProperties":false}
+                """,
+                a -> tools.defineRule(text(a, "ruleBody", true), text(a, "operator", false))));
+
         specs.add(tool(jsonMapper, "recon_run",
                 "按规则跑一次对账（同步等待完成），返回任务摘要与差异分类；任务号可用于后续查明细和归因。",
                 """
                 {"type":"object","properties":{
-                  "ruleCode":{"type":"string","description":"规则编码，取自 recon_list_rules"},
+                  "ruleCode":{"type":"string","description":"规则编码，取自 recon_list_rules（与 ruleJson 二选一）"},
+                  "ruleJson":{"type":"string","description":"可选：内联一份规则体（JSON 或 YAML）直接跑，不落规则库，适合临时换维度试算"},
                   "batchId":{"type":"string","description":"可选：业务批次号，便于检索与重跑对账"},
                   "remark":{"type":"string","description":"可选：备注"}},
-                 "required":["ruleCode"],"additionalProperties":false}
+                 "additionalProperties":false}
                 """,
-                a -> tools.runReconciliation(text(a, "ruleCode", true), text(a, "batchId", false), text(a, "remark", false))));
+                a -> tools.runReconciliation(text(a, "ruleCode", false), text(a, "ruleJson", false),
+                        text(a, "batchId", false), text(a, "remark", false))));
 
         specs.add(tool(jsonMapper, "recon_job_summary",
                 "查看某个对账任务的状态、扫描量、差异分类与分片明细。",

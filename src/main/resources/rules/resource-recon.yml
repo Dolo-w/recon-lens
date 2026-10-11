@@ -1,0 +1,47 @@
+# 声明式对账维度示例：复合业务键（账号 + 资源ID）
+#
+# 使用方不写 SQL，只声明"一笔业务靠什么区分"（dimension）。引擎会把 dimension 拼成
+# 一个键列（CONCAT(account_id, '|', resource_id) AS __biz_key），再按它升序取数、
+# 归并匹配 —— 归并式对账依赖"两侧同口径、按业务键升序"，这一点和 keyField 写法完全一样。
+#
+# 复合键的坑与口径见 docs/rule-dsl.md：
+#   * dimension 与 keyField 只能二选一；声明了 dimension 就不要写 orderBy（引擎固定按 __biz_key 取数）
+#   * 分片条件不能把同一个分组切开；这里按 account_id 取模，分组键 (account_id, resource_id) 天然不会被切
+code: RESOURCE_VS_BILL
+name: 资源清单与计费清单对账
+description: 复合维度（账号+资源ID）示例：字符串业务键，单边缺失与重复都按复合键判定
+left:
+  label: 资源清单
+  table: resource_left
+  keyType: STRING
+  dimension: [account_id, resource_id]
+right:
+  label: 计费清单
+  table: resource_right
+  keyType: STRING
+  dimension: [account_id, resource_id]
+shard:
+  count: 2
+  parallelism: 2
+  whereLeft: "MOD(CAST(SUBSTRING(account_id, 5, 4) AS INT), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(account_id, 5, 4) AS INT), {shards}) = {index}"
+compare:
+  - field: monthly_fee
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: FEE_MISMATCH
+    severity: HIGH
+  - field: state
+    type: STRING
+    ignoreCase: true
+    diffType: STATE_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 2

@@ -5,8 +5,8 @@ import io.github.dolow.reconlens.domain.JobStatus;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
 import io.github.dolow.reconlens.domain.ShardStatus;
-import io.github.dolow.reconlens.dsl.RuleRegistry;
 import io.github.dolow.reconlens.dsl.RuleSpec;
+import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +34,7 @@ public class ReconEngine {
 
     private static final Logger log = LoggerFactory.getLogger(ReconEngine.class);
 
-    private final RuleRegistry rules;
+    private final RuleCatalog catalog;
     private final ReconRepository repository;
     private final ShardRunner shardRunner;
     private final ReconProperties properties;
@@ -44,8 +44,8 @@ public class ReconEngine {
         return thread;
     });
 
-    public ReconEngine(RuleRegistry rules, ReconRepository repository, ShardRunner shardRunner, ReconProperties properties) {
-        this.rules = rules;
+    public ReconEngine(RuleCatalog catalog, ReconRepository repository, ShardRunner shardRunner, ReconProperties properties) {
+        this.catalog = catalog;
         this.repository = repository;
         this.shardRunner = shardRunner;
         this.properties = properties;
@@ -53,16 +53,24 @@ public class ReconEngine {
 
     /** 同步跑完整个任务（CLI、启动演示、单测用）。 */
     public ReconJob run(String ruleCode, String batchId, String remark) {
-        RuleSpec rule = rules.get(ruleCode);
-        long jobId = prepare(rule, batchId, remark);
-        execute(rule, jobId, ShardPlanner.plan(rule));
+        return run(catalog.resolve(ruleCode), batchId, remark);
+    }
+
+    /** 用请求里内联的规则跑（不落规则库）：使用方临时换维度、试算用。 */
+    public ReconJob run(RuleCatalog.Resolved resolved, String batchId, String remark) {
+        long jobId = prepare(resolved, batchId, remark);
+        execute(resolved.spec(), jobId, ShardPlanner.plan(resolved.spec()));
         return repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
     }
 
     /** 异步：HTTP 接口立刻返回 jobId，避免大对账把请求线程占住。 */
     public long runAsync(String ruleCode, String batchId, String remark) {
-        RuleSpec rule = rules.get(ruleCode);
-        long jobId = prepare(rule, batchId, remark);
+        return runAsync(catalog.resolve(ruleCode), batchId, remark);
+    }
+
+    public long runAsync(RuleCatalog.Resolved resolved, String batchId, String remark) {
+        long jobId = prepare(resolved, batchId, remark);
+        RuleSpec rule = resolved.spec();
         submitter.submit(() -> {
             try {
                 execute(rule, jobId, ShardPlanner.plan(rule));
@@ -74,14 +82,14 @@ public class ReconEngine {
         return jobId;
     }
 
-    /** 断点续跑：只重做失败分片；onlyFailed=false 时全部重做。 */
+    /** 断点续跑：只重做失败分片；onlyFailed=false 时全部重做。规则按任务创建时的快照执行。 */
     public ReconJob retry(long jobId, boolean onlyFailed) {
         ReconJob job = repository.findJob(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("任务不存在: " + jobId));
         if (!job.status().finished()) {
             throw new IllegalStateException("任务 #" + jobId + " 当前状态为 " + job.status() + "，执行中的任务不能重跑");
         }
-        RuleSpec rule = rules.get(job.ruleCode());
+        RuleSpec rule = ruleForJob(job);
         List<Integer> shardIds = repository.shardIds(jobId, onlyFailed ? ShardStatus.FAILED : null);
         if (shardIds.isEmpty()) {
             log.info("任务 #{} 没有需要重跑的分片", jobId);
@@ -96,12 +104,32 @@ public class ReconEngine {
         return repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
     }
 
-    private long prepare(RuleSpec rule, String batchId, String remark) {
+    /**
+     * 一个任务该用哪份规则：优先用任务创建时的快照（规则后来改过也不会让历史任务换语义），
+     * 没有快照（老任务 / 内联任务）时退回归档版本，最后才用最新版本。重跑与差异归因共用这一份。
+     */
+    public RuleSpec ruleForJob(ReconJob job) {
+        String snapshot = repository.ruleSnapshot(job.id()).orElse(null);
+        if (snapshot != null && !snapshot.isBlank()) {
+            return catalog.parseSnapshot(snapshot, "任务 #" + job.id() + " 的规则快照");
+        }
+        Integer version = repository.ruleVersion(job.id());
+        if (version != null) {
+            log.warn("任务 #{} 没有规则快照，按规则库 v{} 重跑", job.id(), version);
+            return catalog.resolve(job.ruleCode(), version).spec();
+        }
+        log.warn("任务 #{} 既没有规则快照也没有版本号，按规则 {} 的最新版本重跑", job.id(), job.ruleCode());
+        return catalog.resolve(job.ruleCode()).spec();
+    }
+
+    private long prepare(RuleCatalog.Resolved resolved, String batchId, String remark) {
+        RuleSpec rule = resolved.spec();
         int shardCount = rule.shard().count();
-        long jobId = repository.createJob(rule.code(), batchId, remark, shardCount);
+        long jobId = repository.createJob(rule.code(), resolved.version(), resolved.snapshot(), batchId, remark, shardCount);
         repository.createShards(jobId, shardCount);
         repository.markJobRunning(jobId);
-        log.info("创建对账任务 #{} 规则={} 批次={} 分片数={}", jobId, rule.code(), batchId, shardCount);
+        log.info("创建对账任务 #{} 规则={} 版本={} 批次={} 分片数={}", jobId, rule.code(),
+                resolved.version() == null ? "内联" : "v" + resolved.version(), batchId, shardCount);
         return jobId;
     }
 

@@ -27,16 +27,66 @@ class ReconMcpToolsTest {
     void listRulesTellsTheAgentWhatItCanRun() {
         String text = tools.listRules();
 
-        assertThat(text).contains("已加载 2 条对账规则")
+        assertThat(text).contains("规则库里有 4 条对账规则")
                 .contains("BILL_VS_SETTLE").contains("CUSTOMER_SUM_RECON")
+                .contains("RESOURCE_VS_BILL").contains("CUSTOMER_STATUS_RECON")
                 .contains("左侧：").contains("右侧：")
                 .contains("比对字段：amount、status")
-                .contains("分片 4，并行 4");
+                .contains("分片 4，并行 4")
+                .contains("recon_define_rule");
+    }
+
+    @Test
+    void defineRuleStoresANewVersionAndRunsWithAnInlineRule() {
+        String defined = tools.defineRule("""
+                code: MCP_DEFINED_RULE
+                name: MCP 定义的规则
+                left:
+                  label: 资源清单
+                  table: resource_left
+                  dimension: [account_id, resource_id]
+                right:
+                  label: 计费清单
+                  table: resource_right
+                  dimension: [account_id, resource_id]
+                shard:
+                  count: 1
+                  parallelism: 1
+                compare:
+                  - field: monthly_fee
+                    type: DECIMAL
+                    tolerance: 0.01
+                    diffType: FEE_MISMATCH
+                    severity: HIGH
+                missing:
+                  leftMissingDiffType: MISSING_LEFT
+                  rightMissingDiffType: MISSING_RIGHT
+                  severity: HIGH
+                """, "agent");
+
+        assertThat(defined).contains("已落库为 v").contains("维度=");
+
+        // 定义完立刻能跑；也能用 ruleJson 临时试算一份不落库的规则
+        String summary = tools.jobSummary(jobIdOf(tools.runReconciliation("MCP_DEFINED_RULE", null, "mcp-rule", "跑新规则")));
+        assertThat(summary).contains("规则 MCP_DEFINED_RULE").contains("FEE_MISMATCH=1");
+
+        String inline = tools.runReconciliation(null, """
+                {
+                  "code": "MCP_INLINE_RULE",
+                  "left": {"table": "bill_left", "keyField": "order_no"},
+                  "right": {"table": "bill_right", "keyField": "order_no"},
+                  "shard": {"count": 1, "parallelism": 1},
+                  "compare": [{"field": "amount", "type": "DECIMAL", "tolerance": 0.01,
+                               "diffType": "AMOUNT_MISMATCH", "severity": "HIGH"}],
+                  "missing": {"leftMissingDiffType": "MISSING_LEFT", "rightMissingDiffType": "MISSING_RIGHT"}
+                }
+                """, "mcp-inline", "临时试算");
+        assertThat(inline).contains("规则 MCP_INLINE_RULE（内联规则）").contains("AMOUNT_MISMATCH=2");
     }
 
     @Test
     void runReturnsSummaryAndDiffsCanBeListedAndExplained() {
-        long jobId = jobIdOf(tools.runReconciliation("BILL_VS_SETTLE", "mcp-it", "MCP 工具测试"));
+        long jobId = jobIdOf(tools.runReconciliation("BILL_VS_SETTLE", null, "mcp-it", "MCP 工具测试"));
 
         String summary = tools.jobSummary(jobId);
         assertThat(summary).contains("规则 BILL_VS_SETTLE")
@@ -64,7 +114,7 @@ class ReconMcpToolsTest {
 
     @Test
     void unknownInputsAreReportedInPlainWords() {
-        assertThatThrownBy(() -> tools.runReconciliation("NO_SUCH_RULE", null, null))
+        assertThatThrownBy(() -> tools.runReconciliation("NO_SUCH_RULE", null, null, null))
                 .hasMessageContaining("未找到规则 NO_SUCH_RULE");
         assertThatThrownBy(() -> tools.jobSummary(999_999L))
                 .hasMessageContaining("任务不存在：999999");

@@ -9,6 +9,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -100,7 +101,8 @@ class RuleParserTest {
 
     @Test
     void bundledRulesAreValid() throws Exception {
-        for (String name : new String[]{"/rules/bill-recon.yml", "/rules/customer-sum-recon.yml"}) {
+        for (String name : new String[]{"/rules/bill-recon.yml", "/rules/customer-sum-recon.yml",
+                "/rules/resource-recon.yml", "/rules/customer-status-recon.yml"}) {
             try (InputStream in = getClass().getResourceAsStream(name)) {
                 assertThat(in).as("规则文件存在: %s", name).isNotNull();
                 RuleSpec rule = parser.parse(in, name);
@@ -108,6 +110,21 @@ class RuleParserTest {
                 assertThat(rule.compare()).isNotEmpty();
             }
         }
+    }
+
+    @Test
+    void keepsThePerSideStaticFilterAndRejectsPlaceholdersInIt() {
+        RuleSpec filtered = parse(VALID.replace("  orderBy: order_no\nright:",
+                "  orderBy: order_no\n  where: \"state <> 'DELETED'\"\nright:"));
+
+        assertThat(filtered.left().where()).isEqualTo("state <> 'DELETED'");
+        assertThat(filtered.right().where()).isNull();
+
+        String withPlaceholder = VALID.replace("  orderBy: order_no\nright:",
+                "  orderBy: order_no\n  where: \"MOD(id, {shards}) = {index}\"\nright:");
+        assertThatThrownBy(() -> parse(withPlaceholder))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("不支持 {index}/{shards} 占位符");
     }
 
     @Test
@@ -165,5 +182,72 @@ class RuleParserTest {
         assertThatThrownBy(() -> parse(yaml))
                 .isInstanceOf(RuleException.class)
                 .hasMessageContaining("code 只能是大写字母");
+    }
+
+    @Test
+    void singleColumnDimensionUsesTheColumnItself() {
+        RuleSpec scalar = parse(dimensionRule("  keyType: STRING\n  dimension: order_no\n"));
+        RuleSpec listed = parse(dimensionRule("  keyType: STRING\n  dimension: [order_no]\n"));
+
+        for (RuleSpec rule : List.of(scalar, listed)) {
+            assertThat(rule.left().derivedKey()).isTrue();
+            assertThat(rule.left().keyField()).isEqualTo(SideSpec.KEY_ALIAS);
+            assertThat(rule.left().keyExpression()).isEqualTo("order_no");
+            assertThat(rule.left().orderBy()).isEqualTo(SideSpec.KEY_ALIAS);
+            assertThat(rule.left().aggregated()).isFalse();
+        }
+        assertThat(listed.left().dimensionColumns()).containsExactly("order_no");
+    }
+
+    @Test
+    void compositeDimensionIsConcatenatedWithTheSeparator() {
+        RuleSpec rule = parse(dimensionRule("  keyType: STRING\n  dimension: [customer_id, status]\n"));
+        assertThat(rule.left().keyExpression()).isEqualTo("CONCAT(customer_id, '|', status)");
+        assertThat(rule.left().dimensionColumns()).containsExactly("customer_id", "status");
+
+        RuleSpec custom = parse(dimensionRule("  keyType: STRING\n  dimension: [customer_id, status]\n"
+                + "  dimensionSeparator: \"/\"\n"));
+        assertThat(custom.left().keyExpression()).isEqualTo("CONCAT(customer_id, '/', status)");
+    }
+
+    @Test
+    void measuresRequireADimension() {
+        String yaml = dimensionRule("  keyType: STRING\n  keyField: order_no\n  orderBy: order_no\n  measures:\n    amount: SUM(amount)\n");
+
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("measures 需要配合 dimension 使用");
+    }
+
+    @Test
+    void dimensionAndKeyFieldAreMutuallyExclusive() {
+        String yaml = dimensionRule("  keyType: STRING\n  keyField: order_no\n  dimension: order_no\n");
+
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("只能配置 keyField 或 dimension 之一");
+    }
+
+    @Test
+    void derivedDimensionDoesNotAcceptOrderBy() {
+        String yaml = dimensionRule("  keyType: STRING\n  dimension: order_no\n  orderBy: order_no\n");
+
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("orderBy 不需要配置");
+    }
+
+    @Test
+    void aggregatedDimensionMustProduceEveryCompareField() {
+        String yaml = dimensionRule("  keyType: STRING\n  dimension: customer_id\n  measures:\n    amount: SUM(amount)\n");
+
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("比对字段 status 必须出现在 measures 里");
+    }
+
+    /** 把 VALID 左侧的 keyField 写法换成声明式维度写法，其余段落保持原样。 */
+    private String dimensionRule(String leftLines) {
+        return VALID.replace("  keyField: order_no\n  keyType: STRING\n  orderBy: order_no\nright:", leftLines + "right:");
     }
 }

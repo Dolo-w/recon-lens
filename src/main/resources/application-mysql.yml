@@ -18,6 +18,8 @@ spring:
 
 recon:
   rules-location: ${RECON_RULES:file:./rules/}
+  # YAML 只当种子：库里已存在的 code 不会被覆盖，之后改规则走 POST /api/rules
+  seed-rules: ${RECON_SEED_RULES:true}
   engine:
     parallelism: 8
     fetch-size: 2000

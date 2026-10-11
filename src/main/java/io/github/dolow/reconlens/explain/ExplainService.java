@@ -2,8 +2,8 @@ package io.github.dolow.reconlens.explain;
 
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.domain.ReconJob;
-import io.github.dolow.reconlens.dsl.RuleRegistry;
 import io.github.dolow.reconlens.dsl.RuleSpec;
+import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,14 +23,14 @@ public class ExplainService {
 
     private final RuleBasedExplainer ruleBased;
     private final LlmDiffExplainer llm;
-    private final RuleRegistry rules;
+    private final ReconEngine engine;
     private final ReconRepository repository;
 
     public ExplainService(RuleBasedExplainer ruleBased, LlmDiffExplainer llm,
-                          RuleRegistry rules, ReconRepository repository) {
+                          ReconEngine engine, ReconRepository repository) {
         this.ruleBased = ruleBased;
         this.llm = llm;
-        this.rules = rules;
+        this.engine = engine;
         this.repository = repository;
     }
 
@@ -40,7 +40,7 @@ public class ExplainService {
                 .orElseThrow(() -> new IllegalArgumentException("差异不存在: " + diffId));
         ReconJob job = repository.findJob(diff.jobId())
                 .orElseThrow(() -> new IllegalStateException("差异所属任务丢失: " + diff.jobId()));
-        RuleSpec rule = rules.get(job.ruleCode());
+        RuleSpec rule = engine.ruleForJob(job);
         String text = choose(rule, diff);
         repository.updateExplanation(diffId, text);
         return text;
@@ -50,7 +50,7 @@ public class ExplainService {
     public int explainJob(long jobId, int limit) {
         ReconJob job = repository.findJob(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("任务不存在: " + jobId));
-        RuleSpec rule = rules.get(job.ruleCode());
+        RuleSpec rule = engine.ruleForJob(job);
         List<DiffRecord> pending = repository.listUnexplainedDiffs(jobId, limit);
         if (pending.isEmpty()) {
             return 0;

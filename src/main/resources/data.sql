@@ -46,3 +46,27 @@ INSERT INTO bill_right (id, order_no, customer_id, amount, status, updated_at) V
  (19, 'ORD20260019', 'C018',  1500.00, 'PAID',   '2026-10-01 10:18:06'),
  (20, 'ORD20260020', 'C019',   999.00, 'PAID',   '2026-10-01 10:19:05'),
  (21, 'ORD20260021', 'C020',  1234.00, 'PAID',   '2026-10-01 10:20:05');
+
+-- 资源/计费对账演示数据：复合维度（账号 + 资源ID）下埋了 5 类差异
+-- 金额不一致 ACC-1001/r-ecs-0001、状态不一致 ACC-1003/r-ecs-0003、
+-- 计费清单缺失 ACC-1004/r-ecs-0004、资源清单缺失 ACC-1005/r-eip-0002、计费清单重复 ACC-1002/r-obs-0001
+INSERT INTO resource_left (id, account_id, resource_id, region, spec, monthly_fee, state) VALUES
+ (1, 'ACC-1001', 'r-ecs-0001', 'cn-hangzhou', 'ecs.g6.large',    320.00, 'RUNNING'),
+ (2, 'ACC-1001', 'r-ecs-0002', 'cn-hangzhou', 'ecs.g6.large',    320.00, 'RUNNING'),
+ (3, 'ACC-1002', 'r-obs-0001', 'cn-shanghai', 'obs.standard',    128.50, 'RUNNING'),
+ (4, 'ACC-1002', 'r-rds-0001', 'cn-shanghai', 'rds.mysql.c1',    960.00, 'RUNNING'),
+ (5, 'ACC-1003', 'r-ecs-0003', 'cn-beijing',  'ecs.c6.large',    260.00, 'STOPPED'),
+ (6, 'ACC-1003', 'r-eip-0001', 'cn-beijing',  'eip.bandwidth',    45.00, 'RUNNING'),
+ (7, 'ACC-1004', 'r-ecs-0004', 'cn-shenzhen', 'ecs.g6.large',    320.00, 'RUNNING'),
+ (8, 'ACC-1003', 'r-obs-0003', 'cn-beijing',  'obs.standard',    128.50, 'RUNNING');
+
+INSERT INTO resource_right (id, account_id, resource_id, region, spec, monthly_fee, state) VALUES
+ (1, 'ACC-1001', 'r-ecs-0001', 'cn-hangzhou', 'ecs.g6.large',    310.00, 'RUNNING'),
+ (2, 'ACC-1001', 'r-ecs-0002', 'cn-hangzhou', 'ecs.g6.large',    320.00, 'RUNNING'),
+ (3, 'ACC-1002', 'r-obs-0001', 'cn-shanghai', 'obs.standard',    128.50, 'RUNNING'),
+ (4, 'ACC-1002', 'r-obs-0001', 'cn-shanghai', 'obs.standard',    128.50, 'RUNNING'),
+ (5, 'ACC-1002', 'r-rds-0001', 'cn-shanghai', 'rds.mysql.c1',    960.00, 'RUNNING'),
+ (6, 'ACC-1003', 'r-ecs-0003', 'cn-beijing',  'ecs.c6.large',    260.00, 'RUNNING'),
+ (7, 'ACC-1003', 'r-eip-0001', 'cn-beijing',  'eip.bandwidth',    45.00, 'RUNNING'),
+ (8, 'ACC-1003', 'r-obs-0003', 'cn-beijing',  'obs.standard',    128.50, 'RUNNING'),
+ (9, 'ACC-1005', 'r-eip-0002', 'cn-shenzhen', 'eip.bandwidth',    45.00, 'RUNNING');

@@ -1,0 +1,49 @@
+# 声明式维度 + 聚合口径示例：按"客户 + 状态"汇总对账
+#
+# measures 声明聚合列（别名: SQL 表达式），引擎生成的取数 SQL 会先分组再比对：
+#   SELECT CONCAT(customer_id, '|', status) AS __biz_key, SUM(amount) AS amount, COUNT(*) AS order_count
+#   FROM (SELECT * FROM bill_left) src GROUP BY CONCAT(customer_id, '|', status) ORDER BY __biz_key
+# 因此比对字段必须是 measures 里产出的别名（amount / order_count），不能是原始明细列。
+#
+# 聚合维度下的分片要点：分片条件不能把某个分组切到两个分片（否则两侧各算一半，会报假差异）。
+# 这里按 customer_id 取模 —— customer_id 是分组键的一部分，同一个分组必然落在同一个分片。
+code: CUSTOMER_STATUS_RECON
+name: 客户+状态汇总对账（声明式维度与聚合）
+description: 用 dimension 声明复合维度、用 measures 声明聚合口径，不写 SQL 也能做汇总对账
+left:
+  label: 账单
+  table: bill_left
+  keyType: STRING
+  dimension: [customer_id, status]
+  measures:
+    amount: SUM(amount)
+    order_count: COUNT(*)
+right:
+  label: 结算
+  table: bill_right
+  keyType: STRING
+  dimension: [customer_id, status]
+  measures:
+    amount: SUM(amount)
+    order_count: COUNT(*)
+shard:
+  count: 2
+  parallelism: 2
+  whereLeft: "MOD(CAST(SUBSTRING(customer_id, 2, 3) AS INT), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(customer_id, 2, 3) AS INT), {shards}) = {index}"
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: order_count
+    type: LONG
+    diffType: COUNT_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+options:
+  maxAttempts: 2

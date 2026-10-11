@@ -3,8 +3,10 @@ package io.github.dolow.reconlens.web;
 import io.github.dolow.reconlens.domain.JobStatus;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
+import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.explain.ExplainService;
+import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -28,30 +30,49 @@ public class JobController {
     private final ReconEngine engine;
     private final ReconRepository repository;
     private final ExplainService explainService;
+    private final RuleCatalog catalog;
 
-    public JobController(ReconEngine engine, ReconRepository repository, ExplainService explainService) {
+    public JobController(ReconEngine engine, ReconRepository repository, ExplainService explainService, RuleCatalog catalog) {
         this.engine = engine;
         this.repository = repository;
         this.explainService = explainService;
+        this.catalog = catalog;
     }
 
     @PostMapping
     public ResponseEntity<Map<String, Object>> create(@RequestBody JobRequest request) {
-        if (request.ruleCode() == null || request.ruleCode().isBlank()) {
-            throw new IllegalArgumentException("ruleCode 不能为空");
-        }
+        RuleCatalog.Resolved resolved = resolveRule(request);
         Map<String, Object> body = new LinkedHashMap<>();
         if (Boolean.TRUE.equals(request.sync())) {
-            ReconJob job = engine.run(request.ruleCode(), request.batchId(), request.remark());
+            ReconJob job = engine.run(resolved, request.batchId(), request.remark());
             body.put("jobId", job.id());
+            body.put("ruleCode", job.ruleCode());
+            body.put("ruleVersion", resolved.version());
             body.put("status", job.status());
             body.put("diffRows", job.diffRows());
             return ResponseEntity.ok(body);
         }
-        long jobId = engine.runAsync(request.ruleCode(), request.batchId(), request.remark());
+        long jobId = engine.runAsync(resolved, request.batchId(), request.remark());
         body.put("jobId", jobId);
+        body.put("ruleCode", resolved.spec().code());
+        body.put("ruleVersion", resolved.version());
         body.put("status", JobStatus.PENDING);
         return ResponseEntity.accepted().body(body);
+    }
+
+    /**
+     * 用哪条规则：请求里带了内联规则就用内联的（不落库），否则按 ruleCode 取规则库的最新版本。
+     */
+    private RuleCatalog.Resolved resolveRule(JobRequest request) {
+        if (request.inline()) {
+            return request.ruleYaml() != null && !request.ruleYaml().isBlank()
+                    ? catalog.inlineYaml(request.ruleYaml(), "请求内联的 YAML 规则")
+                    : catalog.inline(request.rule(), "请求内联的 JSON 规则");
+        }
+        if (request.ruleCode() == null || request.ruleCode().isBlank()) {
+            throw new IllegalArgumentException("ruleCode 不能为空（也可以用 rule / ruleYaml 内联一份规则）");
+        }
+        return catalog.resolve(request.ruleCode());
     }
 
     @GetMapping
@@ -67,6 +88,7 @@ public class JobController {
         List<ReconShard> shards = repository.listShards(id);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("job", job);
+        body.put("ruleVersion", repository.ruleVersion(id));
         body.put("shards", shards);
         body.put("diffSummary", repository.summaryByType(id));
         body.put("explainer", explainService.llmName());
@@ -86,6 +108,12 @@ public class JobController {
     @org.springframework.web.bind.annotation.ExceptionHandler(NotFoundException.class)
     public ResponseEntity<Map<String, Object>> handleNotFound(NotFoundException e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", e.getMessage()));
+    }
+
+    /** 规则体不合法（和规则文件同一套校验）→ 400，别让它变成 500。 */
+    @org.springframework.web.bind.annotation.ExceptionHandler({RuleException.class, IllegalArgumentException.class})
+    public ResponseEntity<Map<String, Object>> handleBadRequest(RuntimeException e) {
+        return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
     }
 
     /** 极简的 404 语义，避免为了一个状态码引入额外依赖。 */

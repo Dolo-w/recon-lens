@@ -44,11 +44,25 @@ public class ReconRepository implements DiffWriter {
 
     // ---------------- 任务 ----------------
 
-    public long createJob(String ruleCode, String batchId, String remark, int shardCount) {
-        jdbc.update("INSERT INTO recon_job (rule_code, batch_id, status, shard_count, remark) VALUES (?,?,?,?,?)",
-                ruleCode, batchId, JobStatus.PENDING.name(), shardCount, remark);
+    public long createJob(String ruleCode, Integer ruleVersion, String ruleSnapshot, String batchId, String remark, int shardCount) {
+        jdbc.update("INSERT INTO recon_job (rule_code, rule_version, rule_snapshot, batch_id, status, shard_count, remark) VALUES (?,?,?,?,?,?,?)",
+                ruleCode, ruleVersion, ruleSnapshot, batchId, JobStatus.PENDING.name(), shardCount, remark);
         Long id = jdbc.queryForObject("SELECT MAX(id) FROM recon_job", Long.class);
         return id == null ? -1L : id;
+    }
+
+    /** 任务生效的规则版本（内联规则或历史任务可能没有）。 */
+    public Integer ruleVersion(long jobId) {
+        List<Integer> found = jdbc.queryForList("SELECT rule_version FROM recon_job WHERE id = ?", Integer.class, jobId);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    /**
+     * 任务创建时的规则快照：重跑照着它执行，规则后来被改过也不会让历史任务换语义。
+     */
+    public Optional<String> ruleSnapshot(long jobId) {
+        List<String> found = jdbc.queryForList("SELECT rule_snapshot FROM recon_job WHERE id = ?", String.class, jobId);
+        return found.isEmpty() ? Optional.empty() : Optional.ofNullable(found.get(0));
     }
 
     public void createShards(long jobId, int shardCount) {

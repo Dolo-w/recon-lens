@@ -11,6 +11,9 @@ public class ReconProperties {
     /** 规则 DSL 位置，支持 classpath:rules/ 或 file:/path/to/rules/ */
     private String rulesLocation = "classpath:rules/";
 
+    /** 启动时是否把规则目录里的 YAML 导入规则库（只导入库里还没有的 code，作为 v1） */
+    private boolean seedRules = true;
+
     private final Engine engine = new Engine();
     private final Llm llm = new Llm();
 
@@ -20,6 +23,14 @@ public class ReconProperties {
 
     public void setRulesLocation(String rulesLocation) {
         this.rulesLocation = rulesLocation;
+    }
+
+    public boolean isSeedRules() {
+        return seedRules;
+    }
+
+    public void setSeedRules(boolean seedRules) {
+        this.seedRules = seedRules;
     }
 
     public Engine getEngine() {
