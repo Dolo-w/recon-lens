@@ -58,8 +58,11 @@ CREATE TABLE bill_right (
 
 -- 主体：与左侧一一对应，但
 --   n % 10000 = 0  → 右侧整条缺失     → MISSING_RIGHT（100 条）
---   n % 2000  = 0  → 金额各减 1 元     → AMOUNT_MISMATCH（500 条）
---   n % 5000  = 0  → 状态取反          → STATUS_MISMATCH（200 条）
+--   n % 2000  = 0  → 金额各减 1 元     → AMOUNT_MISMATCH（500 - 100 = 400 条）
+--   n % 5000  = 0  → 状态取反          → STATUS_MISMATCH（200 - 100 = 100 条）
+-- 注意：n % 2000 = 0 与 n % 5000 = 0 的交集恰好是 n % 10000 = 0，
+--       这些行右侧整条缺失，已经算作 MISSING_RIGHT，不会再产生金额/状态差异，
+--       所以两个数值差异集合互不重叠，总差异 = 400 + 100 + 100 + 100 + 100 = 800。
 INSERT INTO bill_right (n, order_no, customer_id, amount, status, updated_at)
 SELECT n,
        order_no,
@@ -92,13 +95,13 @@ SELECT 'bill_left' AS t, COUNT(*) AS rows_, COUNT(DISTINCT order_no) AS keys_ FR
 UNION ALL
 SELECT 'bill_right', COUNT(*), COUNT(DISTINCT order_no) FROM bill_right;
 
--- 差异预期（用规则 BILL_VS_SETTLE 跑一遍后应与此吻合）
---   VALUE_MISMATCH(amount)  500 条   （其中与状态取反、重复重叠的部分仍算一次 amount 差异）
---   VALUE_MISMATCH(status)  200 条
---   MISSING_RIGHT           100 条
---   MISSING_LEFT            100 条
---   DUPLICATE_KEY           100 条
-SELECT 'expected' AS kind, 'AMOUNT_MISMATCH≈500 / STATUS_MISMATCH≈200 / MISSING_RIGHT=100 / MISSING_LEFT=100 / DUPLICATE_KEY=100' AS detail;
+-- 差异预期（用规则 BILL_VS_SETTLE 跑一遍后应与此吻合，共 800 条）
+--   AMOUNT_MISMATCH          400 条
+--   STATUS_MISMATCH          100 条
+--   MISSING_RIGHT            100 条
+--   MISSING_LEFT             100 条
+--   DUPLICATE_KEY            100 条
+SELECT 'expected' AS kind, 'AMOUNT_MISMATCH=400 / STATUS_MISMATCH=100 / MISSING_RIGHT=100 / MISSING_LEFT=100 / DUPLICATE_KEY=100（合计 800）' AS detail;
 
 -- ---------------------------------------------------------------- 压测
 -- 关键观察三项：

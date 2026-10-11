@@ -55,6 +55,24 @@ mvn test        # 单元测试 + 端到端测试（真 H2、真 SQL、真并发�
 
 ## 核心设计
 
+```mermaid
+flowchart LR
+    R[rules/*.yml] -->|RuleParser 启动期校验| REG[RuleRegistry]
+    API[POST /api/jobs] --> ENG[ReconEngine]
+    REG --> ENG
+    ENG -->|ShardPlanner 替换<br/>{shards} {index}| SP[分片计划 ×N]
+    SP --> POOL[ThreadPool<br/>min 规则并行度, 全局并行度]
+    POOL --> RUN[ShardRunner 每个分片]
+    RUN -->|先删本分片旧差异| DB[(recon_job /<br/>recon_shard /<br/>recon_diff)]
+    RUN --> CUR[流式游标<br/>ORDER BY 业务键]
+    CUR --> MM[MergeMatcher<br/>双指针归并]
+    MM -->|VALUE_MISMATCH<br/>MISSING_LEFT / RIGHT<br/>DUPLICATE_KEY| RUN
+    DB --> EXP[ExplainService]
+    EXP --> TPL[RuleBasedExplainer<br/>离线模板]
+    EXP --> LLM[LlmDiffExplainer<br/>OpenAI 兼容, 失败降级]
+    EXP --> API2[GET /api/diffs<br/>POST /api/jobs/id/retry]
+```
+
 ### 1. 规则即配置
 
 一条对账规则的完整定义（`src/main/resources/rules/bill-recon.yml`）：
@@ -112,6 +130,11 @@ JDBC 游标（`TYPE_FORWARD_ONLY` + `fetchSize`）保证只驻留有限行 —�
 > （如 `MOD(id, {shards}) = {index}`）切分 —— 那样同一笔业务会被切到不同分片，两边都看不到对方，结果是一堆
 > 假缺失。解析器会在 `where` 完全不引用业务键时打 WARN 提醒。
 
+> **切分谓词要能命中索引**：`WHERE MOD(SUBSTRING(order_no, …)) = {index}` 这类"列上套函数"的谓词用不了索引，
+> 每个分片都要全表扫一遍。用百万级数据实测（`docs/benchmark.md`）：同一份数据，8 分片 37.4 秒、1 分片 4.3 秒，
+> **差异结果完全一致，但分片越多越慢**。要让分片真的提速，先把分片桶做成索引列
+> （MySQL 8 函数索引 `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引），规则里只引用这个列。
+
 ### 4. 差异分类 + 归因
 
 引擎内部的差异语义固定为四类（`DiffKind`）：`VALUE_MISMATCH` / `MISSING_LEFT` / `MISSING_RIGHT` / `DUPLICATE_KEY`；
@@ -155,6 +178,22 @@ mvn spring-boot:run -Dspring-boot.run.profiles=mysql
 
 千万级数据的造数与压测方法见 [docs/benchmark.md](docs/benchmark.md)。
 
+## 压测：百万级实测（仓库内可复现，不需要 MySQL）
+
+```bash
+mvn -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
+    -Dsurefire.argLine="-Xmx2g -Dfile.encoding=UTF-8" test
+```
+
+| 跑法 | 分片 | 耗时 | 左侧扫描 | 右侧扫描 | 差异 |
+| --- | --- | --- | --- | --- | --- |
+| `BIG_VS_SETTLE` | 8 | 37,426 ms | 1,000,000 | 1,000,100 | 800 |
+| `BIG_VS_SETTLE_SINGLE` | 1 | 4,334 ms | 1,000,000 | 1,000,100 | 800 |
+
+两次的差异分类逐项相同（`AMOUNT_MISMATCH=400 / STATUS_MISMATCH=100 / MISSING_RIGHT=100 / MISSING_LEFT=100 / DUPLICATE_KEY=100`），
+测试里就是这么断言的：**分片只影响耗时，不影响结果**。8 分片反而更慢，原因与解法见
+[docs/benchmark.md](docs/benchmark.md)。
+
 ## 项目结构
 
 ```
@@ -172,6 +211,9 @@ tools/          造数脚本
 ## 后续计划
 
 - [ ] `recon_shard` 落的检查点支持「同一分片内部」续跑（当前粒度是分片）
+- [ ] `shard.strategy: RANGE`：按业务键范围切分。当前 where 模板只有 `{index}` / `{shards}` 两个占位符，
+      所有分片共用一段 where，表达不了"每个分片一段连续键"，而键范围才是真正走索引的切法 ——
+      这个缺口是这次百万级压测逼出来的
 - [ ] 差异结果导出（CSV / 飞书表格）与按批次对比
 - [ ] 规则热重载（不重启刷 `file:` 目录）
 - [ ] 归因结果回写人工标注，做一个"差异原因"知识库

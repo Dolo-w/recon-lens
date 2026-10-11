@@ -1,0 +1,38 @@
+code: BIG_VS_SETTLE
+name: 百万级账单与结算对账（压测用）
+description: 与 BILL_VS_SETTLE 同构，只是换成 big_left / big_right 两张百万级表
+# 注意：压测规则单独放在 src/test/resources/bench-rules/ 下。
+# 不能放进 src/test/resources/rules/：类路径里 test-classes 排在 classes 前面，
+# classpath:rules/ 会只解析到测试资源那一个目录，把主规则（BILL_VS_SETTLE 等）整个遮住。
+
+left:
+  label: 账单
+  table: big_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+right:
+  label: 结算
+  table: big_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+
+shard:
+  count: 8
+  parallelism: 8
+  # 定宽业务键按数值取模：两侧口径一致，分片数怎么改都不影响差异结果
+  whereLeft: "MOD(CAST(SUBSTRING(order_no, 4) AS BIGINT), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(order_no, 4) AS BIGINT), {shards}) = {index}"
+
+compare:
+  - { field: amount, type: DECIMAL, tolerance: 0.01, diffType: AMOUNT_MISMATCH, severity: HIGH }
+  - { field: status, type: STRING,  ignoreCase: true,  diffType: STATUS_MISMATCH,  severity: MEDIUM }
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate: { diffType: DUPLICATE_KEY, severity: MEDIUM }
+options:   { maxAttempts: 2 }

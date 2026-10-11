@@ -84,9 +84,20 @@ POST /api/jobs {ruleCode, batchId}
 | `engine.MergeMatcherTest` | 五种差异形态（含同键重复、尾部残留）与统计口径 |
 | `engine.ShardPlannerTest` | 占位符替换、取数 SQL 包裹、不分片规则无 where |
 | `ReconEngineEndToEndTest` | 真 H2 + 真 SQL + 真线程池：6 类差异、幂等重跑、归因、自定义 SQL 规则、未知规则、只重跑失败分片 |
+| `BenchH2Test`（`@Tag("bench")`，默认不跑） | 百万级两张表：分片口径不影响差异、吞吐与堆占用实测，见 [benchmark.md](benchmark.md) |
+
+CI 配置在 `.github/workflows/build.yml`：`mvn -B test`（压测被 `surefire.excludedGroups=bench` 排除，
+所以 CI 只跑秒级的 37 个用例）。
+
+> **踩过的坑：测试资源会遮住主资源目录。** 造数规则一开始放在 `src/test/resources/rules/` 下，
+> 结果 `classpath:rules/` 只解析到了 `test-classes/rules`（类路径里 test-classes 排在 classes 前面），
+> 主规则 `BILL_VS_SETTLE` 整个消失、端到端测试全红。压测规则现在单独放
+> `src/test/resources/bench-rules/`，用 `recon.rules-location=classpath:bench-rules/` 指过去。
 
 ## 已知边界
 
 - 检查点粒度是分片，不是分片内部的游标位置：一个分片失败后从头重算（因为结果幂等，重算比续跑更简单可靠）。
+- 分片谓词若写成"列上套函数"（`MOD(SUBSTRING(...))`）就用不到索引，每个分片全表扫一遍；
+  实测 8 分片比 1 分片慢 8.6 倍（[benchmark.md](benchmark.md)）。要提速得先把分片桶落成索引列。
 - 规则目录目前是启动时加载（`classpath:` 或 `file:`），热重载还没做。
 - 差异表会随批次累积；跨批次对比与归档策略留给使用方。

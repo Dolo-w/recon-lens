@@ -69,6 +69,13 @@ shard:
 > ```
 >
 > 解析器会在 `where` 完全不引用业务键时打 WARN 提醒（只告警，因为按业务键做哈希/区间切分都是合法写法）。
+>
+> **性能提醒（实测数据见 [benchmark.md](benchmark.md)）**：`MOD(CAST(SUBSTRING(order_no, …)))` 是"列上套函数"，
+> 索引用不上，每个分片都得全表扫一遍 —— 百万级数据下 8 分片 37.4 秒、1 分片 4.3 秒，**分片越多越慢**，
+> 但差异结果完全一致。要让分片真的提速，先在库里把分片桶做成索引列（MySQL 8 函数索引
+> `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引），规则里写 `shard_bucket = {index}`。
+> 当前 DSL 只有 `{index}` / `{shards}` 两个占位符、所有分片共用一段 where，因此还表达不了
+> "每个分片一段连续键范围"这种最自然的切法（`shard.strategy: RANGE` 在后续计划里）。
 
 ## compare
 

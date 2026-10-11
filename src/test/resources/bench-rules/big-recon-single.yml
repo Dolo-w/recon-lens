@@ -1,0 +1,32 @@
+code: BIG_VS_SETTLE_SINGLE
+name: 百万级账单与结算对账（单分片对照）
+description: 与 BIG_VS_SETTLE 完全同构，只把分片数改成 1，用来实测「分片只影响耗时、不影响结果」
+
+left:
+  label: 账单
+  table: big_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+right:
+  label: 结算
+  table: big_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+
+shard:
+  count: 1
+  parallelism: 1
+
+compare:
+  - { field: amount, type: DECIMAL, tolerance: 0.01, diffType: AMOUNT_MISMATCH, severity: HIGH }
+  - { field: status, type: STRING,  ignoreCase: true,  diffType: STATUS_MISMATCH,  severity: MEDIUM }
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate: { diffType: DUPLICATE_KEY, severity: MEDIUM }
+options:   { maxAttempts: 2 }
