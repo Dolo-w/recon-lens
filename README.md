@@ -327,7 +327,8 @@ MySQL 没有 `IF NOT EXISTS` 的加列语法，重复执行会报 `Duplicate col
 
 `-Xmx256m` 跑完四个口径：991 次 GC、**0 次 Full GC**、GC 后堆 2~38 MB（形态是锯齿，不随扫描行数上升）。
 装置（SQL / PowerShell 脚本 / 规则）原样入库在 [`tools/mysql-bench/`](tools/mysql-bench/)，
-完整数字、EXPLAIN 原文与"被压测逼出来的 5 个问题"见 [docs/benchmark.md](docs/benchmark.md)。
+完整数字、EXPLAIN 原文与"被压测逼出来的 5 个问题"见 [docs/benchmark.md](docs/benchmark.md)
+（文首有 **结论速览**：每条结论一句话 + 关键数字）。
 
 ## 项目结构
 
