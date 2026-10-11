@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Spring 全家桶一起升，避免 BOM 与 starter 版本错位
+      spring:
+        patterns: [ "org.springframework*" ]
+      # MCP SDK 升版本可能带来 API 变化，单独一个 PR，方便对着 docs/mcp.md 复核
+      mcp:
+        patterns: [ "io.modelcontextprotocol.sdk*" ]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: [ "*" ]
