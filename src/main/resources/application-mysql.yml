@@ -1,0 +1,36 @@
+# 生产/联调档：换成真实 MySQL。启动时用 --spring.profiles.active=mysql
+# 关键点：useCursorFetch=true + fetchSize 才能让 JDBC 真的流式取数，
+# 否则 MySQL 驱动会把整个结果集拉进内存，千万级对账直接把堆撑爆。
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/recon_lens?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useCursorFetch=true&rewriteBatchedStatements=true&allowPublicKeyRetrieval=true&useSSL=false
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 16
+      minimum-idle: 2
+      connection-timeout: 10000
+  sql:
+    init:
+      # 生产库的表由 DBA 建，不靠应用启动时建表
+      mode: never
+
+recon:
+  rules-location: ${RECON_RULES:file:./rules/}
+  engine:
+    parallelism: 8
+    fetch-size: 2000
+    max-attempts: 2
+    run-demo-on-startup: false
+  llm:
+    enabled: ${RECON_LLM_ENABLED:false}
+    base-url: ${RECON_LLM_BASE_URL:https://api.openai.com/v1}
+    api-key: ${RECON_LLM_API_KEY:}
+    model: ${RECON_LLM_MODEL:gpt-4o-mini}
+    timeout-seconds: 30
+    batch-limit: 50
+
+logging:
+  level:
+    io.github.dolow.reconlens: INFO

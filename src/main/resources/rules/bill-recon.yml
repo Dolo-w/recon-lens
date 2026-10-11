@@ -1,0 +1,56 @@
+# 逐笔对账：账单（我方） vs 结算（对方）
+# 这份文件就是"配置"，不需要写代码就能换一套对账逻辑
+code: BILL_VS_SETTLE
+name: 账单与结算逐笔对账
+description: 按订单号逐笔比对金额与状态，金额容差 0.01 元
+
+left:
+  label: 账单
+  table: bill_left
+  keyField: order_no
+  keyType: STRING
+  # 取数时按业务键排序，引擎用归并方式扫描，内存与数据量无关
+  orderBy: order_no
+
+right:
+  label: 结算
+  table: bill_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+
+shard:
+  count: 4
+  parallelism: 4
+  # {shards} = 分片总数，{index} = 当前分片下标（0 起）。
+  # 注意：两侧必须按「同一个业务键口径」切分，否则同一笔业务会落到不同分片，凭空多出单边缺失差异。
+  # 这里按订单号末两位取模（两侧 id 是各自的代理主键，不能用它切分）。
+  whereLeft: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
+
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: status
+    type: STRING
+    ignoreCase: true
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+
+missing:
+  # 账单缺失 = 只有结算有（左侧没有）
+  leftMissingDiffType: MISSING_LEFT
+  # 结算缺失 = 只有账单有（右侧没有）
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+
+options:
+  # 单分片失败重试次数（重跑时只重做失败分片，先删该分片旧差异，天然幂等）
+  maxAttempts: 2

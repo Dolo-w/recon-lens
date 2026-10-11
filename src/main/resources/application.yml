@@ -1,0 +1,47 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: recon-lens
+  datasource:
+    url: jdbc:h2:mem:recon;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+    hikari:
+      maximum-pool-size: 16
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+      data-locations: classpath:data.sql
+  jackson:
+    default-property-inclusion: non_null
+
+recon:
+  # 规则 DSL 所在位置（classpath: 或 file: 前缀），启动时全部加载
+  rules-location: classpath:rules/
+  engine:
+    # 分片并行度，默认取 min(规则内 parallelism, CPU*2)
+    parallelism: 8
+    # JDBC 游标抓取条数：这是"内存可控"的关键，配合 ORDER BY 做归并式对账
+    fetch-size: 2000
+    # 单个分片最大重试次数（幂等重跑的基础）
+    max-attempts: 2
+    # 是否在启动时执行一次演示对账（方便 clone 下来直接看到效果）
+    run-demo-on-startup: true
+  llm:
+    # 归因说明：默认走本地规则模板（离线可用）；打开后走 OpenAI 兼容接口
+    enabled: false
+    base-url: https://api.openai.com/v1
+    # 也可以用环境变量 RECON_LLM_API_KEY 覆盖
+    api-key: ""
+    model: gpt-4o-mini
+    timeout-seconds: 30
+    # 单次批量归因最多处理的差异条数
+    batch-limit: 50
+
+logging:
+  level:
+    io.github.dolow.reconlens: INFO
