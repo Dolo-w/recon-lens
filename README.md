@@ -337,7 +337,7 @@ tools/          造数脚本、MCP stdio 冒烟客户端
 ## 开发与贡献
 
 ```bash
-./mvnw test                                             # 67 个用例，CI 跑的就是这条
+./mvnw test                                             # 68 个用例，CI 跑的就是这条
 ./mvnw -DskipTests package                              # 产出 target/recon-lens-0.1.0.jar
 node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟（Node 18+）
 ```

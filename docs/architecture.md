@@ -110,10 +110,11 @@ POST /api/jobs {ruleCode, batchId}                 （也可用 rule / ruleYaml 
 | `web.RuleApiTest` | 规则接口（MockMvc）：YAML/JSON 提交、版本历史、停用、400/404 口径、任务内联规则 |
 | `BenchH2Test`（`@Tag("bench")`，默认不跑） | 百万级两张表：分片口径不影响差异、吞吐与堆占用实测，见 [benchmark.md](benchmark.md) |
 | `mcp.ReconMcpToolsTest` | 工具返回的文本是否让人和模型都读得懂：规则清单、任务摘要、差异分页、归因，以及未知规则的报错口径 |
+| `MermaidDocsTest` | 对外渲染的 markdown 里的 ```` ```mermaid ```` 块不含花括号（GitHub 会把标签里的 `{` 当 diamond 起始符，整张图渲染失败），并断言确实扫到了图 |
 | `tools/mcp-smoke.mjs`（协议级冒烟，不属于 `./mvnw test`） | 真按 MCP 协议握手并调 6 个工具（`recon_define_rule` 只在 `tools/list` 里校验声明，不会改规则库），另外断言 **stdout 只有 JSON-RPC**、stdin 关闭后进程自行退出 |
 
 CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `surefire.excludedGroups=bench` 排除，
-所以 CI 只跑秒级的 67 个用例）。
+所以 CI 只跑秒级的 68 个用例）。
 
 > **踩过的坑：测试资源会遮住主资源目录。** 造数规则一开始放在 `src/test/resources/rules/` 下，
 > 结果 `classpath:rules/` 只解析到了 `test-classes/rules`（类路径里 test-classes 排在 classes 前面），
