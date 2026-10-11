@@ -121,6 +121,12 @@ CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `suref
 > 主规则 `BILL_VS_SETTLE` 整个消失、端到端测试全红。压测规则现在单独放
 > `src/test/resources/bench-rules/`，用 `recon.rules-location=classpath:bench-rules/` 指过去。
 
+> **踩过的坑：文档里的图也会炸在生产页面上。** README 架构图的边标签写过 `{shards} {index}`，
+> mermaid 把 `{` 当成 diamond 节点的起始符，期待闭合却等来 `|`，GitHub 上整张图渲染不出来
+> （`Unable to render rich display / Parse error ... got 'DIAMOND_START'`）。`MermaidDocsTest` 现在盯着这件事：
+> 扫根目录与 `docs/` 下的 markdown，放行合法的 diamond 写法 `A{判断}`，禁掉其余花括号，图数为 0 也判失败。
+> 它只能判死花括号这一类；"用了 GitHub 那版 mermaid 不支持的新语法"得拿真解析器跑（`mermaid@11`）。
+
 ## 已知边界
 
 - 检查点粒度是分片，不是分片内部的游标位置：一个分片失败后从头重算（因为结果幂等，重算比续跑更简单可靠）。
