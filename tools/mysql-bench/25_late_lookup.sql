@@ -55,5 +55,15 @@ FLUSH STATUS;
 EXPLAIN ANALYZE SELECT id, order_no, amount, status, fee FROM (SELECT * FROM t50) src ORDER BY order_no LIMIT 100000;
 SHOW GLOBAL STATUS WHERE Variable_name IN ('Created_tmp_disk_tables','Created_tmp_tables','Sort_merge_passes','Sort_rows','Sort_scan','Handler_read_rnd','Handler_read_rnd_next','Handler_read_key','Handler_read_next','Innodb_rows_read');
 
-SELECT '=== LL-7  尾部锚点（本文件累计，不归因）===' AS block;
+SELECT '=== LL-8  回表的下限：2000000 行按主键顺序读取（顺序读聚簇行，无排序、无往返）===' AS block;
+FLUSH STATUS;
+EXPLAIN ANALYZE SELECT id, order_no, amount, status FROM t50 ORDER BY id LIMIT 2000000;
+SHOW GLOBAL STATUS WHERE Variable_name IN ('Created_tmp_disk_tables','Created_tmp_tables','Sort_merge_passes','Sort_rows','Sort_scan','Handler_read_rnd','Handler_read_rnd_next','Handler_read_key','Handler_read_next','Innodb_rows_read');
+
+SELECT '=== LL-9  回表的下限：全量 10000000 行按主键顺序读取（= 任何"取明细"方案的绝对下限）===' AS block;
+FLUSH STATUS;
+EXPLAIN ANALYZE SELECT id, order_no, amount, status FROM t50 ORDER BY id;
+SHOW GLOBAL STATUS WHERE Variable_name IN ('Created_tmp_disk_tables','Created_tmp_tables','Sort_merge_passes','Sort_rows','Sort_scan','Handler_read_rnd','Handler_read_rnd_next','Handler_read_key','Handler_read_next','Innodb_rows_read');
+
+SELECT '=== LL-10 尾部锚点（本文件累计，不归因）===' AS block;
 SHOW GLOBAL STATUS WHERE Variable_name IN ('Created_tmp_disk_tables','Created_tmp_tables','Sort_merge_passes','Sort_rows','Sort_scan','Handler_read_rnd','Handler_read_rnd_next','Handler_read_key','Handler_read_next','Innodb_rows_read');

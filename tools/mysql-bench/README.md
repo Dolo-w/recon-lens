@@ -63,7 +63,7 @@ JDK 17、Node 18+，`-Xmx256m`。绝对耗时只对这台机器有意义，**看
 | `18_s6b_sampled.sql` | 采样边界的真实落地（重尾数据下 8 段行数差到 170 倍） |
 | `23_s7_engine_sql_plans.sql` | 把引擎**真正发出去**的 SQL 原样 `EXPLAIN ANALYZE`（判明派生表外包一层会让函数谓词失效） |
 | `24_counter_probe.sql` | 状态计数器补测：`SHOW GLOBAL STATUS` 是累计值，场景文件头部的 `ALTER/ANALYZE` 会污染该文件首块，这个文件没有任何 DDL，逐块可归因 |
-| `25_late_lookup.sql` | "先排序只取主键、再按主键回表"（late row lookup）值不值：只排序取主键 1000 万行 1.24s（`Sort_rows=0`），但 200 万行两阶段 3.33s vs 单阶段覆盖索引 0.46s（**7.3 倍**） |
+| `25_late_lookup.sql` | "先排序只取主键、再按主键回表"（late row lookup）值不值：只排序取主键 1000 万行 1.06s（`Sort_rows=0`），但 200 万行两阶段 2.91s vs 单阶段覆盖索引 0.38s（**7.6 倍**）；LL-8/LL-9 是这条路的下限（按主键顺序读聚簇行）0.63s / 4.37s，仍慢 1.7~4.1 倍 |
 
 > 计数器怎么读：`FLUSH STATUS` 只清会话计数器，所以「两张 `SHOW GLOBAL STATUS` 之间差多少」才是那条语句的开销。
 > `24_counter_probe.sql` 就是为了给场景文件的首块补一份干净的增量（跑法：`.\run.ps1 -File 24_counter_probe.sql -Tag 24_probe`）。
