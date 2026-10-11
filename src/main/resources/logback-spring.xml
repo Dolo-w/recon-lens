@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MCP stdio 模式的日志必须写 stderr：stdout 整条通道都留给 JSON-RPC，
+  任何一行普通日志混进去都会让客户端解析失败。其他模式保持输出到 stdout。
+-->
+<configuration>
+
+  <!-- 双保险：logback 自身的状态输出也别混进 stdout（MCP 模式下主程序还会用系统属性提前关一次） -->
+  <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <target>System.out</target>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+    <target>System.err</target>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <springProfile name="mcp">
+    <root level="INFO">
+      <appender-ref ref="STDERR"/>
+    </root>
+  </springProfile>
+
+  <springProfile name="!mcp">
+    <root level="INFO">
+      <appender-ref ref="STDOUT"/>
+    </root>
+  </springProfile>
+
+</configuration>

@@ -1,6 +1,7 @@
 # recon-lens
 
-**配置化的对账引擎**：YAML 写规则 → 分片并行归并对账 → 差异自动分类 → 规则模板 / 大模型给出归因。
+**配置化的对账引擎**：YAML 写规则 → 分片并行归并对账 → 差异自动分类 → 规则模板 / 大模型给出归因；
+同时是一个 MCP server，Agent 可以直接调这些能力。
 
 > Reconciliation engine for money pipelines: rule-as-YAML, shard-parallel merge join, streamed cursors,
 > idempotent re-runs, and diff attribution (rule templates + optional OpenAI-compatible LLM).
@@ -59,6 +60,9 @@ mvn test        # 单元测试 + 端到端测试（真 H2、真 SQL、真并发�
 flowchart LR
     R[rules/*.yml] -->|RuleParser 启动期校验| REG[RuleRegistry]
     API[POST /api/jobs] --> ENG[ReconEngine]
+    AGENT[Agent / Claude Desktop] -->|stdio JSON-RPC| MCP[MCP server<br/>6 个工具]
+    MCP --> ENG
+    MCP --> DB
     REG --> ENG
     ENG -->|ShardPlanner 替换<br/>{shards} {index}| SP[分片计划 ×N]
     SP --> POOL[ThreadPool<br/>min 规则并行度, 全局并行度]
@@ -166,6 +170,22 @@ mvn spring-boot:run
 | POST | `/api/diffs/explain?jobId=1&limit=200` | 批量补齐归因 |
 | GET | `/api/rules` | 当前实例加载了哪些规则 |
 
+## 用 MCP 让 Agent 直接调对账
+
+REST 是给人和系统的，MCP 是给 Agent 的：模型自己决定调 `recon_run` 跑对账、调 `recon_list_diffs` 看差异、
+调 `recon_explain_job` 拿归因，不用人拼 URL。两个入口共用同一套 service（`ReconEngine` / `ReconRepository` / `ExplainService`），
+结果必然一致。
+
+```bash
+mvn -DskipTests package
+java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp     # stdio，6 个工具
+node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar                    # 不装客户端也能验证
+```
+
+工具：`recon_list_rules` / `recon_run` / `recon_job_summary` / `recon_list_diffs` / `recon_explain_diff` / `recon_explain_job`。
+客户端配置、真实会话输出、以及 stdio 传输的两个坑（logback 状态输出会污染 stdout、协议版本由服务端回落）
+见 [docs/mcp.md](docs/mcp.md)。
+
 ## 生产使用（MySQL）
 
 ```bash
@@ -203,9 +223,10 @@ src/main/java/io/github/dolow/reconlens/
 ├── store/      JdbcTemplate 持久化（任务 / 分片 / 差异）
 ├── explain/    归因：规则模板 + 大模型，统一入口 ExplainService
 ├── web/        REST 接口
+├── mcp/        MCP server（stdio）：把对账能力暴露成 Agent 可调用的 6 个工具
 └── bootstrap/  启动演示
-docs/           架构说明、规则 DSL 手册、压测方法
-tools/          造数脚本
+docs/           架构说明、规则 DSL 手册、MCP 接入、压测方法
+tools/          造数脚本、MCP stdio 冒烟客户端
 ```
 
 ## 后续计划

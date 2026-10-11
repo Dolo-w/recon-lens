@@ -21,10 +21,13 @@ io.github.dolow.reconlens
 ├── explain/     DiffExplainer 接口 + RuleBasedExplainer（离线模板）+ LlmDiffExplainer（OpenAI 兼容）
 │                ExplainService 是统一入口，负责"大模型优先、模板兜底、绝不留空"
 ├── web/         JobController / DiffController / RuleController
+├── mcp/         ReconMcpTools（对账能力 → 6 个 MCP 工具）+ McpServerRunner（stdio 会话）
+│                只在 --spring.profiles.active=mcp 下启动，和 REST 共用同一套 service
 └── bootstrap/   DemoRunner：启动时跑一遍演示规则并把报告打到日志
 ```
 
-依赖方向是单向的：`web → engine/explain/store → dsl`，`engine` 不依赖 `web`；`ShardRunner` 通过
+依赖方向是单向的：`web → engine/explain/store → dsl`，`engine` 不依赖 `web`；`mcp` 只做"把已有 service 翻译成人话"，
+不含任何对账逻辑，所以两条调用路径的结果必然一致；`ShardRunner` 通过
 `DiffWriter` 接口写差异，`store` 反过来实现它 —— 引擎因此可以在没有数据库的情况下单测。
 
 ## 一次对账的完整流程
@@ -85,9 +88,11 @@ POST /api/jobs {ruleCode, batchId}
 | `engine.ShardPlannerTest` | 占位符替换、取数 SQL 包裹、不分片规则无 where |
 | `ReconEngineEndToEndTest` | 真 H2 + 真 SQL + 真线程池：6 类差异、幂等重跑、归因、自定义 SQL 规则、未知规则、只重跑失败分片 |
 | `BenchH2Test`（`@Tag("bench")`，默认不跑） | 百万级两张表：分片口径不影响差异、吞吐与堆占用实测，见 [benchmark.md](benchmark.md) |
+| `mcp.ReconMcpToolsTest` | 工具返回的文本是否让人和模型都读得懂：规则清单、任务摘要、差异分页、归因，以及未知规则的报错口径 |
+| `tools/mcp-smoke.mjs`（协议级冒烟，不属于 `mvn test`） | 真按 MCP 协议握手并调 6 个工具，另外断言 **stdout 只有 JSON-RPC**、stdin 关闭后进程自行退出 |
 
 CI 配置在 `.github/workflows/build.yml`：`mvn -B test`（压测被 `surefire.excludedGroups=bench` 排除，
-所以 CI 只跑秒级的 37 个用例）。
+所以 CI 只跑秒级的 40 个用例）。
 
 > **踩过的坑：测试资源会遮住主资源目录。** 造数规则一开始放在 `src/test/resources/rules/` 下，
 > 结果 `classpath:rules/` 只解析到了 `test-classes/rules`（类路径里 test-classes 排在 classes 前面），

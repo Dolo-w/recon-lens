@@ -1,0 +1,14 @@
+# MCP（stdio）模式：把本进程当成 Agent 的一个工具服务
+#   java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
+# 关键约束：stdout 是 JSON-RPC 通道，所以不能有 Web 容器、不能有启动横幅，日志也必须走 stderr（见 logback-spring.xml）
+spring:
+  main:
+    web-application-type: none
+    banner-mode: off
+
+recon:
+  mcp:
+    enabled: true
+  engine:
+    # 演示任务会在启动时打印摘要，纯 stdio 场景下不需要
+    run-demo-on-startup: false
