@@ -21,8 +21,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>默认不随 {@code mvn test} 执行（{@code @Tag("bench")} 已在 pom 的 surefire.excludedGroups 里排除）。
  * 手动跑法见 docs/benchmark.md：
  * <pre>
- * mvn -Dtest=BenchH2Test -DexcludedGroups= -Dsurefire.argLine="-Xmx256m -Dfile.encoding=UTF-8" test
+ * mvn -Dtest=BenchH2Test -Dsurefire.excludedGroups= \
+ *     -Dsurefire.argLine="-Xmx2g -Dfile.encoding=UTF-8" test
  * </pre>
+ * <p>两个参数都不能省：pom 里的排除项写的是 {@code ${surefire.excludedGroups}}，只有 {@code -Dsurefire.excludedGroups=}
+ * 才能把它覆盖成空（写成 {@code -DexcludedGroups=} 不会生效，表现是 <b>BUILD SUCCESS 但一条 bench 都没跑</b>）；
+ * 堆也别按"引擎内存与数据量无关"往小里压 —— 那说的是引擎，H2 是嵌入式库、跟被测代码同一个堆，{@code -Xmx256m}
+ * 会在对账途中直接 {@code 90098 The database has been closed}（与本次改动无关，改动前的提交同样如此）。
  *
  * <p>数据落在 H2 文件库（{@code ./target/bench-db}）而不是内存库，避免把 100 万行算进被测 JVM 的堆，
  * 否则测出来的就不是引擎的堆占用而是数据库的。
