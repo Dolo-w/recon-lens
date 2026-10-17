@@ -198,7 +198,11 @@ shard:
 ```
 
 - `{shards}` 替换为分片总数，`{index}` 替换为分片下标（0 起）。
-- `count > 1` 时 `whereLeft` 必填；`whereRight` 缺省与 `whereLeft` 相同。
+- `count > 1` 时 **`whereLeft` 与 `whereRight` 都必填**：解析器对两侧分别校验，缺任何一个都会报
+  `shard.count > 1 时必须配置 shard.whereRight`；且两侧都必须**同时含 `{index}` 与 `{shards}`** 两个占位符。
+- **不存在"`whereRight` 缺省时继承 `whereLeft`"**。两侧用同一个业务键口径是**要显式写出来**的事，
+  不是可以默认继承的事 —— 静默继承正是"同一笔业务被切到不同分片、结果凭空多出一堆单边缺失"最常见的来源。
+  （这条以前写成"`whereRight` 缺省与 `whereLeft` 相同"，与解析器实现不符，已按代码修正。）
 - **分片条件不能把同一个分组切开**（`dimension` + `measures` 时尤其重要）：两侧各算一半再比对，只会报假差异。
   例如按 `dimension: [customer_id, status]` 汇总时，要按 `customer_id` 分片，**不能按 `status` 分片** ——
   `customer_id` 是分组键的一部分，同一个分组必然落在同一个分片。仓库里的 `customer-status-recon.yml` 就是这么切的。
@@ -216,7 +220,8 @@ shard:
 > **性能提醒（实测数据见 [benchmark.md](benchmark.md)）**：`MOD(CAST(SUBSTRING(order_no, …)))` 是"列上套函数"，
 > 索引用不上，每个分片都得全表扫一遍 —— 百万级数据下 8 分片 37.4 秒、1 分片 4.3 秒，**分片越多越慢**，
 > 但差异结果完全一致。要让分片真的提速，先在库里把分片桶做成索引列（MySQL 8 函数索引
-> `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引），规则里写 `shard_bucket = {index}`。
+> `CREATE INDEX … ((MOD(n, 8)))`，或生成列 + 普通索引），规则里写
+> `shard_bucket = {index} AND shard_bucket < {shards}`（`{shards}` 不能省，解析器要求两个占位符同时在场）。
 > **这条现在有现成实现**：MCP `recon_build_model` / `POST /api/models/{ruleCode}` 会按规则粒度把数据物化成模型表，
 > 桶列是它建的生成列 `biz_key_bucket`（带索引），自动注册的 `<CODE>__MODEL` 规则两侧写
 > `biz_key_bucket = {index} AND biz_key_bucket < {shards}`（两侧同一个桶函数，同一个业务键必然落同一片；

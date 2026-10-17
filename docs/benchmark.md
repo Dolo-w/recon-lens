@@ -102,8 +102,8 @@ ALTER TABLE bill_right ADD COLUMN shard_bucket INT AS (MOD(n, 8)) STORED, ADD KE
 shard:
   count: 8
   # 两侧引用同一个"业务来源"的桶列：n 在左右表是同一个值（都由 order_no 派生）
-  whereLeft:  "shard_bucket = {index}"
-  whereRight: "shard_bucket = {index}"
+  whereLeft:  "shard_bucket = {index} AND shard_bucket < {shards}"
+  whereRight: "shard_bucket = {index} AND shard_bucket < {shards}"
 ```
 
 > 上面两种写法都已在 MySQL 8.0.29 上实测（见第三节）：把分片桶落成**真实列 + 索引**之后，单分片
@@ -197,6 +197,10 @@ min/max，再均分边界）记在 README 的后续计划里 —— 这个限制
 | --- | --- | --- |
 | `shard_bucket = {index}`：桶列是普通列 + `(shard_bucket, order_no, amount, status, id)` 复合覆盖索引 | 260,000 | **1,083 / 1,084 / 1,085 / 1,086 / 1,159 ms** |
 | `MOD(CAST(SUBSTRING(order_no,10,2) AS UNSIGNED),8) = {index}`：函数谓词 | 1,999,900（每片读全表） | 2,106 / 2,295 / 2,311 / 2,329 ms |
+
+> 表里两行写的是**谓词形态**本身。真要写成规则体时，两条都必须再带上 `{shards}`（解析器要求 `{index}` 与
+> `{shards}` 同时在场，缺一个就报 `shard.count > 1 时必须配置 …`），例如
+> `shard_bucket = {index} AND shard_bucket < {shards}`、`MOD(CAST(SUBSTRING(order_no,10,2) AS UNSIGNED), {shards}) = {index}`。
 
 计划对照（`tools/mysql-bench/23_s7_engine_sql_plans.sql` 拿**引擎真正发出去的 SQL** 去 EXPLAIN ANALYZE）：
 
