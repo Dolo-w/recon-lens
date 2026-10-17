@@ -65,6 +65,13 @@ class RuleParserTest {
         return parser.parse(new ByteArrayInputStream(yaml.getBytes(StandardCharsets.UTF_8)), "test.yml");
     }
 
+    /** 单分片版本：去掉了 count &gt; 1 的切分配置，用例再按需把 where 加回去。 */
+    private static String singleShard() {
+        return VALID.replace("  count: 2\n  parallelism: 2\n", "  count: 1\n")
+                .replace("  whereLeft: \"MOD(id, {shards}) = {index}\"\n", "")
+                .replace("  whereRight: \"MOD(id, {shards}) = {index}\"\n", "");
+    }
+
     @Test
     void parsesEverySection() {
         RuleSpec rule = parse(VALID);
@@ -149,6 +156,32 @@ class RuleParserTest {
         assertThatThrownBy(() -> parse(yaml))
                 .isInstanceOf(RuleException.class)
                 .hasMessageContaining("{index}");
+    }
+
+    @Test
+    void rejectsSingleShardWithWhereLeft() {
+        String yaml = singleShard().replace("  count: 1\n", "  count: 1\n  whereLeft: \"id < 100\"\n");
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("shard.count = 1 时不应配置 shard.whereLeft");
+    }
+
+    @Test
+    void rejectsSingleShardWithWhereRight() {
+        String yaml = singleShard().replace("  count: 1\n", "  count: 1\n  whereRight: \"id < 100\"\n");
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("shard.count = 1 时不应配置 shard.whereRight");
+    }
+
+    @Test
+    void acceptsSingleShardWithoutWhere() {
+        RuleSpec rule = parse(singleShard());
+
+        assertThat(rule.shard().count()).isEqualTo(1);
+        assertThat(rule.shard().effectiveParallelism()).isEqualTo(1);
+        assertThat(rule.shard().whereLeft()).isNull();
+        assertThat(rule.shard().whereRight()).isNull();
     }
 
     @Test

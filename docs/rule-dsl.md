@@ -203,6 +203,11 @@ shard:
 - **不存在"`whereRight` 缺省时继承 `whereLeft`"**。两侧用同一个业务键口径是**要显式写出来**的事，
   不是可以默认继承的事 —— 静默继承正是"同一笔业务被切到不同分片、结果凭空多出一堆单边缺失"最常见的来源。
   （这条以前写成"`whereRight` 缺省与 `whereLeft` 相同"，与解析器实现不符，已按代码修正。）
+- `count: 1` 时 **`whereLeft` / `whereRight` 一个都不许写**：单分片没有切分语义（`{index}` 恒为 0、
+  `{shards}` 恒为 1），写了也只会被拼进 `WHERE` 把范围悄悄收窄 —— 例如 `id < 100` 就只对前 100 个键对账，
+  而任务状态、行数统计一切正常。解析器直接拒绝：
+  `shard.count = 1 时不应配置 shard.whereLeft`。要过滤数据请用 `left.where` / `right.where`；
+  确实要按桶切分就把 `count` 设为大于 1 并配齐两侧 where。
 - **分片条件不能把同一个分组切开**（`dimension` + `measures` 时尤其重要）：两侧各算一半再比对，只会报假差异。
   例如按 `dimension: [customer_id, status]` 汇总时，要按 `customer_id` 分片，**不能按 `status` 分片** ——
   `customer_id` 是分组键的一部分，同一个分组必然落在同一个分片。仓库里的 `customer-status-recon.yml` 就是这么切的。

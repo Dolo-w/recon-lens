@@ -295,6 +295,9 @@ public final class RuleParser {
         if (count > 1) {
             validateShardWhere(source, "whereLeft", whereLeft);
             validateShardWhere(source, "whereRight", whereRight);
+        } else {
+            rejectSingleShardWhere(source, "whereLeft", whereLeft);
+            rejectSingleShardWhere(source, "whereRight", whereRight);
         }
         return new ShardSpec(count, parallelism, whereLeft, whereRight);
     }
@@ -306,6 +309,22 @@ public final class RuleParser {
         if (!where.contains("{index}") || !where.contains("{shards}")) {
             throw RuleException.at(source, "shard." + key + " 必须同时包含 {index} 与 {shards} 占位符，当前为 " + where);
         }
+    }
+
+    /**
+     * 单分片没有切分语义：{@code {index}} 恒为 0、{@code {shards}} 恒为 1。
+     * 但 {@code ShardPlanner} 对 count = 1 也会把 where 渲染进 SQL 的 WHERE 子句，
+     * 于是任何 where 在单分片下都只会把范围悄悄收窄（例如 id &lt; 100 只对前 100 个键对账），
+     * 而任务状态、行数统计一切正常 —— 这种"看起来成功、其实漏了对账"的错最难被发现，所以一律拒绝。
+     */
+    private void rejectSingleShardWhere(String source, String key, String where) {
+        if (where == null || where.isBlank()) {
+            return;
+        }
+        throw RuleException.at(source, "shard.count = 1 时不应配置 shard." + key
+                + "：单分片没有切分语义，{index} 恒为 0、{shards} 恒为 1，该条件会被拼进 WHERE 并静默收窄对账范围"
+                + "（例如 id < 100 只对前 100 个键对账，结果仍报 SUCCESS）。要过滤数据请改用 left.where / right.where；"
+                + "确实要按桶切分就把 shard.count 设为大于 1 并配齐 whereLeft/whereRight");
     }
 
     private List<FieldRule> parseCompare(Map<String, Object> root, String source) {
