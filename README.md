@@ -105,8 +105,8 @@ shard:                      # 分片 = 并行的单位，也是断点重跑的�
   count: 4
   parallelism: 4
   # 两侧必须按「同一个业务键口径」切分：按各自的 id 取模会把同一笔业务切到不同分片，凭空多出单边缺失
-  whereLeft:  "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
-  whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
+  whereLeft:  "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
 
 compare:
   - { field: amount, type: DECIMAL, tolerance: 0.01, diffType: AMOUNT_MISMATCH, severity: HIGH }
@@ -312,12 +312,14 @@ MySQL 没有 `IF NOT EXISTS` 的加列语法，重复执行会报 `Duplicate col
 
 | 跑法 | 分片 | 耗时 | 左侧扫描 | 右侧扫描 | 差异 |
 | --- | --- | --- | --- | --- | --- |
-| `BIG_VS_SETTLE` | 8 | 37,426 ms | 1,000,000 | 1,000,100 | 800 |
-| `BIG_VS_SETTLE_SINGLE` | 1 | 4,334 ms | 1,000,000 | 1,000,100 | 800 |
+| `BIG_VS_SETTLE` | 8 | 7,238 ms | 1,000,000 | 1,000,100 | 800 |
+| `BIG_VS_SETTLE_SINGLE` | 1 | 4,867 ms | 1,000,000 | 1,000,100 | 800 |
+
+（2026-10-17 本机复测，`-Xmx2g`；完整表与历史数字见 [docs/benchmark.md](docs/benchmark.md)。）
 
 两次的差异分类逐项相同（`AMOUNT_MISMATCH=400 / STATUS_MISMATCH=100 / MISSING_RIGHT=100 / MISSING_LEFT=100 / DUPLICATE_KEY=100`），
-测试里就是这么断言的：**分片只影响耗时，不影响结果**。8 分片反而更慢，原因与解法见
-[docs/benchmark.md](docs/benchmark.md)。
+测试里就是这么断言的：**分片只影响耗时，不影响结果**。8 分片反而更慢（本机 1.5 倍；I/O 受限的机器上曾测到 8.6 倍），
+原因与解法见 [docs/benchmark.md](docs/benchmark.md)。
 
 ### 独立 MySQL 进程上的真机数字（引擎对 2M×2，堆压 `-Xmx256m`）
 

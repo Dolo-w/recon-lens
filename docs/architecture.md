@@ -135,10 +135,13 @@ CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `suref
 
 - 检查点粒度是分片，不是分片内部的游标位置：一个分片失败后从头重算（因为结果幂等，重算比续跑更简单可靠）。
 - 分片谓词若写成"列上套函数"（`MOD(SUBSTRING(...))`）就用不到索引，每个分片全表扫一遍；
-  实测 8 分片比 1 分片慢 8.6 倍（[benchmark.md](benchmark.md)）。要提速得先把分片桶落成索引列 ——
+  实测 8 分片比 1 分片慢 1.5 倍（本机，缓存友好；I/O 受限的机器上曾测到 8.6 倍，见 [benchmark.md](benchmark.md)）。
+  要提速得先把分片桶落成索引列 ——
   `recon_build_model` 就是自动化这条路：模型表把桶落成生成列 + 索引，代价是一次预处理，以及源数据变了要重建。
 - 规则以数据库为准、支持热更新：改规则是往 `recon_rule` 追加一个新版本（REST `POST /api/rules` 或 MCP `recon_define_rule`），
   立即对后续任务生效，不用重启。`classpath` / `file:` 下的 yml（`recon.rules-location`）在启动时与库里的**同名规则**对齐：
+  > `POST /api/rules` 直接落 ACTIVE、不过闸门，**默认关闭**（`recon.rules.legacy-define-enabled=false`，
+  > 打开后还要 `X-Api-Key`）。正常路径是草稿 → 试算 → 审批。
   库里没有该 `code` 就作 v1 导入，已有版本但内容与文件不一致就按文件**覆盖**成新版本（追加，不删旧版本，历史任务照旧回放），
   内容一致则什么都不做；被 `DELETE /api/rules/{code}` 显式下线过的 `code` 不覆盖也不复活。
   想让规则库完全自己说了算（库里的改动不再被文件覆盖）就设 `recon.seed-rules=false`（此时启动完全不碰规则库）。
