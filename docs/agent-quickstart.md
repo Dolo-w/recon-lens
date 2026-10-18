@@ -316,9 +316,11 @@ mkdir -p data/import && cp ~/Downloads/账单.xlsx data/import/
   设 `recon.agent.file-import.allow-absolute-paths=true` 后放行本地绝对路径（本地自用推荐，MCP 场景别开）；
 - 类型自动推断（BIGINT / DECIMAL(24,6) / DATETIME / VARCHAR / TEXT），中文表头规范化成 `col_N` 且保留原文对照；
 - CSV 支持 RFC 4180 引号转义、BOM、分号/制表符分隔；Excel 读第一个 Sheet、数字去尾零；
-- **编码只支持 UTF-8**（BOM 可以）。GBK/ANSI 会被按 UTF-8 解成乱码，**而且不报错** —— 导入前先另存为 UTF-8；
-- **绝不覆盖已有表**；灌数失败自动删回新建表；默认上限 10 万行 / 200 列（`recon.agent.file-import.max-rows`、
-  `max-columns` 可调）；灌数速度实测约 2.6 万行/秒。
+- **编码只支持 UTF-8**（BOM 可以）。GBK/ANSI **会明确报错**（"CSV 不是合法的 UTF-8…"），不再静默入库乱码 ——
+  按提示另存为 UTF-8 后重导（Excel：「另存为 → CSV UTF-8」）；
+- **绝不覆盖已有表**；灌数失败自动删回新建表；默认上限 10 万行 / 200 列 / 512 MB（`recon.agent.file-import.max-rows`、
+  `max-columns`、`max-bytes` 可调）；单个字段超过 1M 字符会报"引号多半没闭合"；
+  某行比表头多列会报错而不是静默截断；灌数速度实测约 2.6 万行/秒。
 
 > **百万行级数据别走 `recon_import_file`**：单线程灌数 + 默认 10 万行上限，是为中小文件设计的。
 > 百万/千万行级改用 `tools/parallel-load.mjs` 并行灌数（N 并发 LOAD DATA + 先灌数后建索引，
@@ -400,7 +402,7 @@ WorkBuddy 会自动调 `recon_draft_rule`（内部由 DeepSeek 起草规则）�
 | 任务 FAILED，`Column 'biz_key' cannot be null`（旧版本） | 同一条问题的老报错文案，升级后会给可定位提示 |
 | `POST /api/jobs` 返回 500 且响应体没有原因 | 老版本缺 `batchId` 就会这样；现在缺省自动补并在响应里回显 |
 | 试算查了两次都是 `inFlight=true` | 试算要 10~15 秒，隔几秒再查；不是卡死 |
-| 导入后数据全是乱码 | 文件不是 UTF-8（GBK/ANSI 不报错、直接错数据），转码后重新导 |
+| 导入后数据全是乱码 | 已不会发生：非 UTF-8 现在会报错并提示转码；按提示另存为 UTF-8 后重导 |
 | 审批 403 | 没配 `recon.review.api-key`，或 X-Api-Key 不对；token 接口还要求 X-Operator |
 | MCP 连 MySQL 启动崩 | 设 `RECON_SQL_INIT=never` + 显式 `DRIVER_CLASS_NAME` |
 | 会话有结论但 recon_rule 查不到 | MCP 进程写进了 H2 内存库 —— 检查 env 数据源四个变量是否都给了 |

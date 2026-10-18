@@ -16,6 +16,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -64,6 +67,21 @@ public class FileImporter {
     private static final int SAMPLE_ROWS = 500;
 
     private static final int BATCH_SIZE = 1000;
+
+    /**
+     * 单个字段的字符上限。CSV 里一个没闭合的引号会把整份文件吞成一个字段：
+     * 不设上限，症状是"内存涨到顶再 OOM"或"读了一分钟没反应"，而不是一句能照着修的话。
+     */
+    private static final int MAX_FIELD_CHARS = 1 << 20;
+
+    /**
+     * 解码失败时的统一提示。Windows 中文环境里"能打开、能预览、入库全是乱码"的 CSV
+     * 几乎都是 GBK/ANSI —— 以前这类文件会被 {@code REPLACE} 静默解码成 U+FFFD，
+     * 数据悄悄错掉，对账结论跟着错，比直接报错危险得多。
+     */
+    private static final String ENCODING_HINT = "CSV 不是合法的 UTF-8：多半是 GBK/ANSI 编码。"
+            + "请另存为 UTF-8（Excel：「另存为 → CSV UTF-8」；命令行：iconv -f GBK -t UTF-8 转换），"
+            + "导入只接受 UTF-8，不做编码猜测";
 
     private static final Pattern DATE_ONLY = Pattern.compile("\\d{4}-\\d{1,2}-\\d{1,2}");
     private static final Pattern DATE_TIME = Pattern.compile(
@@ -215,6 +233,13 @@ public class FileImporter {
         if (!Files.isRegularFile(target)) {
             throw new IOException("文件不存在或不是普通文件: " + target);
         }
+        long size = Files.size(target);
+        long maxBytes = properties.getFileImport().getMaxBytes();
+        if (size > maxBytes) {
+            throw new IOException("文件 " + target.getFileName() + " 有 " + size + " 字节，超过上限 " + maxBytes
+                    + "（recon.agent.file-import.max-bytes）；先拆文件或调大上限。"
+                    + "注意 xlsx 是压缩包，解压后的体积可能远大于磁盘大小");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -239,12 +264,23 @@ public class FileImporter {
     }
 
     private ParsedFile openCsv(Path path) throws IOException {
-        BufferedReader reader = new BufferedReader(new InputStreamReader(
-                Files.newInputStream(path), StandardCharsets.UTF_8), 1 << 16);
+        // REPORT 而不是默认的 REPLACE：GBK 文件以前会被静默解成 U+FFFD 入库，
+        // 人只看到"导入成功"，对账时才发现键全变了。宁可在这里失败，也不放坏数据进去。
+        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        BufferedReader reader = new BufferedReader(
+                new InputStreamReader(Files.newInputStream(path), decoder), 1 << 16);
         boolean threw = true;
         try {
             reader.mark(1);
-            int bom = reader.read();
+            int bom;
+            try {
+                // 第一字节就要解码：GBK 文件往往在这里就炸，早于任何业务逻辑
+                bom = reader.read();
+            } catch (CharacterCodingException e) {
+                throw new IOException(ENCODING_HINT + "（原始错误：" + e.getMessage() + "）", e);
+            }
             if (bom != 0xFEFF) {
                 reader.reset();
             }
@@ -271,11 +307,41 @@ public class FileImporter {
         CsvFile(BufferedReader reader) throws IOException {
             this.reader = reader;
             reader.mark(1 << 20);
-            String first = reader.readLine();
+            String first;
+            try {
+                first = reader.readLine();
+            } catch (CharacterCodingException e) {
+                throw new IOException(ENCODING_HINT + "（原始错误：" + e.getMessage() + "）", e);
+            } catch (IOException e) {
+                // mark(1MB) 被冲掉：第一行就超过 1MB，几乎只有"全文件没有换行"或"引号没闭合"两种成因
+                if (String.valueOf(e.getMessage()).contains("Mark invalid")) {
+                    throw new IOException("表头所在行超过 1MB：检查是不是整个文件没有换行，"
+                            + "或者引号没闭合把整份文件连成了一行", e);
+                }
+                throw e;
+            }
             this.delimiter = detectDelimiter(first);
             reader.reset();
             List<String> h = readRawRecord();
             this.headers = h == null || (h.size() == 1 && h.get(0).isBlank()) ? List.of() : h;
+        }
+
+        /** 所有解码错误都在这一处翻译成人话——否则冒到工具层只是一句 Input length = 1。 */
+        private int readChar() throws IOException {
+            try {
+                return reader.read();
+            } catch (CharacterCodingException e) {
+                throw new IOException(ENCODING_HINT + "（原始错误：" + e.getMessage() + "）", e);
+            }
+        }
+
+        /** 逐字符追加，顺便把"一个字段吞了整份文件"拦在这里。 */
+        private void append(StringBuilder field, char c) throws IOException {
+            if (field.length() >= MAX_FIELD_CHARS) {
+                throw new IOException("单个字段超过 " + MAX_FIELD_CHARS + " 字符：引号多半没闭合，"
+                        + "整份文件被当成一个字段在读。检查有没有落单的引号（Excel 手工编辑后很常见）");
+            }
+            field.append(c);
         }
 
         private static char detectDelimiter(String line) {
@@ -305,12 +371,12 @@ public class FileImporter {
             boolean quotedThisField = false;
             boolean anyChar = false;
             int c;
-            while ((c = reader.read()) != -1) {
+            while ((c = readChar()) != -1) {
                 anyChar = true;
                 if (inQuotes) {
                     if (c == '"') {
                         reader.mark(1);
-                        int next = reader.read();
+                        int next = readChar();
                         if (next == '"') {
                             field.append('"');
                         } else {
@@ -320,7 +386,7 @@ public class FileImporter {
                             }
                         }
                     } else {
-                        field.append((char) c);
+                        append(field, (char) c);
                     }
                     continue;
                 }
@@ -333,7 +399,7 @@ public class FileImporter {
                     quotedThisField = false;
                 } else if (c == '\r') {
                     reader.mark(1);
-                    if (reader.read() != '\n') {
+                    if (readChar() != '\n') {
                         reader.reset();
                     }
                     record.add(field.toString());
@@ -342,7 +408,7 @@ public class FileImporter {
                     record.add(field.toString());
                     return record;
                 } else {
-                    field.append((char) c);
+                    append(field, (char) c);
                 }
             }
             if (!anyChar && field.isEmpty() && record.isEmpty()) {
@@ -607,7 +673,15 @@ public class FileImporter {
                     break;
                 }
                 List<Object[]> params = new ArrayList<>(rows.size());
-                for (List<String> row : rows) {
+                for (int idx = 0; idx < rows.size(); idx++) {
+                    List<String> row = rows.get(idx);
+                    // 多余的列说明分隔符出现在不该出现的地方（未转义的逗号/分号是最常见的）。
+                    // 以前这里是 i < columns.size() 的静默截断：数据少了一截，任务照样 SUCCESS。
+                    if (row.size() > columns.size()) {
+                        throw new IOException("第 " + (inserted + idx + 1) + " 行有 " + row.size()
+                                + " 列，表头只有 " + columns.size() + " 列：多半是某个字段里出现了未转义的"
+                                + "分隔符，或文件被手工改过。请检查该行；字段里有逗号时要用双引号包起来");
+                    }
                     Object[] one = new Object[columns.size()];
                     for (int i = 0; i < columns.size() && i < types.size(); i++) {
                         String v = i < row.size() ? row.get(i) : "";

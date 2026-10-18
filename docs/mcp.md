@@ -113,7 +113,8 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
   H2 与 MySQL 都合法；原文保留在 `originalHeaders` 里供人对照；
 - **绝不覆盖**：目标表已存在直接拒绝 —— 同名表要么是笔误要么是上次导入的产物；
 - **失败干净**：灌数/注册失败时把新建表删回去，不留"建了表没数据"的中间态；
-- **护栏**：行列上限（`max-rows` 默认 10 万 / `max-columns` 默认 200）；
+- **护栏**：行列与体积上限（`max-rows` 默认 10 万 / `max-columns` 默认 200 / `max-bytes` 默认 512 MB）；
+  非 UTF-8 直接报错（不做编码猜测、不静默替换成乱码）；单字段超 1M 字符、某行比表头多列都会明确报错；
   标识符进 DDL 从严校验，数据值全部走 PreparedStatement 参数。
 
 CSV 解析按 RFC 4180（引号转义、引号内换行、UTF-8 BOM），分隔符按首行探测（逗号/分号/制表符）；

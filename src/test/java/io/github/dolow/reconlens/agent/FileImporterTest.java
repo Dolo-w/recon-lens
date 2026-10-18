@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.math.BigDecimal;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -288,6 +289,46 @@ class FileImporterTest {
         assertThat(jdbc.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='imported_bad'", Long.class))
                 .as("失败的表已回滚删除").isEqualTo(0L);
+    }
+
+    // ---------------- 数据正确性护栏 ----------------
+
+    @Test
+    void gbk编码的CSV_明确报错而不是静默乱码() throws IOException {
+        // 以前用默认 REPLACE 解码：GBK 字节静默变成 U+FFFD，导入"成功"，对账键全变样
+        Files.write(importDir.resolve("gbk.csv"), "客户名,金额\n张三,100.00\n".getBytes(Charset.forName("GBK")));
+        FileImporter.ImportPreview p = importer.preview("gbk.csv");
+        assertThat(p.error()).contains("UTF-8").contains("GBK");
+    }
+
+    @Test
+    void 文件字节数超上限_打开前就拒绝() throws IOException {
+        writeCsv("big.csv", "id,amount\n1,100.00\n");
+        properties.getFileImport().setMaxBytes(8);
+        try {
+            FileImporter.ImportPreview p = importer.preview("big.csv");
+            assertThat(p.error()).contains("超过上限").contains("max-bytes");
+        } finally {
+            properties.getFileImport().setMaxBytes(512L * 1024 * 1024);
+        }
+    }
+
+    @Test
+    void 未闭合引号把整份文件吞成一个字段_按字段上限截停() throws IOException {
+        // 一个落单的引号会让后续所有内容都算"引号内"（连换行一起吞），没有上限就是读到 OOM
+        String huge = "id,amount\n\"" + "x".repeat((1 << 20) + 8);
+        Files.writeString(importDir.resolve("unclosed.csv"), huge, StandardCharsets.UTF_8);
+        FileImporter.ImportPreview p = importer.preview("unclosed.csv");
+        assertThat(p.error()).contains("引号").contains("闭合");
+    }
+
+    @Test
+    void 某行比表头多列_报错而不是静默截断() throws IOException {
+        writeCsv("wide.csv", "id,amount,note\n1,100.00,a,b\n");
+        FileImporter.ImportPreview p = importer.confirm("wide.csv", "imported_wide", "tester");
+        assertThat(p.error()).contains("列").contains("表头").contains("未转义");
+        assertThat(jdbc.queryForList("SELECT table_name FROM recon_registered_table", String.class))
+                .as("失败后不留半成品").doesNotContain("imported_wide");
     }
 
     private static void writeCsv(String name, String content) throws IOException {

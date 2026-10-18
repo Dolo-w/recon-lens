@@ -334,7 +334,8 @@ Agent（recon_import_file confirm）→ 建表灌数 + 注册白名单，立即�
 
 护栏：默认只接受导入目录（`recon.agent.file-import.dir`，默认 `./data/import`）内的相对路径；
 本地自用想直接给绝对路径，加 `--recon.agent.file-import.allow-absolute-paths=true`（MCP 对外场景保持关闭）；
-绝不覆盖已有表，灌数失败自动删回，上限 10 万行 / 200 列。
+绝不覆盖已有表，灌数失败自动删回，上限 10 万行 / 200 列 / 512 MB；非 UTF-8 直接报错（不再静默乱码），
+单字段超 1M 字符或某行比表头多列都会给出可照着修的错误。
 
 **方式 C：百万行级大数据** —— 走 `tools/parallel-load.mjs` 并行灌数，别让 Agent 自己写脚本：
 

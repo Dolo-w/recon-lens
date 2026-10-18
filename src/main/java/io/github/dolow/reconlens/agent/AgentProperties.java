@@ -311,6 +311,15 @@ public class AgentProperties {
         /** 最大列数。对账表是窄表场景，200 列已经离谱宽了；上限主要防解析炸弹。 */
         private int maxColumns = 200;
 
+        /**
+         * 单文件最大字节数，默认 512 MB。
+         *
+         * <p>行数/列数上限管不住"少数几行、每行几百万字符"这种形状：Excel 的 xlsx 是压缩包，
+         * 解压后可能远大于磁盘体积；CSV 里一个没闭合的引号也会把整份文件读成一个字段。
+         * 所以在打开文件前先按磁盘大小拦一道，读取过程中再按字段长度拦一道。
+         */
+        private long maxBytes = 512L * 1024 * 1024;
+
         public String getDir() {
             return dir;
         }
@@ -351,6 +360,17 @@ public class AgentProperties {
                 throw new IllegalArgumentException("recon.agent.file-import.max-columns 必须 ≥ 1，当前: " + maxColumns);
             }
             this.maxColumns = maxColumns;
+        }
+
+        public long getMaxBytes() {
+            return maxBytes;
+        }
+
+        public void setMaxBytes(long maxBytes) {
+            if (maxBytes < 1) {
+                throw new IllegalArgumentException("recon.agent.file-import.max-bytes 必须 ≥ 1，当前: " + maxBytes);
+            }
+            this.maxBytes = maxBytes;
         }
     }
 }
