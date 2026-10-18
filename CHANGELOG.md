@@ -30,7 +30,7 @@
 
 ### 修复
 
-- **历史规则的 `reviewed_spec_sha` 在生产配置下永远不补**：回填原先挂在 `seedFromRuleDirectory()` 里、紧挨着 `if (!properties.isSeedRules()) return;`，而生产建议就是 `recon.seed-rules=false` —— 于是迁移前落库的行内容哈希一直是 NULL，而篡改检测把 NULL 读成"从没审过，不适用"，等于给这批老规则永久豁免。现在回填拆成独立的 `@PostConstruct backfillLegacySpecSha()`，**无条件**执行、与规则目录是否是权威无关。
+- **历史规则的 `spec_sha256` 在生产配置下永远不补**：回填原先挂在 `seedFromRuleDirectory()` 里、紧挨着 `if (!properties.isSeedRules()) return;`，而生产建议就是 `recon.seed-rules=false` —— 于是迁移前落库的行内容指纹一直是 NULL，`GET /api/rule-reviews/{code}/{version}` 里这一版"落库时是什么内容"就是空白。现在回填拆成独立的 `@PostConstruct backfillLegacySpecSha()`，**无条件**执行、与规则目录是否是权威无关。注意补的是 `spec_sha256`（迁移期内容指纹），**不是** `reviewed_spec_sha`（审批时钉住的内容哈希）：后者为 NULL 表示"没经过人工审批"，回填它等于把未审规则标成审过；篡改检测只看 `reviewed_spec_sha`，所以这条修复不改变篡改检测的覆盖面。用例：`RuleBackfillSeedDisabledTest`。
 - **试算 T2 的摘要溢出被判成 PASS（假通过）**：`DiffSetDigest` 超过 `recon.engine.diff-digest-max-keys`（默认 5 万键）时清空并返回空摘要。两次试算若都溢出，`digestsByShard()` 就是两张空表，`equals` 恒真 → T2 报"两次一致"、幂等性一路绿。现在 `ShardResult.digestOverflowed` 把"算不出摘要"与"没有差异"区分开，`ReconEngine.RunTrace.digestsOverflowed()` 上抛，`TrialOutcome.digestOverflowed` 让 `TrialVerdictResolver` 落 `INCONCLUSIVE` + 新覆盖理由 `CoverageReason.DIGEST_OVERFLOW`（可批性 `BLOCK_SIGNABLE`，不是 PASS 的"免签字"）。用例：`TrialVerdictResolverTest.digestOverflowIsInconclusiveNotPass`。
 - **文件导入的三条数据正确性缺口**：① CSV 硬编码 UTF-8 且用默认 `REPLACE` 解码 —— GBK/ANSI 文件静默变成 U+FFFD，导入"成功"、对账键全变样；现在用 `CodingErrorAction.REPORT` 解码并给出"另存为 UTF-8 / iconv"的具体提示。② 只有行数/列数上限，没有字节上限、字段无界 —— 一个没闭合的引号能把整份文件读成一个字段直到 OOM；现在新增 `recon.agent.file-import.max-bytes`（默认 512 MB，打开文件前按磁盘大小拦）与单字段 1M 字符上限，并翻译 `Mark invalid`（表头行超过 1 MB）。③ 某行比表头多列时按 `min` 静默截断，任务照样 SUCCESS；现在明确报"第 N 行有 X 列，表头只有 Y 列……字段里有逗号时要用双引号包起来"。用例：`FileImporterTest` 新增 GBK / 超字节 / 未闭合引号 / 多列 4 例。
 

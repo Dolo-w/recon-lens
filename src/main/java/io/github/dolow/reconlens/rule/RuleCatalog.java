@@ -71,9 +71,14 @@ public class RuleCatalog {
      * 历史行的内容哈希回填<b>无条件</b>执行：它和"规则目录是不是权威"没有关系。
      *
      * <p>以前这句挂在 {@link #seedFromRuleDirectory()} 里，生产按建议配 {@code recon.seed-rules=false}
-     * 时整段提前 return —— 于是迁移前落库的行 {@code reviewed_spec_sha} 永远为 NULL，
-     * 而 NULL 在篡改检测里是"从没审过，不适用"，等于给老规则永久豁免。放到单独的
-     * {@code @PostConstruct} 就不依赖任何开关，且与 seed 的先后顺序无关（回填只读 spec_json）。
+     * 时整段提前 return —— 于是迁移前落库的行 {@code spec_sha256} 一直是 NULL，
+     * 审计视图里这一版"落库时是什么内容"就成了空白。放到单独的 {@code @PostConstruct}
+     * 就不依赖任何开关，且与 seed 的先后顺序无关（回填只读 spec_json）。
+     *
+     * <p>注意这里补的是 {@code spec_sha256}（迁移期内容指纹），<b>不是</b>
+     * {@code reviewed_spec_sha}（审批时钉住的内容哈希）：后者为 NULL 表示"这一版没经过人工审批"，
+     * 回填它等于把没人审过的规则标成审过了。篡改检测只看 {@code reviewed_spec_sha}，
+     * 所以这条修复不影响篡改检测的覆盖面。
      */
     @PostConstruct
     void backfillLegacySpecSha() {
