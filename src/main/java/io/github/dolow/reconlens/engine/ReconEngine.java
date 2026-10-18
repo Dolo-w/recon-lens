@@ -1,10 +1,13 @@
 package io.github.dolow.reconlens.engine;
 
 import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.domain.JobKind;
 import io.github.dolow.reconlens.domain.JobStatus;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
 import io.github.dolow.reconlens.domain.ShardStatus;
+import io.github.dolow.reconlens.domain.TrialPhase;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.ReconRepository;
@@ -14,6 +17,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -57,9 +63,53 @@ public class ReconEngine {
 
     /** 用请求里内联的规则跑（不落规则库）：使用方临时换维度、试算用。 */
     public ReconJob run(RuleCatalog.Resolved resolved, String batchId, String remark) {
-        long jobId = prepare(resolved, batchId, remark);
-        execute(resolved.spec(), jobId, ShardPlanner.plan(resolved.spec()));
+        long jobId = prepare(resolved, batchId, remark, JobKind.PROD, null);
+        // 生产路径不捕获差异明细：那会把整个任务的差异按批堆在内存里，只为了一个没人看的列表
+        execute(resolved.spec(), jobId, planFor(resolved.spec()), false);
         return repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
+    }
+
+    /**
+     * 带轨迹的同步执行：<b>把每个分片的差异明细留在内存里</b>，供闸门 2 做 T0/T2/T3/T4 判定。
+     *
+     * <p>为什么不从 {@code recon_diff} 读回来：落库时 {@code biz_key} 截断到 128、value 截断到 512，
+     * 两条前缀相同的业务键会得到同一个摘要 —— T2 会因此<b>假通过</b>。假通过比漏判更糟，
+     * 它给的是"确定"的假象。
+     *
+     * @param kind  {@code PROD} 或 {@code TRIAL}；试算任务不能进生产基线（巡检/任务列表按它过滤）
+     * @param phase {@code TRIAL} / {@code CANARY}，仅 {@code kind=TRIAL} 时有意义
+     */
+    public RunTrace runTraced(RuleCatalog.Resolved resolved, String batchId, String remark,
+                              JobKind kind, TrialPhase phase) {
+        long jobId = prepare(resolved, batchId, remark, kind, phase);
+        RuleSpec rule = resolved.spec();
+        List<ShardResult> results = execute(rule, jobId, planFor(rule), true);
+        ReconJob job = repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
+        return new RunTrace(job, results);
+    }
+
+    /**
+     * 一次执行的完整轨迹。
+     *
+     * @param results 逐分片结果，含摘要与（试算时的）差异明细
+     */
+    public record RunTrace(ReconJob job, List<ShardResult> results) {
+
+        /** 全部差异明细；生产路径（未捕获）时为空。 */
+        public List<DiffRecord> capturedDiffs() {
+            return results.stream().flatMap(result -> result.captured().stream()).toList();
+        }
+
+        /** T2 的比对对象：{@code shardId → sha256}。分片计划是确定性的，所以这张表等价于全局哈希。 */
+        public Map<Integer, String> digestsByShard() {
+            Map<Integer, String> digests = new TreeMap<>();
+            for (ShardResult result : results) {
+                if (result.digest() != null) {
+                    digests.put(result.shardId(), result.digest().sha256());
+                }
+            }
+            return digests;
+        }
     }
 
     /** 异步：HTTP 接口立刻返回 jobId，避免大对账把请求线程占住。 */
@@ -68,11 +118,11 @@ public class ReconEngine {
     }
 
     public long runAsync(RuleCatalog.Resolved resolved, String batchId, String remark) {
-        long jobId = prepare(resolved, batchId, remark);
+        long jobId = prepare(resolved, batchId, remark, JobKind.PROD, null);
         RuleSpec rule = resolved.spec();
         submitter.submit(() -> {
             try {
-                execute(rule, jobId, ShardPlanner.plan(rule));
+                execute(rule, jobId, planFor(rule), false);
             } catch (RuntimeException e) {
                 log.error("任务 #{} 执行异常", jobId, e);
                 repository.finishJob(jobId, JobStatus.FAILED, Errors.describe(e));
@@ -94,12 +144,12 @@ public class ReconEngine {
             log.info("任务 #{} 没有需要重跑的分片", jobId);
             return job;
         }
-        List<ShardPlan> allPlans = ShardPlanner.plan(rule);
+        List<ShardPlan> allPlans = planFor(rule);
         List<ShardPlan> plans = shardIds.stream().map(allPlans::get).toList();
 
         repository.markJobForRetry(jobId);
         log.info("任务 #{} 重跑 {} 个分片: {}", jobId, plans.size(), shardIds);
-        execute(rule, jobId, plans);
+        execute(rule, jobId, plans, false);
         return repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
     }
 
@@ -121,18 +171,36 @@ public class ReconEngine {
         return catalog.resolve(job.ruleCode()).spec();
     }
 
-    private long prepare(RuleCatalog.Resolved resolved, String batchId, String remark) {
+    private long prepare(RuleCatalog.Resolved resolved, String batchId, String remark,
+                         JobKind kind, TrialPhase phase) {
         RuleSpec rule = resolved.spec();
         int shardCount = rule.shard().count();
-        long jobId = repository.createJob(rule.code(), resolved.version(), resolved.snapshot(), batchId, remark, shardCount);
+        long jobId = repository.createJob(rule.code(), resolved.version(), resolved.snapshot(), batchId, remark,
+                shardCount, kind, phase);
         repository.createShards(jobId, shardCount);
         repository.markJobRunning(jobId);
-        log.info("创建对账任务 #{} 规则={} 版本={} 批次={} 分片数={}", jobId, rule.code(),
-                resolved.version() == null ? "内联" : "v" + resolved.version(), batchId, shardCount);
+        log.info("创建对账任务 #{} 规则={} 版本={} 批次={} 分片数={} kind={}{}", jobId, rule.code(),
+                resolved.version() == null ? "内联" : "v" + resolved.version(), batchId, shardCount, kind,
+                phase == null ? "" : " phase=" + phase);
         return jobId;
     }
 
-    private void execute(RuleSpec rule, long jobId, List<ShardPlan> plans) {
+    /**
+     * 生成分片计划：模板分片直接渲染；{@code shard.rangeKey} 分片先探两侧列的 MIN/MAX 再均分。
+     * 探测失败（列不是数值 / 表为空 / 权限不足）一律 fail-loud —— 静默退化成模板分片
+     * 等于把"能走索引"的承诺偷偷换成"全表扫"，用户还以为拿到了快。
+     */
+    private List<ShardPlan> planFor(RuleSpec rule) {
+        if (rule.shard().rangeKey() == null || rule.shard().rangeKey().isBlank()) {
+            return ShardPlanner.plan(rule);
+        }
+        long[][] bounds = repository.rangeBounds(rule.left().table(), rule.right().table(),
+                rule.shard().rangeKey(), rule.shard().count());
+        log.info("范围分片：rangeKey={}，边界已探测，{} 段", rule.shard().rangeKey(), bounds.length);
+        return ShardPlanner.plan(rule, bounds);
+    }
+
+    private List<ShardResult> execute(RuleSpec rule, long jobId, List<ShardPlan> plans, boolean captureDiffs) {
         int parallelism = Math.max(1, Math.min(rule.shard().effectiveParallelism(),
                 Math.max(1, properties.getEngine().getParallelism())));
         ExecutorService pool = Executors.newFixedThreadPool(parallelism, runnable -> {
@@ -145,7 +213,9 @@ public class ReconEngine {
         try {
             List<Future<ShardResult>> futures = new ArrayList<>(plans.size());
             for (ShardPlan plan : plans) {
-                futures.add(pool.submit(() -> shardRunner.run(rule, jobId, plan)));
+                // 每个分片一个 capture：共享一个 list 会逼着加锁，而试算的并行度和生产一样
+                DiffCapture capture = captureDiffs ? new DiffCapture() : null;
+                futures.add(pool.submit(() -> shardRunner.run(rule, jobId, plan, capture)));
             }
             for (Future<ShardResult> future : futures) {
                 try {
@@ -154,7 +224,7 @@ public class ReconEngine {
                     Thread.currentThread().interrupt();
                     throw new IllegalStateException("对账任务 #" + jobId + " 被中断", e);
                 } catch (ExecutionException e) {
-                    results.add(new ShardResult(-1, ShardStatus.FAILED, 0, MatchStats.empty(), Errors.describe(e.getCause())));
+                    results.add(ShardResult.failed(-1, 0, Errors.describe(e.getCause())));
                 }
             }
         } finally {
@@ -179,5 +249,32 @@ public class ReconEngine {
         ReconJob finished = repository.findJob(jobId).orElseThrow();
         log.info("任务 #{} 结束: status={} 分片成功 {}/{} 左侧 {} 行 右侧 {} 行 差异 {} 条",
                 jobId, status, success, shards.size(), finished.leftRows(), finished.rightRows(), finished.diffRows());
+        logDiffSummary(jobId, results);
+        return results;
+    }
+
+    /**
+     * 任务级差异分布：把各分片摘要的计数合起来，给人一眼看出"这次差异大概是什么形态"。
+     * <p>注意这里<b>不</b>重算一个任务级 sha256 —— 集合哈希要求把全部业务键放进一个集合里排序，
+     * 跨分片合并等于把内存占用从"单分片"抬到"整个任务"。要对比两次运行是否一致，
+     * 比的是 {@code shardId → sha256} 这张表（分片计划是确定性的，同一份数据分片不变）。
+     */
+    private void logDiffSummary(long jobId, List<ShardResult> results) {
+        List<DiffSetDigest> digests = results.stream()
+                .map(ShardResult::digest)
+                .filter(Objects::nonNull)
+                .toList();
+        if (digests.isEmpty()) {
+            return;
+        }
+        Map<String, Long> byType = new TreeMap<>();
+        Map<String, Long> byField = new TreeMap<>();
+        for (DiffSetDigest digest : digests) {
+            digest.byType().forEach((key, value) -> byType.merge(key, value, Long::sum));
+            digest.byField().forEach((key, value) -> byField.merge(key, value, Long::sum));
+        }
+        long total = digests.stream().mapToLong(DiffSetDigest::count).sum();
+        log.info("任务 #{} 差异性摘要: 共 {} 条（{}/{} 个分片有摘要） byType={} byField={}",
+                jobId, total, digests.size(), results.size(), byType, byField);
     }
 }

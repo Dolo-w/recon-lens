@@ -65,14 +65,6 @@ public record SideSpec(String label,
         return derivedKey() ? dimension : keyField;
     }
 
-    /** 分片告警用的关键词：分片条件里出现任意一个，就认为它有可能按业务键切分。 */
-    public List<String> keyHints() {
-        if (derivedKey() && !dimensionColumns.isEmpty()) {
-            return dimensionColumns;
-        }
-        return List.of(keyExpression());
-    }
-
     public String describe() {
         String source = customSql() ? "自定义SQL" : table;
         return label + "(" + source + (derivedKey() ? ", 维度=" + dimension : "") + ")";

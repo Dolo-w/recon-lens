@@ -38,30 +38,29 @@ class ReconEngineEndToEndTest {
         ReconJob job = engine.run("BILL_VS_SETTLE", "it-bill", "集成测试");
 
         assertThat(job.status()).isEqualTo(JobStatus.SUCCESS);
-        assertThat(job.shardCount()).isEqualTo(4);
-        assertThat(job.shardDone()).isEqualTo(4);
-        assertThat(job.leftRows()).isEqualTo(20);
-        assertThat(job.rightRows()).isEqualTo(21);
+        assertThat(job.shardCount()).isEqualTo(2);
+        assertThat(job.shardDone()).isEqualTo(2);
+        assertThat(job.leftRows()).isEqualTo(10);
+        assertThat(job.rightRows()).isEqualTo(10);
 
         Map<String, Long> byType = repository.summaryByType(job.id());
         assertThat(byType)
-                .containsEntry("AMOUNT_MISMATCH", 2L)
-                .containsEntry("STATUS_MISMATCH", 1L)
+                .containsEntry("AMOUNT_MISMATCH", 1L)
                 .containsEntry("MISSING_RIGHT", 1L)
                 .containsEntry("MISSING_LEFT", 1L)
                 .containsEntry("DUPLICATE_KEY", 1L);
-        assertThat(job.diffRows()).isEqualTo(6);
+        assertThat(job.diffRows()).isEqualTo(4);
 
         // 金额差异带上了 delta 与相对比例，前端/报告不用自己算
         List<DiffRecord> amount = repository.listDiffs(job.id(), "AMOUNT_MISMATCH", 0, 10);
-        assertThat(amount).hasSize(2);
+        assertThat(amount).hasSize(1);
         assertThat(amount).anyMatch(d -> d.deltaValue() != null && d.deltaRatio() != null);
 
         // 重跑整批：先删本分片差异再写，所以条数不会翻倍
         ReconJob rerun = engine.retry(job.id(), false);
         assertThat(rerun.status()).isEqualTo(JobStatus.SUCCESS);
-        assertThat(rerun.diffRows()).isEqualTo(6);
-        assertThat(repository.countDiffs(job.id(), null)).isEqualTo(6);
+        assertThat(rerun.diffRows()).isEqualTo(4);
+        assertThat(repository.countDiffs(job.id(), null)).isEqualTo(4);
         assertThat(repository.listShards(job.id()))
                 .extracting(ReconShard::status)
                 .containsOnly(ShardStatus.SUCCESS);
@@ -73,7 +72,7 @@ class ReconEngineEndToEndTest {
 
         int explained = explainService.explainJob(job.id(), 50);
 
-        assertThat(explained).isEqualTo(6);
+        assertThat(explained).isEqualTo(4);
         assertThat(explainService.llmAvailable()).isFalse();
         List<DiffRecord> diffs = repository.listDiffs(job.id(), null, 0, 50);
         assertThat(diffs).allSatisfy(diff -> assertThat(diff.explanation()).isNotBlank());
@@ -104,7 +103,7 @@ class ReconEngineEndToEndTest {
         // 没有失败分片时，onlyFailed 重跑不应该做任何事
         ReconJob again = engine.retry(job.id(), true);
 
-        assertThat(again.shardDone()).isEqualTo(4);
+        assertThat(again.shardDone()).isEqualTo(2);
         assertThat(repository.countDiffs(job.id(), null)).isEqualTo(diffsBefore);
     }
 

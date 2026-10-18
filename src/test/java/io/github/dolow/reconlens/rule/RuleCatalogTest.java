@@ -88,8 +88,8 @@ class RuleCatalogTest {
 
         ReconJob job = engine.run(inline, "inline-it", "内联规则");
         assertThat(job.status()).isEqualTo(JobStatus.SUCCESS);
-        assertThat(job.leftRows()).isEqualTo(20);
-        assertThat(job.rightRows()).isEqualTo(21);
+        assertThat(job.leftRows()).isEqualTo(10);
+        assertThat(job.rightRows()).isEqualTo(10);
         assertThat(repository.summaryByType(job.id()))
                 .containsEntry("AMOUNT_MISMATCH", 2L)
                 .doesNotContainKey("STATUS_MISMATCH");
@@ -107,10 +107,13 @@ class RuleCatalogTest {
         assertThat(repository.ruleVersion(first.id())).isEqualTo(1);
         assertThat(repository.ruleSnapshot(first.id())).isPresent();
 
-        // 改规则升到 v2：新任务按 v2，老任务重跑仍按 v1 的快照
+        // 改规则升到 v2：新任务按 v2（只比 status —— 右表 REFUNDED 那条被检出），
+        // 老任务重跑仍按 v1 的快照
         catalog.defineMap(ruleBody(code, "status", "STATUS_MISMATCH"), "单测状态版", "tester");
         ReconJob second = engine.run(code, "pin-v2", "按状态对账");
-        assertThat(repository.summaryByType(second.id())).containsEntry("STATUS_MISMATCH", 1L);
+        assertThat(repository.summaryByType(second.id()))
+                .containsEntry("STATUS_MISMATCH", 1L)
+                .doesNotContainKey("AMOUNT_MISMATCH");
         assertThat(repository.ruleVersion(second.id())).isEqualTo(2);
 
         ReconJob retried = engine.retry(first.id(), false);

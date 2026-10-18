@@ -150,4 +150,32 @@ class MergeMatcherTest {
         assertThat(sink.diffs).isEmpty();
         assertThat(stats.matchedRows()).isZero();
     }
+
+    @Test
+    void sameSampleProducesTheSameDigestTwice() {
+        List<Row> left = List.of(row("A1", "10", "PAID"), row("A2", "20", "PAID"), row("A5", "50", "PAID"));
+        List<Row> right = List.of(row("A1", "10.00", "PAID"), row("A2", "21", "PAID"), row("A3", "30", "PAID"));
+
+        DiffSetDigest first = digestOf(left, right);
+        DiffSetDigest second = digestOf(left, right);
+
+        // T2 的最小形态：同一份样本跑两次，摘要必须一致（这里连 jobId 都是同一个，
+        // 真正验收时两次运行 jobId 不同 —— 摘要不含 jobId/shardId，所以不受影响）
+        assertThat(second.sha256()).isEqualTo(first.sha256());
+        assertThat(second.byType()).isEqualTo(first.byType());
+        assertThat(first.byType())
+                .containsEntry("AMOUNT_MISMATCH", 1L)
+                .containsEntry("MISSING_RIGHT", 1L)
+                .containsEntry("MISSING_LEFT", 1L);
+    }
+
+    private DiffSetDigest digestOf(List<Row> left, List<Row> right) {
+        DigestingDiffSink sink = new DigestingDiffSink(new CollectingSink(),
+                DiffSetDigest.accumulator(rule.left().keyType(), DiffSetDigest.DEFAULT_MAX_KEYS));
+        try (RowCursor leftCursor = new ListRowCursor(left);
+             RowCursor rightCursor = new ListRowCursor(right)) {
+            new MergeMatcher(rule, 1L, 0).match(leftCursor, rightCursor, sink);
+        }
+        return sink.digest().orElseThrow();
+    }
 }

@@ -2,6 +2,7 @@ package io.github.dolow.reconlens.engine;
 
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.dsl.SideSpec;
+import io.github.dolow.reconlens.dsl.ShardSpec;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -10,21 +11,58 @@ import java.util.List;
  * 分片计划 + 取数 SQL 生成。
  * <p>分片的意义：把一个大对账拆成 N 个可以并行、可以单独重试、单独续跑的小任务；
  * 每个分片内部的取数仍然靠 ORDER BY + 游标保持内存可控。
+ *
+ * <p>两种分片形态：
+ * <ul>
+ *   <li><b>模板分片</b>（默认）：规则里写 {@code whereLeft/whereRight} 模板，引擎只做占位符替换 ——
+ *       灵活，但 {@code MOD(CRC32(...))} 这类表达式谓词走不了索引，必然全表扫；</li>
+ *   <li><b>范围分片</b>（{@code shard.rangeKey}）：引擎探两侧该列的 MIN/MAX 均分后生成
+ *       {@code col >= lo AND col < hi}（末段 {@code <= hi}）—— 纯"列与常量比较"，能走主键/索引。
+ *       两侧用合并后的同一组边界，同源约束由构造保证。</li>
+ * </ul>
  */
 public final class ShardPlanner {
 
     private ShardPlanner() {
     }
 
+    /** 模板分片。rangeKey 规则必须走 {@link #plan(RuleSpec, long[][])}。 */
     public static List<ShardPlan> plan(RuleSpec rule) {
-        int count = rule.shard().count();
+        return plan(rule, null);
+    }
+
+    /**
+     * @param rangeBounds 范围分片的边界：{@code bounds[i] = {lo, hi}}，两侧共用同一组；
+     *                    模板分片传 {@code null}
+     */
+    public static List<ShardPlan> plan(RuleSpec rule, long[][] rangeBounds) {
+        ShardSpec shard = rule.shard();
+        int count = shard.count();
         List<ShardPlan> plans = new ArrayList<>(count);
+        if (shard.rangeKey() != null && !shard.rangeKey().isBlank()) {
+            if (rangeBounds == null || rangeBounds.length != count) {
+                throw new IllegalStateException("shard.rangeKey 分片需要先探测两侧列边界（ShardPlanner.plan(rule, bounds)）");
+            }
+            for (int index = 0; index < count; index++) {
+                String where = rangeWhere(shard.rangeKey(), rangeBounds[index][0], rangeBounds[index][1], index == count - 1);
+                plans.add(new ShardPlan(index, where, where));
+            }
+            return plans;
+        }
         for (int index = 0; index < count; index++) {
             plans.add(new ShardPlan(index,
-                    render(rule.shard().whereLeft(), count, index),
-                    render(rule.shard().whereRight(), count, index)));
+                    render(shard.whereLeft(), count, index),
+                    render(shard.whereRight(), count, index)));
         }
         return plans;
+    }
+
+    /**
+     * 范围谓词。半开区间 {@code [lo, hi)} 保证相邻分片不重叠 —— 否则边界值会被两个分片各扫一次，
+     * 在 MergeMatcher 眼里就是凭空的 DUPLICATE_KEY。
+     */
+    static String rangeWhere(String column, long lo, long hi, boolean last) {
+        return column + " >= " + lo + " AND " + column + (last ? " <= " + hi : " < " + hi);
     }
 
     static String render(String where, int shards, int index) {

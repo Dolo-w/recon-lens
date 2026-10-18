@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.domain.RuleLifecycle;
+import io.github.dolow.reconlens.domain.RuleOrigin;
 import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.dsl.RuleParser;
 import io.github.dolow.reconlens.dsl.RuleRegistry;
@@ -14,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -66,6 +69,7 @@ public class RuleCatalog {
      */
     @PostConstruct
     void seedFromRuleDirectory() {
+        backfillSpecSha();
         if (!properties.isSeedRules()) {
             log.info("已关闭规则目录导入（recon.seed-rules=false），规则完全以数据库为准");
             return;
@@ -85,7 +89,7 @@ public class RuleCatalog {
                 continue;
             }
             Optional<RuleRepository.RuleRow> latest = versions.stream()
-                    .filter(RuleRepository.RuleRow::enabled)
+                    .filter(RuleRepository.RuleRow::runtimeVisible)
                     .findFirst();
             if (latest.isEmpty()) {
                 disabled.add(spec.code()); // 下线是显式动作，重启不该把它复活
@@ -125,24 +129,104 @@ public class RuleCatalog {
         return createdBy != null && createdBy.startsWith("seed:");
     }
 
-    public Resolved resolve(String code) {
-        return latestCache.computeIfAbsent(code, c -> repository.findLatest(c)
-                .map(this::toResolved)
-                .orElseThrow(() -> new RuleException("未找到规则 " + c + "，可用规则: " + codes())));
+    /**
+     * 迁移后历史行没有 {@code spec_sha256}。由应用侧逐行回填，<b>不在 SQL 里算</b>：
+     * 哈希必须与运行时的 {@link SpecHasher} 完全一致，SQL 侧另写一份算法等于制造第二个口径。
+     */
+    private void backfillSpecSha() {
+        List<RuleRepository.RuleRow> missing = repository.listMissingSpecSha();
+        for (RuleRepository.RuleRow row : missing) {
+            repository.updateSpecSha(row.code(), row.version(), SpecHasher.sha256(row.specJson()));
+        }
+        if (!missing.isEmpty()) {
+            log.info("回填了 {} 个历史规则版本的 spec_sha256（迁移前落库的行没有内容哈希）", missing.size());
+        }
     }
 
-    /** version 为 null 时取最新版本。 */
+    /**
+     * 内容哈希比对（R9）：审批记录贴在 {@code reviewed_spec_sha} 上，而 {@code spec_json} 是普通列，
+     * DBA / 脚本可以直接 UPDATE。不比对的话，审批就变成了贴在"一份它没审过的规则体"上。
+     */
+    private boolean contentTampered(RuleRepository.RuleRow row) {
+        return row.reviewedSpecSha() != null
+                && !row.reviewedSpecSha().equalsIgnoreCase(SpecHasher.sha256(row.specJson()));
+    }
+
+    /**
+     * 缓存命中也要复核内容哈希。
+     *
+     * <p>早先 {@code resolve} 命中 {@code latestCache} 就直接返回，等于"审批后改内容"的检测
+     * 只在冷缓存那一瞬间有效——进程一直活着，这条检测就永远不触发（实测能跑出被改过的规则）。
+     *
+     * <p>现在每次 resolve 先读一行守卫行（{@code (code, version)} 索引，单行读），
+     * 用<b>库里的 {@code spec_json} 现算哈希</b>与 {@code reviewed_spec_sha} 比对：
+     * 只比两个已存列是不够的——改 {@code spec_json} 的人同样能改 {@code spec_sha256}，
+     * 而审批钉住的是 {@code reviewed_spec_sha}，它才是不可篡改的那一侧。
+     */
+    private void verifyGuard(String code, int version, String specJson, String reviewedSpecSha) {
+        if (reviewedSpecSha == null || reviewedSpecSha.equalsIgnoreCase(SpecHasher.sha256(specJson))) {
+            return;
+        }
+        // 降级回 REVIEWING：这时"生效中"的已经不是审批时那份内容，继续跑等于绕过闸门 3。
+        repository.transition(code, version, RuleLifecycle.ACTIVE, RuleLifecycle.REVIEWING);
+        evict(code);
+        log.error("规则 {} v{} 的内容在审批后被修改（reviewed_spec_sha 不匹配），已降级回 REVIEWING，需重新审核",
+                code, version);
+        throw new RuleException("规则 " + code + " v" + version
+                + " 的内容在审批后被修改（reviewed_spec_sha 不匹配），已降级回 REVIEWING，需重新审核后才能运行");
+    }
+
+    private void verifyReviewedContent(RuleRepository.RuleRow row) {
+        verifyGuard(row.code(), row.version(), row.specJson(), row.reviewedSpecSha());
+    }
+
+    public Resolved resolve(String code) {
+        // 先读守卫行（索引上的单行读），缓存命中也要过这一关。
+        RuleRepository.RuleGuard guard = repository.findGuard(code)
+                .orElseThrow(() -> new RuleException("未找到规则 " + code + "，可用规则: " + codes()));
+        verifyGuard(code, guard.version(), guard.specJson(), guard.reviewedSpecSha());
+        Resolved cached = latestCache.get(code);
+        if (cached != null && cached.version() != null && cached.version() == guard.version()) {
+            return cached;
+        }
+        RuleRepository.RuleRow row = repository.findLatest(code)
+                .orElseThrow(() -> new RuleException("未找到规则 " + code + "，可用规则: " + codes()));
+        Resolved resolved = toResolved(row);
+        latestCache.put(code, resolved);
+        return resolved;
+    }
+
+    /** version 为 null 时取最新生效版本。 */
     public Resolved resolve(String code, Integer version) {
         if (version == null) {
             return resolve(code);
         }
-        return versionCache.computeIfAbsent(code + "#" + version, key -> repository.findByVersion(code, version)
-                .map(this::toResolved)
-                .orElseThrow(() -> new RuleException("规则 " + code + " 没有版本 v" + version)));
+        RuleRepository.RuleGuard guard = repository.findGuard(code, version)
+                .orElseThrow(() -> new RuleException("规则 " + code + " 没有版本 v" + version));
+        verifyGuard(code, guard.version(), guard.specJson(), guard.reviewedSpecSha());
+        Resolved cached = versionCache.get(code + "#" + version);
+        if (cached != null) {
+            return cached;
+        }
+        RuleRepository.RuleRow row = repository.findByVersion(code, version)
+                .orElseThrow(() -> new RuleException("规则 " + code + " 没有版本 v" + version));
+        Resolved resolved = toResolved(row);
+        versionCache.put(code + "#" + version, resolved);
+        return resolved;
     }
 
     public List<Resolved> allResolved() {
-        return repository.listLatest().stream().map(this::toResolved).toList();
+        List<Resolved> resolved = new ArrayList<>();
+        for (RuleRepository.RuleRow row : repository.listLatest()) {
+            if (contentTampered(row)) {
+                // 列表里不展示"审批后被改过"的版本；真正的降级发生在 resolve（那里会写库）
+                log.error("规则 {} v{} 的内容在审批后被修改，列表里跳过（resolve 时会降级回 REVIEWING）",
+                        row.code(), row.version());
+                continue;
+            }
+            resolved.add(toResolved(row));
+        }
+        return resolved;
     }
 
     public List<RuleSpec> all() {
@@ -186,8 +270,41 @@ public class RuleCatalog {
         return defineMap(readJson(jsonText, source), source, createdBy);
     }
 
+    /**
+     * 落一条<b>草稿</b>版本：{@code lifecycle=DRAFT}，{@code resolve} 不认，业务不可见。
+     * 之后由闸门 3 走 DRAFT → REVIEWING → ACTIVE（见 {@code RuleLifecycleService}）。
+     *
+     * <p>为什么还保留 {@link #defineMap} 直通 ACTIVE：那是引入 Agent 之前的人工 REST 通路，
+     * 改成草稿会让所有既有使用方（CI 脚本、运维）在升级当天发现"规则不生效了"。
+     * <b>Agent 与需要审核的草稿一律走本方法</b>，两条路径写清楚，不靠约定。
+     */
+    public Resolved defineDraft(Map<String, Object> root, String source, String createdBy,
+                                RuleOrigin origin, Integer baseVersion, String draftReason) {
+        RuleSpec spec = parser.parseMap(root, source);
+        int version = repository.nextVersion(spec.code());
+        String snapshot = writeJson(root, source);
+        repository.insert(spec.code(), version, snapshot, createdBy,
+                RuleLifecycle.DRAFT, origin == null ? RuleOrigin.HUMAN : origin,
+                baseVersion, draftReason, SpecHasher.sha256(snapshot));
+        evict(spec.code());
+        log.info("规则 {} 落库为草稿 v{}（来源 {}，起草人 {}，基于 v{}）",
+                spec.code(), version, origin, createdBy, baseVersion);
+        return new Resolved(spec, version, snapshot);
+    }
+
     public Resolved defineYaml(String yamlText, String source, String createdBy) {
         return defineMap(parser.readYaml(yamlText, source), source, createdBy);
+    }
+
+    /**
+     * 文本入口的草稿落库：JSON / YAML 自动识别，其余语义与 {@link #defineDraft} 完全一致。
+     * MCP 等外部提交通走这里 —— 解析校验、DRAFT 状态、试算绑定一样都不少。
+     */
+    public Resolved defineDraftText(String body, String source, String createdBy,
+                                    RuleOrigin origin, Integer baseVersion, String draftReason) {
+        return body.strip().startsWith("{")
+                ? defineDraft(readJson(body, source), source, createdBy, origin, baseVersion, draftReason)
+                : defineDraft(parser.readYaml(body, source), source, createdBy, origin, baseVersion, draftReason);
     }
 
     public Optional<Resolved> latestIfPresent(String code) {
@@ -218,6 +335,13 @@ public class RuleCatalog {
 
     private void evict(String code) {
         latestCache.remove(code);
+        // 版本缓存也要清：审批 / 驳回 / 降级改的是某一版的状态，留着旧对象等于让缓存绕过闸门 3
+        versionCache.keySet().removeIf(key -> key.startsWith(code + "#"));
+    }
+
+    /** 生命周期变更后让缓存失效（审批 / 驳回 / 内容哈希降级都要调）。 */
+    public void invalidate(String code) {
+        evict(code);
     }
 
     private Resolved toResolved(RuleRepository.RuleRow row) {

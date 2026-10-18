@@ -5,6 +5,9 @@ import io.github.dolow.reconlens.dsl.FieldRule;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -89,5 +92,30 @@ class ValueComparatorTest {
     @Test
     void parsesThousandsSeparatedStrings() {
         assertThat(ValueComparator.toDecimal("1,234.56")).isEqualByComparingTo("1234.56");
+    }
+
+    /**
+     * 摘要用的规范形态必须与归并用的比较完全同口径 —— 否则会出现
+     * "匹配时算同一个键、算摘要时算两个"，同一份数据两次跑出不同摘要（T2 假失败）。
+     */
+    @Test
+    void canonicalKeyAgreesWithKeyComparison() {
+        Map<FieldType, List<Object>> samples = Map.of(
+                FieldType.STRING, Arrays.asList("A1", "A1", "a1", " A1", "A10", "", null),
+                FieldType.LONG, Arrays.asList("100", "100.00", 100L, "0100", "1e3", "1000", "abc", "", null),
+                FieldType.DECIMAL, Arrays.asList("0.10", "0.1", new BigDecimal("0.100"), "10", "0.2", null),
+                FieldType.BOOLEAN, Arrays.asList("true", "TRUE", true, "false", "1", null));
+
+        samples.forEach((type, values) -> {
+            for (Object left : values) {
+                for (Object right : values) {
+                    boolean sameKey = ValueComparator.canonicalKey(type, left).equals(ValueComparator.canonicalKey(type, right));
+                    boolean sameByMerge = ValueComparator.compareKeys(type, left, right) == 0;
+                    assertThat(sameKey)
+                            .as("%s: %s 与 %s 的规范形态是否相等应与 compareKeys 一致", type, left, right)
+                            .isEqualTo(sameByMerge);
+                }
+            }
+        });
     }
 }

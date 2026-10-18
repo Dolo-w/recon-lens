@@ -74,8 +74,8 @@ class ModelBuilderTest {
                 Long.class);
         Long detailRows = jdbc.queryForObject("SELECT COUNT(*) FROM bill_left", Long.class);
 
-        // 模型表就是规则声明的粒度：20 行明细压成 19 组（C001 出现两次）
-        assertThat(detailRows).isEqualTo(20L);
+        // 模型表就是规则声明的粒度：10 行明细压成 9 组（C001 出现两次）
+        assertThat(detailRows).isEqualTo(10L);
         assertThat(build.table("left").rows()).isEqualTo(leftGroups).isLessThan(detailRows);
         assertThat(baseline.leftRows()).isEqualTo(leftGroups);
 

@@ -34,6 +34,8 @@ public final class RuleParser {
 
     private static final Pattern CODE_PATTERN = Pattern.compile("[A-Z][A-Z0-9_]*");
 
+    private static final ShardSplitAnalyzer SHARD_SPLIT_ANALYZER = new ShardSplitAnalyzer();
+
     private final Yaml yaml = new Yaml();
 
     public RuleSpec parse(Path path) {
@@ -115,30 +117,28 @@ public final class RuleParser {
     /**
      * 分片切分必须让"同一个业务键"落到同一个分片，否则两侧各自的代理主键会把同一笔业务切到不同分片，
      * 结果是凭空多出一堆单边缺失差异。这里只告警不报错 —— 按业务键做哈希/取模是合法写法。
+     *
+     * <p>判定交给 {@link ShardSplitAnalyzer}（三分：SAME / DIFFERENT / UNKNOWN）。v0.8 之前这里是
+     * "这段 where 里出现过某个业务键"的子串匹配，两侧各自引用了<b>不同的键</b>时它查不出来 ——
+     * 而那种写法恰恰是"结果报 SUCCESS、差异少了一半"的来源。
      */
     private void warnIfShardMaySplitTheSameKey(String source, SideSpec left, SideSpec right, ShardSpec shard) {
-        if (shard.count() <= 1) {
-            return;
-        }
-        for (String[] side : new String[][]{{"shard.whereLeft", shard.whereLeft()}, {"shard.whereRight", shard.whereRight()}}) {
-            String where = side[1];
-            if (where == null) {
-                continue;
+        ShardSplitAnalyzer.Result result = SHARD_SPLIT_ANALYZER.analyze(shard);
+        switch (result.verdict()) {
+            case SAME -> {
+                // 两侧同一口径，或压根不切分：没什么可说的。
             }
-            if (!mentionsAny(where, left.keyHints()) && !mentionsAny(where, right.keyHints())) {
-                LOG.warn("[{}] {} 没有引用业务键维度 {} / {}，请确认两侧用的是同一个切分口径（例如按各自表的 id 取模会把同一笔业务切到不同分片）: {}",
-                        source, side[0], left.keyExpression(), right.keyExpression(), where);
-            }
+            case DIFFERENT -> LOG.warn("[{}] {} 两侧分片口径不一致：{}。同一个业务键会被切到不同分片，"
+                            + "对账结果里会凭空多出一堆单边缺失差异；请让两侧按同一个业务键维度切分"
+                            + "（左侧业务键 {}，右侧业务键 {}）。whereLeft={}，whereRight={}",
+                    source, ShardSplitAnalyzer.VIOLATION_CODE, result.reason(),
+                    left.keyExpression(), right.keyExpression(), shard.whereLeft(), shard.whereRight());
+            case UNKNOWN -> LOG.warn("[{}] 无法判定两侧分片口径是否同源：{}。这不等于错（按业务键哈希/区间切分"
+                            + "都是合法写法），但请人工确认两侧切的是同一笔业务的同一个维度"
+                            + "（左侧业务键 {}，右侧业务键 {}）。whereLeft={}，whereRight={}",
+                    source, result.reason(),
+                    left.keyExpression(), right.keyExpression(), shard.whereLeft(), shard.whereRight());
         }
-    }
-
-    private boolean mentionsAny(String where, List<String> hints) {
-        for (String hint : hints) {
-            if (hint != null && !hint.isBlank() && where.contains(hint)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private SideSpec parseSide(Map<String, Object> root, String key, String source) {
@@ -292,6 +292,18 @@ public final class RuleParser {
         }
         String whereLeft = optionalString(shard, "whereLeft", null);
         String whereRight = optionalString(shard, "whereRight", null);
+        String rangeKey = optionalString(shard, "rangeKey", null);
+        if (rangeKey != null && !rangeKey.isBlank()) {
+            // 范围分片与模板分片互斥：混着写没人说得清到底怎么切，直接拒绝
+            if ((whereLeft != null && !whereLeft.isBlank()) || (whereRight != null && !whereRight.isBlank())) {
+                throw RuleException.at(source, "shard.rangeKey 与 shard.whereLeft/whereRight 互斥，只能二选一");
+            }
+            if (!rangeKey.matches("[A-Za-z_][A-Za-z0-9_]*")) {
+                throw RuleException.at(source, "shard.rangeKey 必须是单一列名（纯标识符，如 id），当前: " + rangeKey);
+            }
+            // 边界由引擎探测后生成，这里不占位符校验
+            return new ShardSpec(count, parallelism, null, null, rangeKey);
+        }
         if (count > 1) {
             validateShardWhere(source, "whereLeft", whereLeft);
             validateShardWhere(source, "whereRight", whereRight);

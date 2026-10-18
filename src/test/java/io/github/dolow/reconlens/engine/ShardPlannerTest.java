@@ -21,9 +21,9 @@ class ShardPlannerTest {
         assertThat(plans).hasSize(4);
         assertThat(plans).extracting(ShardPlan::shardId).containsExactly(0, 1, 2, 3);
         assertThat(plans.get(0).whereLeft())
-                .isEqualTo("MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), 4) = 0");
+                .isEqualTo("MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), 4) = 0");
         assertThat(plans.get(3).whereRight())
-                .isEqualTo("MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), 4) = 3");
+                .isEqualTo("MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), 4) = 3");
         assertThat(plans.get(0).whereLeft()).doesNotContain("{shards}", "{index}");
     }
 

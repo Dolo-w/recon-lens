@@ -27,8 +27,8 @@ public final class TestRules {
             shard:
               count: 4
               parallelism: 2
-              whereLeft: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
-              whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
+              whereLeft: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
+              whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
             compare:
               - field: amount
                 type: DECIMAL

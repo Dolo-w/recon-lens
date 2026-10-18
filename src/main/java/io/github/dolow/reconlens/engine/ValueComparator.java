@@ -102,6 +102,34 @@ public final class ValueComparator {
         };
     }
 
+    /**
+     * 业务键的规范形态：只回答"这两个值是同一个键吗"，不参与大小比较。
+     * <p><b>必须与 {@link #compareKeys} 同一口径</b>：{@code canonicalKey(x).equals(canonicalKey(y))}
+     * ⟺ {@code compareKeys(type, x, y) == 0}。这条不变式由 {@code ValueComparatorTest} 对着样本矩阵断言。
+     * <p>为什么非要对齐：摘要的用途是判断"两次跑的差异集合一样不一样"。如果匹配时 {@code 10.00} 与 {@code 10}
+     * 算同一笔业务、算摘要时又算两个键，同一份数据两次跑就会得到不同摘要 —— T2 变成假失败，
+     * 而排障时几乎不会怀疑到"归一化"头上。
+     * <p>反过来也一样危险：STRING 下不能顺手 {@code trim()} / 转小写，因为归并用的是逐字符比较，
+     * 那样做等于把两个<b>不同</b>的业务键并成一个，摘要会比实际差异"少"。
+     */
+    public static String canonicalKey(FieldType type, Object value) {
+        if (value == null) {
+            return "\u0000null";
+        }
+        return switch (type) {
+            case STRING -> "s:" + Row.render(value);
+            case BOOLEAN -> "b:" + Boolean.parseBoolean(String.valueOf(value));
+            case LONG, DECIMAL -> {
+                BigDecimal decimal = toDecimal(value);
+                // 数字统一成"去掉尾随零的十进制串"：10.00 与 10 是同一个键；
+                // 不是数字就退回文本形态，与 compareKeys 的降级分支一致
+                yield decimal == null
+                        ? "s:" + Row.render(value)
+                        : "n:" + decimal.stripTrailingZeros().toPlainString();
+            }
+        };
+    }
+
     public static BigDecimal toDecimal(Object value) {
         if (value == null) {
             return null;

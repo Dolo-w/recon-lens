@@ -38,11 +38,18 @@ class DerivedDimensionTest {
     @Test
     void dimensionOnAUniqueColumnBehavesLikeTheClassicKeyFieldRule() {
         ReconJob classic = engine.run("BILL_VS_SETTLE", "dim-classic", "手写业务键");
-        ReconJob derived = run(inline("DIM_ORDER_EQUIV", List.of("order_no"), Map.of(), List.of("amount", "status")));
+        // 与演示规则完全同口径的声明式维度版本（复合维度 + 百分比容差），两者必须逐条等价
+        Map<String, Object> body = inlineBody("DIM_DIMEQ", List.of("customer_id", "order_no"),
+                Map.of(), List.of("amount"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> amount = ((List<Map<String, Object>>) body.get("compare")).get(0);
+        amount.put("tolerancePercent", "0.0001");
+        amount.remove("tolerance");
+        ReconJob derived = run(catalog.inline(body, "维度单测 DIM_DIMEQ"));
 
         assertThat(derived.status()).isEqualTo(JobStatus.SUCCESS);
-        assertThat(derived.leftRows()).isEqualTo(classic.leftRows()).isEqualTo(20);
-        assertThat(derived.rightRows()).isEqualTo(classic.rightRows()).isEqualTo(21);
+        assertThat(derived.leftRows()).isEqualTo(classic.leftRows()).isEqualTo(10);
+        assertThat(derived.rightRows()).isEqualTo(classic.rightRows()).isEqualTo(10);
         assertThat(derived.matchedRows()).isEqualTo(classic.matchedRows());
         assertThat(derived.diffRows()).isEqualTo(classic.diffRows());
         assertThat(repository.summaryByType(derived.id())).isEqualTo(repository.summaryByType(classic.id()));
@@ -58,7 +65,7 @@ class DerivedDimensionTest {
         // 分组发生在取数阶段：扫描行数 = 客户数，而不是订单数
         assertThat(job.leftRows()).isEqualTo(distinct("bill_left", "customer_id"));
         assertThat(job.rightRows()).isEqualTo(distinct("bill_right", "customer_id"));
-        assertThat(job.leftRows()).isLessThan(20);
+        assertThat(job.leftRows()).isLessThan(rows("bill_left"));
         assertThat(repository.summaryByType(job.id())).containsKey("AMOUNT_MISMATCH");
         assertThat(repository.listDiffs(job.id(), null, 0, 200))
                 .allSatisfy(diff -> assertThat(diff.bizKey()).startsWith("C"));

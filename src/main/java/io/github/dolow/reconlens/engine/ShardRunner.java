@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.engine;
 
+import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.domain.ShardStatus;
 import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleException;
@@ -10,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -30,13 +32,23 @@ public class ShardRunner {
 
     private final ReconCursors cursors;
     private final ReconRepository repository;
+    private final ReconProperties properties;
 
-    public ShardRunner(ReconCursors cursors, ReconRepository repository) {
+    public ShardRunner(ReconCursors cursors, ReconRepository repository, ReconProperties properties) {
         this.cursors = cursors;
         this.repository = repository;
+        this.properties = properties;
     }
 
     public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan) {
+        return run(rule, jobId, plan, null);
+    }
+
+    /**
+     * @param capture 非空时把每条差异留一份到内存（试算用）。生产路径传 {@code null}，
+     *                此时行为与引入试算之前完全一致 —— 差异只落库、只算摘要，不额外持有。
+     */
+    public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan, DiffCapture capture) {
         int maxAttempts = Math.max(1, rule.maxAttempts());
         String lastError = null;
 
@@ -48,10 +60,17 @@ public class ShardRunner {
                      RowCursor right = cursors.open(rule.right(), plan.whereRight())) {
                     validateFields(rule, left.columns(), true);
                     validateFields(rule, right.columns(), false);
-                    BatchDiffSink sink = new BatchDiffSink(repository, DIFF_BATCH_SIZE);
-                    MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, sink);
+                    // 摘要与落库共用一条出口：算的就是"这次到底写出了什么"，不是另跑一遍
+                    DigestingDiffSink sink = new DigestingDiffSink(
+                            new BatchDiffSink(repository, DIFF_BATCH_SIZE),
+                            DiffSetDigest.accumulator(rule.left().keyType(),
+                                    properties.getEngine().getDiffDigestMaxKeys()));
+                    DiffSink outlet = capture == null ? sink : new CapturingDiffSink(sink, capture);
+                    MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, outlet);
                     repository.markShardSuccess(jobId, plan.shardId(), stats);
-                    return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, stats, null);
+                    DiffSetDigest digest = summarize(plan.shardId(), sink);
+                    return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, stats, digest, null,
+                            capture == null ? java.util.List.of() : capture.snapshot());
                 }
             } catch (Exception e) {
                 lastError = Errors.describe(e);
@@ -61,7 +80,25 @@ public class ShardRunner {
         }
 
         repository.markShardFailed(jobId, plan.shardId(), lastError);
-        return new ShardResult(plan.shardId(), ShardStatus.FAILED, maxAttempts, MatchStats.empty(), lastError);
+        return ShardResult.failed(plan.shardId(), maxAttempts, lastError);
+    }
+
+    /**
+     * 每分片一行摘要日志：这是 M0 里"观察真实差异分布"的数据来源。
+     * 超上限时打 WARN 并返回 {@code null} —— 没有摘要和"摘要只覆盖了一部分"必须能分清。
+     */
+    private DiffSetDigest summarize(int shardId, DigestingDiffSink sink) {
+        Optional<DiffSetDigest> digest = sink.digest();
+        if (digest.isEmpty()) {
+            log.warn("分片 {} 差异 {} 条超过摘要上限 {}（recon.engine.diff-digest-max-keys），本次不产出摘要。"
+                            + "这不是截断：截断出来的摘要看着正常，却会让同一份数据两次跑出不同的哈希",
+                    shardId, sink.count(), properties.getEngine().getDiffDigestMaxKeys());
+            return null;
+        }
+        DiffSetDigest value = digest.get();
+        log.info("分片 {} 差异摘要 sha256={} 共 {} 条 byType={} byField={}",
+                shardId, value.shortSha(), value.count(), value.byType(), value.byField());
+        return value;
     }
 
     private void validateFields(RuleSpec rule, Set<String> columns, boolean leftSide) {

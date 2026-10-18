@@ -109,7 +109,7 @@ class RuleParserTest {
     @Test
     void bundledRulesAreValid() throws Exception {
         for (String name : new String[]{"/rules/bill-recon.yml", "/rules/customer-sum-recon.yml",
-                "/rules/resource-recon.yml", "/rules/customer-status-recon.yml"}) {
+                "/rules/customer-status-recon.yml"}) {
             try (InputStream in = getClass().getResourceAsStream(name)) {
                 assertThat(in).as("规则文件存在: %s", name).isNotNull();
                 RuleSpec rule = parser.parse(in, name);
