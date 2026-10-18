@@ -291,6 +291,20 @@ class TrialVerdictResolverTest {
     }
 
     @Test
+    void digestOverflowIsInconclusiveNotPass() {
+        // T2 的摘要超过上限时两次都拿不到摘要，两张空表彼此相等。若照旧判 PASS，
+        // 等于用"什么都看不见"给幂等性背书 —— 规则差异实际是什么样，没人验过
+        TrialOutcome outcome = new TrialOutcome(true, null, sample(500, 500, 400, 4, 4, 4),
+                new TrialOutcome.Canary(true, true, "ok"), true, null, true, null, false, false, true);
+
+        TrialState.Trialed state = trialed(outcome);
+        assertThat(state.verdict()).isEqualTo(TrialVerdict.INCONCLUSIVE);
+        assertThat(state.coverage()).isEqualTo(Coverage.SAMPLE_PARTIAL);
+        assertThat(state.reasons()).contains(CoverageReason.DIGEST_OVERFLOW);
+        assertThat(state.approval()).isEqualTo(ApprovalMode.BLOCK_SIGNABLE);
+    }
+
+    @Test
     void contradictoryOutcomeIsRejectedAtConstruction() {
         // 已物化却带阻断原因：组装代码把"降级"和"成功"混着写了
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> new TrialOutcome(true,

@@ -218,13 +218,21 @@ public class ShadowTrialService {
             materializer.heartbeat(tables);
 
             boolean jobSucceeded = first.job().status() == JobStatus.SUCCESS;
-            boolean idempotent = jobSucceeded && first.digestsByShard().equals(second.digestsByShard());
+            // 摘要溢出时两次都拿到空摘要，直接 equals 会把"无法判断"判成"一致"（T2 假通过）。
+            // 所以溢出必须单独拎出来：idempotent 判成"没评估"（null），由 resolver 落 INCONCLUSIVE。
+            boolean digestOverflowed = first.digestsOverflowed() || second.digestsOverflowed();
+            Boolean idempotent = !jobSucceeded ? Boolean.FALSE
+                    : digestOverflowed ? null
+                    : first.digestsByShard().equals(second.digestsByShard());
 
             Map<String, String> checks = new LinkedHashMap<>();
             checks.put("T1", jobSucceeded ? "PASS" : "FAIL: " + first.job().status()
                     + (first.job().errorMsg() == null ? "" : " (" + first.job().errorMsg() + ")"));
-            checks.put("T2", idempotent ? "PASS" : "FAIL: 两次运行摘要不一致 first="
-                    + first.digestsByShard() + " second=" + second.digestsByShard());
+            checks.put("T2", digestOverflowed
+                    ? "INCONCLUSIVE: 差异条数超过摘要上限（recon.engine.diff-digest-max-keys），"
+                    + "两次都没产出摘要，无法判断是否幂等；调大上限或缩小试算窗口后重跑"
+                    : (Boolean.TRUE.equals(idempotent) ? "PASS" : "FAIL: 两次运行摘要不一致 first="
+                    + first.digestsByShard() + " second=" + second.digestsByShard()));
 
             List<DiffRecord> newDiffs = first.capturedDiffs();
             TrialOutcome.SampleStats stats = sampleStats(row, candidate, trialRule, tables, first);
@@ -278,7 +286,8 @@ public class ShadowTrialService {
                     : "N/A: " + canary.detail());
 
             TrialOutcome outcome = new TrialOutcome(true, null, stats, canary,
-                    jobSucceeded, idempotent, coverageLossExplained, zeroDiffExplained, growth, upstreamTruncated);
+                    jobSucceeded, idempotent, coverageLossExplained, zeroDiffExplained, growth, upstreamTruncated,
+                    digestOverflowed);
             TrialState state = resolver.resolve(outcome);
             notes.add("注入位置与改前/改后见 canary.detail：注入的是样本表，不是生产表");
             if (upstreamTruncated) {

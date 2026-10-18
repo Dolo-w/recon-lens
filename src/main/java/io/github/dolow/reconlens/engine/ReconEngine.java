@@ -110,6 +110,16 @@ public class ReconEngine {
             }
             return digests;
         }
+
+        /**
+         * 是否有分片因为差异条数超过摘要上限而拿不到摘要。
+         *
+         * <p>这类分片在 {@link #digestsByShard()} 里是<b>缺席</b>的，两张缺席的表彼此相等 ——
+         * 不单独暴露这个信号，T2 就会把"两次都算不出"读成"两次一致"。
+         */
+        public boolean digestsOverflowed() {
+            return results.stream().anyMatch(ShardResult::digestOverflowed);
+        }
     }
 
     /** 异步：HTTP 接口立刻返回 jobId，避免大对账把请求线程占住。 */

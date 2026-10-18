@@ -27,6 +27,9 @@ public enum CoverageReason {
     /** 规则 / 上游 SQL 自带截断（{@code LIMIT}）。 */
     UPSTREAM_LIMIT(30),
 
+    /** T2 的差异摘要超过键数上限：两次都拿不到摘要，幂等性<b>无法判断</b>（不是"通过"）。 */
+    DIGEST_OVERFLOW(28),
+
     /** 物化成功但 T5-c 分片覆盖未过：取窗偏了，可重取改善。 */
     SHARD_COVERAGE(25),
 

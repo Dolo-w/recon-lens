@@ -22,6 +22,8 @@ import io.github.dolow.reconlens.domain.CoverageReason;
  *                              它<b>与 {@code materialized} 正交</b>：物化成功了，但物化到的只是原查询
  *                              被截断后的一角。所以它不是 {@code blockage}（那会降成 {@code FIELDS_ONLY}），
  *                              而是一个独立的覆盖降级理由
+ * @param digestOverflowed      T2 的差异摘要超过键数上限、两次都算不出来。此时"两次一致"是个假象，
+ *                              幂等性只能判 {@code INCONCLUSIVE}，绝不能落进 PASS
  */
 public record TrialOutcome(boolean materialized,
                            CoverageReason blockage,
@@ -32,7 +34,18 @@ public record TrialOutcome(boolean materialized,
                            Boolean coverageLossExplained,
                            Boolean zeroDiffExplained,
                            boolean diffGrowthExceeded,
-                           boolean upstreamTruncated) {
+                           boolean upstreamTruncated,
+                           boolean digestOverflowed) {
+
+    /**
+     * 兼容构造：不关心摘要溢出的调用点（未物化、闸门不可信等）继续用 10 个参数。
+     */
+    public TrialOutcome(boolean materialized, CoverageReason blockage, SampleStats sample, Canary canary,
+                        Boolean jobSucceeded, Boolean idempotent, Boolean coverageLossExplained,
+                        Boolean zeroDiffExplained, boolean diffGrowthExceeded, boolean upstreamTruncated) {
+        this(materialized, blockage, sample, canary, jobSucceeded, idempotent, coverageLossExplained,
+                zeroDiffExplained, diffGrowthExceeded, upstreamTruncated, false);
+    }
 
     public TrialOutcome {
         if (materialized && blockage != null) {

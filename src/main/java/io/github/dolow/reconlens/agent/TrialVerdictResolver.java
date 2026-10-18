@@ -69,6 +69,12 @@ public class TrialVerdictResolver {
             reasons.add(CoverageReason.UPSTREAM_LIMIT);
         }
 
+        // T2 的摘要溢出：两次都是空摘要，"一致"只是两个空集合相等。这一项没验成，
+        // 不能算 PASS——但也不该判 FAIL（规则本身没证据说明它坏了），落 INCONCLUSIVE。
+        if (outcome.materialized() && outcome.digestOverflowed()) {
+            reasons.add(CoverageReason.DIGEST_OVERFLOW);
+        }
+
         boolean sampleTooSmall = false;
         boolean commonKeysTooFew = false;
         boolean shardCoverageShort = false;
@@ -131,6 +137,9 @@ public class TrialVerdictResolver {
             // 自检跑不了 ≠ 闸门坏了（干净键不够，说明这条规则差异率异常高）。
             // 但它也绝不是 PASS：一次没能自证的自检，不能当"通过"用。
             return TrialVerdict.INCONCLUSIVE;
+        }
+        if (outcome.digestOverflowed()) {
+            return TrialVerdict.INCONCLUSIVE;           // T2 摘要溢出，幂等性没验成
         }
         if (sampleInsufficient) {
             return TrialVerdict.INCONCLUSIVE;           // T5 试算真空，等于没试

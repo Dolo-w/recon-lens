@@ -69,7 +69,10 @@ public class ShardRunner {
                     MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, outlet);
                     repository.markShardSuccess(jobId, plan.shardId(), stats);
                     DiffSetDigest digest = summarize(plan.shardId(), sink);
-                    return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, stats, digest, null,
+                    // digest == null 是"算不出摘要"（超上限），不是"没有差异"：必须带到上层，
+                    // 否则两次都溢出的试算会拿两张空表做相等比较，把"无法判断"判成 PASS。
+                    return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, stats, digest,
+                            digest == null, null,
                             capture == null ? java.util.List.of() : capture.snapshot());
                 }
             } catch (Exception e) {
