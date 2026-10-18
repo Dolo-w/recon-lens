@@ -6,7 +6,7 @@ MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模
 调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因、调 `recon_define_rule` 换一套对账维度、
 调 `recon_build_model` 把大表先物化好，全程不用人拼 URL。
 
-recon-lens 暴露 8 个工具，**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
+recon-lens 暴露 9 个工具（启用 Agent 后 14 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
 `ModelBuilder`），所以两条路的结果必然一致，不存在两套逻辑。
 
 ## 启动
@@ -48,7 +48,7 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 | 工具 | 入参 | 返回 |
 | --- | --- | --- |
 | `recon_list_rules` | 无 | 列出规则库里的对账规则（版本、两侧数据源、对账维度、比对字段、分片与重试配置） |
-| `recon_define_rule` | `ruleBody`（必填）、`operator` | 提交一份规则体（JSON 或 YAML）落库为新版本，立即生效、不用重启也不用改代码；返回新版本号与解析后的两侧维度 |
+| `recon_define_rule` | `ruleBody`（必填）、`operator` | 提交一份规则体（JSON 或 YAML）落库为草稿并自动跑影子试算，审批（recon_submit_approval）通过才生效；返回版本号、试算可批性与两侧维度 |
 | `recon_run` | `ruleCode`、`ruleJson`、`batchId`、`remark`（**都非必填**） | 同步跑完一次对账，返回任务号、扫描量、差异分类、分片明细 |
 | `recon_build_model` | `ruleCode`（必填）、`shards`、`operator` | 预处理物化：按规则声明的粒度把两侧数据提前汇总成模型表，并注册一条读模型表的 `<CODE>__MODEL` 规则 |
 | `recon_job_summary` | `jobId`（必填） | 任务状态 / 分片完成度 / 差异分类与级别 / 分片明细 / 错误原因 / 耗时 |
@@ -56,13 +56,73 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 | `recon_explain_diff` | `diffId`（必填） | 单条差异的归因说明 |
 | `recon_explain_job` | `jobId`（必填）、`limit` | 批量补归因并回显前几条 |
 
+启用 Agent（`recon.agent.enabled=true`）后额外暴露 5 个：
+
+| 工具 | 入参 | 返回 |
+| --- | --- | --- |
+| `recon_draft_rule` | `businessDescription`（必填）、`ruleCode`、`operator` | 创建 Agent 会话，后台起草 + 闸门 1 + 影子试算，立即返回会话号。**businessDescription 按结构化逐项写明（键/字段与类型/diffType/容差/表名）一次通过，口语化描述极易被闸门拦截** |
+| `recon_trial_status` | `runId` 或 `ruleCode`+`version` | 试算进度与结论（逐项检查、覆盖等级、可批性）。生效须经 `recon_submit_approval` 审批 |
+| `recon_register_table` | `table`（必填）、`action`（`preview`/`confirm`）、`operator` | 把一张业务表注册进闸门 1 白名单（见下节「动态表注册」） |
+| `recon_import_file` | `file`（必填）、`action`（`preview`/`confirm`）、`table`（confirm 必填）、`operator` | 把导入目录里的 CSV/Excel 导入成表并注册白名单（见下节「文件导入」） |
+| `recon_submit_approval` | `ruleCode`、`version`、`decision`（APPROVED/REJECTED）、`confirmedBy`（必填）、`confirmationCode`（**必填**）、`note` | 审批代办：Agent 只转发、不审批。`confirmationCode` 是用户从 REST（`POST /api/rule-reviews/{code}/{ver}/confirmation`）领到的**一次性确认码**（5 分钟过期、只能用一次、绑定 code/version/decision）—— 没有码直接拒绝，模型编不出码也就批不了 |
+
 工具返回的是**给人看的中文文本**，不是 JSON —— Agent 拿到就能直接转述给运营，不用再解释字段含义。
 参数缺失、规则不存在、任务号不存在这类错误都会被包成 `isError=true` 的结果文本，而不是让服务端崩掉。
+
+## 动态表注册（M6）
+
+每个接入方的数据结构不同：闸门 1 白名单原来是纯配置（`recon.agent.schema.tables`），新用户要改配置重启。
+现在白名单 = **配置 ∪ 动态注册**（`recon_registered_table` 表，带登记人/时间审计），注册走对话两段式：
+
+1. `recon_register_table {table: "t_order"}`（默认 `action=preview`）：**只读**表结构 + 行数，不改任何状态；
+2. 人确认列清单没问题后：`recon_register_table {table: "t_order", action: "confirm", operator: "alice"}`：
+   落库 + 立即生效 —— 起草规则（`recon_draft_rule`）与闸门 1 立刻能看见这张表，不用重启。
+
+三条边界：① 注册**放宽的是安全边界本身**，confirm 必须由人确认，LLM 只有 preview 的权力；
+② confirm 前内部重新探测表存在性；③ Web 实例与 MCP 进程是两个 JVM，白名单落库 + 30 秒 TTL
+让两边对齐（本进程注册立即生效，另一进程最多等 30 秒或调 `refresh`）。
+
+配套修复：表达式维度（`dimension: "CONCAT(...)"`）原来不做列校验，编造列名会漏到试算阶段
+才以数据库原生 `Unknown column` 报错。现在闸门 1 用 `SELECT <expr> FROM <table> WHERE 1=0`
+探针让数据库判定，违规建议里直接给出**可用列清单**，LLM 自纠正一轮就能修好；
+子查询与写操作关键字在探针前就被拒绝。
+
+## 文件导入（M7）
+
+接入方手里只有原始数据文件（CSV/Excel）时，`recon_import_file` 补上最后一段管道：
+**解析 → 建表 → 灌数 → 复用动态表注册落审计进白名单**，之后起草/对账与原生表完全一致。
+
+同样是两段式：
+
+1. `recon_import_file {file: "orders.csv"}`（默认 `action=preview`）：**只读**解析 ——
+   规范化列名（对照原始表头）、推断的列类型、数据行数；
+2. 人确认后：`recon_import_file {file: "orders.csv", action: "confirm", table: "recon_orders", operator: "alice"}`：
+   建表灌数 + 注册，立即生效。
+
+关键行为：
+
+- **文件边界**：默认只接受导入目录（`recon.agent.file-import.dir`，默认 `./data/import`）内的相对路径，
+  规范化后仍在目录内才放行 —— `../` 穿越与绝对路径都拒绝；
+  本地自用可设 `recon.agent.file-import.allow-absolute-paths=true` 放行本地绝对路径
+  （MCP 连接器场景保持默认关闭：导入工具本质是"读文件→入库"通道，放开等于把整台机器的文件递给智能体）；
+  后缀限 `.csv` / `.xlsx` / `.xls`（对绝对路径同样生效）；
+- **类型推断**：采样前 500 行 —— 全整数 → `BIGINT`，有小数 → `DECIMAL(24,6)`，
+  形似日期 → `DATETIME`，超 255 字符 → `TEXT`，其余 `VARCHAR`（宽度取实测最大值），
+  全空列给 `VARCHAR(255)`（宁可宽，不让灌数因推断激进而失败）；
+- **列名规范化**：只保留 ASCII 字母数字（其余转 `_`）、空表头补 `col_N`、重名加序号 ——
+  H2 与 MySQL 都合法；原文保留在 `originalHeaders` 里供人对照；
+- **绝不覆盖**：目标表已存在直接拒绝 —— 同名表要么是笔误要么是上次导入的产物；
+- **失败干净**：灌数/注册失败时把新建表删回去，不留"建了表没数据"的中间态；
+- **护栏**：行列上限（`max-rows` 默认 10 万 / `max-columns` 默认 200）；
+  标识符进 DDL 从严校验，数据值全部走 PreparedStatement 参数。
+
+CSV 解析按 RFC 4180（引号转义、引号内换行、UTF-8 BOM），分隔符按首行探测（逗号/分号/制表符）；
+Excel 只读第一个 Sheet，数字去尾零。
 
 ## 换对账维度 / 临时试算
 
 对账维度（`dimension` / `measures` 等，完整字段见 [rule-dsl.md](rule-dsl.md)）本来就是规则体的一部分，
-所以"换一套维度"= 提交一份新规则：调 `recon_define_rule` 提交规则体就落库为新版本，**立即对后续任务生效，不用改代码、不用重启**。
+所以"换一套维度"= 提交一份新规则：调 `recon_define_rule` 提交规则体会落库为**草稿**并自动跑影子试算，**审批通过后才对后续任务生效**（不用改代码、不用重启）。
 
 `recon_define_rule` 只接两个参数：`ruleBody`（必填，规则体原文，JSON 或 YAML 都行 —— 工具按首个字符是不是 `{` 判断走哪种解析）和 `operator`（可选，只记进版本历史，缺省记作 `mcp`）。下面这份规则体把"按订单号逐笔比金额"换成"按 客户+状态 汇总比金额"：
 
@@ -210,5 +270,6 @@ if (mcpProfileActive(args)) {
 - **不做 HTTP/SSE 传输**：多客户端共享一个服务实例的场景应该用 REST 接口
 - **只用 tools**：resources / prompts / sampling 都没接，因为对账这个场景就是"调工具拿结果"
 - **规则以数据库为准**：`classpath` 下的 yml 只在规则库里还没有该 `code` 时作为 v1 导入一次，
-  改规则走 `recon_define_rule`（或 REST 的 `POST /api/rules`），落新版本即生效、不需要重启；
+  改规则走 `recon_define_rule`，落草稿 → 影子试算 → `recon_submit_approval` 审批通过才生效；
+  （REST 的 `POST /api/rules` 是运维 legacy 通路，默认关闭，见 `recon.rules.legacy-define-enabled`）
   历史任务重跑用各自钉住的 `rule_snapshot`，不会被后来的规则改动改掉语义

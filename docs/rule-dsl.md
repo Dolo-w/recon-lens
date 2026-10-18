@@ -6,6 +6,8 @@
 规则运行时的权威来源是数据库规则库（`recon_rule`）：目录里的 YAML 在启动时与库里的同名规则对齐（库里没有的
 `code` 作 v1 导入，内容不一致就按文件覆盖成新版本），`POST /api/rules` 提交的新版本立即生效、不需要重启
 （见下文「规则库与版本」）。
+> ⚠️ `POST /api/rules` **默认关闭**（`recon.rules.legacy-define-enabled=false`）：它会绕过
+> 草稿 → 试算 → 审批三道闸门。显式打开后仍需 `X-Api-Key`（值为 `recon.review.api-key`）。
 
 ---
 
@@ -64,15 +66,15 @@ left:
 | 写法 | 示例 | 生成的键表达式 |
 | --- | --- | --- |
 | 字符串表达式 | `dimension: "CONCAT(customer_id, '#', status)"` | 原样使用 |
-| 列名列表 | `dimension: [account_id, resource_id]` | `CONCAT(account_id, '\|', resource_id)` |
+| 列名列表 | `dimension: [customer_id, order_no]` | `CONCAT(customer_id, '\|', order_no)` |
 | 单列列表 | `dimension: [order_no]` | `order_no`（不套 `CONCAT`） |
 
 ```yaml
 left:
-  label: 资源清单
-  table: resource_left
+  label: 账单
+  table: bill_left
   keyType: STRING
-  dimension: [account_id, resource_id]        # 与 keyField 互斥；也不要再写 orderBy
+  dimension: [customer_id, order_no]          # 与 keyField 互斥；也不要再写 orderBy
 ```
 
 - 列表维度用 `dimensionSeparator` 指定分隔符（缺省 `|`），分隔符里的 `'` 会被转义成 `''`。
@@ -216,8 +218,8 @@ shard:
 > 正确写法（按业务键取模）：
 >
 > ```yaml
->   whereLeft:  "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
->   whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS INT), {shards}) = {index}"
+>   whereLeft:  "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
+>   whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
 > ```
 >
 > 解析器会在 `where` 完全不引用业务键时打 WARN 提醒（只告警，因为按业务键做哈希/区间切分都是合法写法）。
@@ -347,13 +349,12 @@ curl -X POST http://localhost:8080/api/rules \
 - 已被 `DELETE /api/rules/{code}` 下线过的 `code` 不会被种子复活。
 - `recon.seed-rules: false` 可完全关闭对齐（启动不碰规则库），此后改规则只走 `POST /api/rules`。
 
-仓库自带 4 个示例规则：
+仓库自带 3 个示例规则：
 
 | code | 文件 | 用途 |
 | --- | --- | --- |
-| `BILL_VS_SETTLE` | `bill-recon.yml` | 按 `order_no` 逐笔比对金额（容差 0.01）与状态；4 分片按订单号末两位取模，`maxAttempts: 2` |
+| `BILL_VS_SETTLE` | `bill-recon.yml` | 按 `customer_id + order_no` 复合维度逐笔比对金额，相对容差 `tolerancePercent: 0.0001`（0.01%）；2 分片按订单号末两位取模，`maxAttempts: 2` |
 | `CUSTOMER_SUM_RECON` | `customer-sum-recon.yml` | 自定义 `sql` 按 `customer_id` 汇总后比对金额，相对容差 `tolerancePercent: 0.005` |
-| `RESOURCE_VS_BILL` | `resource-recon.yml` | 声明式复合维度 `dimension: [account_id, resource_id]`，生成 `CONCAT(account_id, '\|', resource_id) AS __biz_key` |
 | `CUSTOMER_STATUS_RECON` | `customer-status-recon.yml` | `dimension: [customer_id, status]` + `measures`（`amount` / `order_count`）的聚合维度示例 |
 
 ## 启动期校验清单
