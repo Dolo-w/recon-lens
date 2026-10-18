@@ -13,8 +13,11 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Map;
+import javax.sql.DataSource;
 
 /**
  * 启动即演示：拉起一份 H2 内存数据，跑一遍 BILL_VS_SETTLE，把差异分类和归因打到日志。
@@ -29,13 +32,16 @@ public class DemoRunner implements ApplicationRunner {
     private final ReconEngine engine;
     private final ReconRepository repository;
     private final ExplainService explainService;
+    private final DataSource dataSource;
 
     public DemoRunner(ReconProperties properties, ReconEngine engine,
-                      ReconRepository repository, ExplainService explainService) {
+                      ReconRepository repository, ExplainService explainService,
+                      DataSource dataSource) {
         this.properties = properties;
         this.engine = engine;
         this.repository = repository;
         this.explainService = explainService;
+        this.dataSource = dataSource;
     }
 
     @Override
@@ -44,7 +50,35 @@ public class DemoRunner implements ApplicationRunner {
             log.info("启动演示已关闭（recon.engine.run-demo-on-startup=false）");
             return;
         }
+        if (!isEmbedded() && !properties.getEngine().isDemoAllowExternalDb()) {
+            // 演示会往库里写 bill_left/bill_right 的演示行和一个 demo-* 任务。默认 profile 是 H2 内存库，
+            // 写完就没了；可要是有人只把数据源换成真实 MySQL，演示就会混进业务数据 —— 那种情况必须显式放行。
+            log.info("启动演示已跳过：当前数据源不是内嵌 H2（真要在这套数据源上跑，"
+                    + "显式设 recon.engine.demo-allow-external-db=true，并确认它是演示库）");
+            return;
+        }
+        try {
+            runDemo();
+        } catch (RuntimeException e) {
+            // 演示是"附带效果"，不该让人起不了服务：换库、种子规则被改、数据表被清过都会让它失败。
+            // 打一条说明就继续启动，否则一个演示脚本能把整个应用挡在门外。
+            log.warn("启动演示失败（不影响服务启动，可用 recon.engine.run-demo-on-startup=false 关掉）：{}",
+                    e.toString());
+        }
+    }
 
+    /** 凭 JDBC URL 判断是不是内嵌 H2（默认 profile 用来做"clone 下来就能跑"的演示库）。 */
+    private boolean isEmbedded() {
+        try (Connection connection = dataSource.getConnection()) {
+            String url = connection.getMetaData().getURL();
+            return url != null && url.startsWith("jdbc:h2:mem:");
+        } catch (SQLException e) {
+            log.warn("判断数据源类型失败，按「外部数据源」处理（演示将跳过）：{}", e.toString());
+            return false;
+        }
+    }
+
+    private void runDemo() {
         ReconJob job = engine.run("BILL_VS_SETTLE", "demo-" + LocalDate.now(), "启动自动演示");
         Map<String, Long> byType = repository.summaryByType(job.id());
         int explained = explainService.explainJob(job.id(), 50);

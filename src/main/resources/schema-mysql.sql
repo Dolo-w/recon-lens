@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS recon_job (
   started_at    TIMESTAMP    NULL,
   finished_at   TIMESTAMP    NULL,
   -- T5-c 的分母来自"最近一次同 code 的 PROD 任务"，按 code + kind 倒序取一条
-  KEY idx_job_code_kind (rule_code, kind, id)
+  KEY idx_job_code_kind (rule_code, kind, id),
+  -- listJobs 是 WHERE kind='PROD' ORDER BY id DESC：上面那条索引以 rule_code 打头，服务不了这个查询
+  KEY idx_job_kind_id (kind, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS recon_shard (
@@ -63,7 +65,9 @@ CREATE TABLE IF NOT EXISTS recon_diff (
   created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   -- 幂等基石：同一 job 同一分片同一业务键同一字段只允许一条差异，重跑先删后写天然去重
   UNIQUE KEY uk_diff_shard_key (job_id, shard_id, diff_type, biz_key, field_name),
-  KEY idx_diff_job_type (job_id, diff_type)
+  KEY idx_diff_job_type (job_id, diff_type),
+  -- 试算的 diffsInWindow(jobId, lo, hi) 按 job_id + biz_key 范围扫；没有这条索引就是整段差异全表扫
+  KEY idx_diff_job_key (job_id, biz_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============ 规则库：使用方可以不改代码、不重启就新增/修改对账维度 ============
@@ -244,7 +248,7 @@ CREATE TABLE IF NOT EXISTS recon_model (
 CREATE TABLE IF NOT EXISTS recon_registered_table (
   id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
   table_name       VARCHAR(128)  NOT NULL,
-  columns_snapshot VARCHAR(2048) NOT NULL,
+  columns_snapshot TEXT          NOT NULL,
   registered_by    VARCHAR(64)   NOT NULL,
   registered_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_registered_table (table_name)

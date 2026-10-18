@@ -56,6 +56,12 @@ public class AgentProperties {
     /** 后台试算的排队上限。满了直接拒绝:拒绝是调用方立刻能处理的事实,排队是等 2 分钟后拿一个超时。 */
     private int trialQueueCapacity = 8;
 
+    /**
+     * 启动清理的判定窗口（分钟）：只把「开始超过这么久仍在 RUNNING」的会话当遗留。
+     * Web 与 MCP 共库时，另一个进程正在跑的试算不能被误标失败。
+     */
+    private int staleRunMinutes = 10;
+
     private final Schema schema = new Schema();
     private final Safety safety = new Safety();
     private final Perception perception = new Perception();
@@ -146,6 +152,17 @@ public class AgentProperties {
             throw new IllegalArgumentException("recon.agent.trial-queue-capacity 必须 ≥ 1，当前: " + trialQueueCapacity);
         }
         this.trialQueueCapacity = trialQueueCapacity;
+    }
+
+    public int getStaleRunMinutes() {
+        return staleRunMinutes;
+    }
+
+    public void setStaleRunMinutes(int staleRunMinutes) {
+        if (staleRunMinutes < 1) {
+            throw new IllegalArgumentException("recon.agent.stale-run-minutes 必须 ≥ 1，当前: " + staleRunMinutes);
+        }
+        this.staleRunMinutes = staleRunMinutes;
     }
 
     public Schema getSchema() {
@@ -320,6 +337,15 @@ public class AgentProperties {
          */
         private long maxBytes = 512L * 1024 * 1024;
 
+        /**
+         * 类型推断采样的行数，默认 2000。
+         *
+         * <p>只看前 500 行时，一张前 500 行都像整数、后面混进 {@code 100.5} 的列会被定成
+         * {@code BIGINT}，灌数阶段才整批失败。抬高采样面能提前发现这类列；
+         * 采样越多越慢（每行都要试三种解析），2000 行是毫秒级与准确度的折中。
+         */
+        private int inferenceSampleRows = 2000;
+
         public String getDir() {
             return dir;
         }
@@ -371,6 +397,18 @@ public class AgentProperties {
                 throw new IllegalArgumentException("recon.agent.file-import.max-bytes 必须 ≥ 1，当前: " + maxBytes);
             }
             this.maxBytes = maxBytes;
+        }
+
+        public int getInferenceSampleRows() {
+            return inferenceSampleRows;
+        }
+
+        public void setInferenceSampleRows(int inferenceSampleRows) {
+            if (inferenceSampleRows < 1) {
+                throw new IllegalArgumentException(
+                        "recon.agent.file-import.inference-sample-rows 必须 ≥ 1，当前: " + inferenceSampleRows);
+            }
+            this.inferenceSampleRows = inferenceSampleRows;
         }
     }
 }

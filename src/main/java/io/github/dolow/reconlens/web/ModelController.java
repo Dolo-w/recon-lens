@@ -3,6 +3,8 @@ package io.github.dolow.reconlens.web;
 import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.model.ModelBuilder;
 import io.github.dolow.reconlens.model.ModelException;
+import io.github.dolow.reconlens.rule.RuleTrialScheduler;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -31,35 +33,56 @@ public class ModelController {
     private final ModelBuilder builder;
     private final JdbcTemplate jdbc;
     private final ApiSecurity security;
+    private final ObjectProvider<RuleTrialScheduler> trialScheduler;
 
-    public ModelController(ModelBuilder builder, JdbcTemplate jdbc, ApiSecurity security) {
+    public ModelController(ModelBuilder builder, JdbcTemplate jdbc, ApiSecurity security,
+                           ObjectProvider<RuleTrialScheduler> trialScheduler) {
         this.builder = builder;
         this.jdbc = jdbc;
         this.security = security;
+        this.trialScheduler = trialScheduler;
     }
 
     /**
      * 建模型表并落一条 {@code <规则>__MODEL} 规则。
      *
-     * <p>这条接口会写一条<b>直接生效</b>的规则（{@code ModelBuilder} 走 {@code catalog.defineMap}），
-     * 所以在数据面写接口里也要过密钥：否则"能读规则"就等于"能造一条 ACTIVE 规则"。
+     * <p>默认这条规则落<b>草稿</b>（{@code recon.model.require-approval=true}）：建表本身要密钥，
+     * 生效则和别的规则一样走试算 + 人工审批。只有显式关掉这个开关（没有 Agent 模块的部署）
+     * 才会直接落 ACTIVE —— 那是运维明确接受"机器生成的规则免审"。
      */
     @PostMapping("/{ruleCode}")
     public Map<String, Object> build(@PathVariable String ruleCode,
                                      @RequestParam(required = false) Integer shards,
                                      @RequestParam(required = false) String operator,
                                      @RequestHeader(value = "X-Api-Key", required = false) String apiKey) {
-        security.requireWrite(apiKey, "构建预处理模型表（会生成一条直接生效的 __MODEL 规则）");
+        security.requireWrite(apiKey, "构建预处理模型表（会生成一条 __MODEL 规则）");
         ModelBuilder.ModelBuild build = builder.build(ruleCode, shards, operator);
-        return Map.of(
-                "ruleCode", build.ruleCode(),
-                "ruleVersion", build.ruleVersion(),
-                "modelRuleCode", build.modelRuleCode(),
-                "modelRuleVersion", build.modelRuleVersion(),
-                "shards", build.shards(),
-                "tables", build.tables().stream().map(ModelController::table).toList(),
-                "hint", "现在可以用规则 " + build.modelRuleCode() + " 发起对账，结果与原规则一致；"
-                        + "源数据变化后需要重建模型表才会更新。");
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("ruleCode", build.ruleCode());
+        body.put("ruleVersion", build.ruleVersion());
+        body.put("modelRuleCode", build.modelRuleCode());
+        body.put("modelRuleVersion", build.modelRuleVersion());
+        body.put("modelRuleLifecycle", build.modelRuleLifecycle());
+        body.put("shards", build.shards());
+        body.put("tables", build.tables().stream().map(ModelController::table).toList());
+        if ("DRAFT".equals(build.modelRuleLifecycle())) {
+            RuleTrialScheduler scheduler = trialScheduler.getIfAvailable();
+            if (scheduler != null) {
+                long runId = scheduler.submit(build.modelRuleCode(), build.modelRuleVersion(),
+                        operator == null || operator.isBlank() ? "model-build" : operator);
+                body.put("trialRunId", runId);
+                body.put("hint", "模型规则已落草稿 " + build.modelRuleCode() + " v" + build.modelRuleVersion()
+                        + "，影子试算已排队（runId=" + runId + "）。试算出结论后由用户领取确认码审批，"
+                        + "审批通过前用它对账会返回 400（草稿不生效）。");
+            } else {
+                body.put("hint", "模型规则已落草稿 " + build.modelRuleCode() + " v" + build.modelRuleVersion()
+                        + "，但当前部署没有启用 Agent 模块，无法自动试算；请人工审批后再用它对账。");
+            }
+        } else {
+            body.put("hint", "现在可以用规则 " + build.modelRuleCode() + " 发起对账，结果与原规则一致；"
+                    + "源数据变化后需要重建模型表才会更新。");
+        }
+        return body;
     }
 
     /** 已建好的模型表，按构建时间倒序（最多 100 条，包含历史构建记录）。 */

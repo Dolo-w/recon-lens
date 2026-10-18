@@ -22,6 +22,7 @@ public class ReconProperties {
     private final Explain explain = new Explain();
     private final Rules rules = new Rules();
     private final Security security = new Security();
+    private final Model model = new Model();
 
     public String getRulesLocation() {
         return rulesLocation;
@@ -67,6 +68,10 @@ public class ReconProperties {
         return security;
     }
 
+    public Model getModel() {
+        return model;
+    }
+
     /**
      * 数据面写接口（{@code POST /api/jobs}、{@code POST /api/models/**}、{@code DELETE /api/rules/**}）的密钥。
      *
@@ -91,6 +96,28 @@ public class ReconProperties {
 
         public boolean enforced() {
             return apiKey != null && !apiKey.isBlank();
+        }
+    }
+
+    /**
+     * 预处理模型表（{@code POST /api/models}）生成的那条 {@code <规则>__MODEL} 规则怎么落库。
+     *
+     * <p>默认落<b>草稿</b>：这条规则是机器按已审批规则机械生成的，但"机械生成"不等于"验过" ——
+     * 聚合维度写错、分片桶算错，规则都会安静地跑出全绿。落草稿后它和别的规则一样要过试算与人工审批。
+     *
+     * <p>{@code recon.model.require-approval=false} 保留旧行为（直接 ACTIVE），只应在
+     * 没启用 Agent 模块（没有试算能力）的部署里用 —— 那等于明确接受"机器生成的规则免审生效"。
+     */
+    public static class Model {
+
+        private boolean requireApproval = true;
+
+        public boolean isRequireApproval() {
+            return requireApproval;
+        }
+
+        public void setRequireApproval(boolean requireApproval) {
+            this.requireApproval = requireApproval;
         }
     }
 
@@ -330,6 +357,15 @@ public class ReconProperties {
         /** 启动时是否自动跑一次演示对账 */
         private boolean runDemoOnStartup = false;
         /**
+         * 演示是否允许往"外部数据源"写。
+         *
+         * <p>默认 profile 用 H2 内存库，演示跑完就没了；但如果有人把默认 profile 的数据源换成
+         * 真实 MySQL（只改了 {@code spring.datasource.url}），演示就会往业务库里插演示任务、
+         * 往 {@code bill_left}/{@code bill_right} 写演示行。默认只在内嵌 H2 上自动跑，
+         * 要在外部库上跑必须显式打开这个开关。
+         */
+        private boolean demoAllowExternalDb = false;
+        /**
          * 单分片差异摘要的键数上限（{@code DiffSetDigest}）。摘要要把全部业务键排一次序，
          * 是 O(n) 内存；超过上限就明确放弃产出摘要，而不是只哈希前 N 条。
          * 设成 0 没有任何"关闭"含义，直接当成配置错误 —— 否则摘要会静默变成空。
@@ -366,6 +402,14 @@ public class ReconProperties {
 
         public void setRunDemoOnStartup(boolean runDemoOnStartup) {
             this.runDemoOnStartup = runDemoOnStartup;
+        }
+
+        public boolean isDemoAllowExternalDb() {
+            return demoAllowExternalDb;
+        }
+
+        public void setDemoAllowExternalDb(boolean demoAllowExternalDb) {
+            this.demoAllowExternalDb = demoAllowExternalDb;
         }
 
         public int getDiffDigestMaxKeys() {

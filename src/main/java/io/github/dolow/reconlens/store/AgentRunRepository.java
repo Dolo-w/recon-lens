@@ -7,6 +7,7 @@ import org.springframework.jdbc.support.KeyHolder;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -142,6 +143,30 @@ public class AgentRunRepository {
         jdbc.update("UPDATE recon_agent_run SET status = ?, rule_code = ?, job_id = ?, draft_version = ?,"
                         + " error_msg = ?, finished_at = CURRENT_TIMESTAMP WHERE id = ?",
                 status.name(), ruleCode, jobId, draftVersion, truncate(errorMsg, 1000), runId);
+    }
+
+    /**
+     * 把库里残留的"排队中/进行中"会话标成 FAILED（进程刚启动时调用）。
+     *
+     * <p>异步任务没有心跳：重启后这些行既不会前进也不会有人收尾，留在 RUNNING 上
+     * 会让运维以为"还在跑"。改成 FAILED 并把原因写清楚，至少状态是诚实的。
+     *
+     * @return 被标记的行数
+     */
+    /**
+     * 把"很久以前开始、至今仍 RUNNING"的会话标成失败。
+     *
+     * <p>必须带上时间下限：Web 与 MCP 两个进程共用一个库时，MCP 进程此刻正在跑的试算，
+     * 会被另一个进程启动时的清理误判成"上一次进程的遗留"。实测过：定义规则触发的试算明明成功、
+     * 结论已经写进 {@code recon_rule.trial_*}，run 行却被另一个进程标成了 FAILED。
+     *
+     * @param olderThan 只清理在 {@code now - olderThan} 之前创建的行
+     */
+    public int failUnfinished(String reason, Duration olderThan) {
+        Timestamp cutoff = Timestamp.from(Instant.now().minus(olderThan));
+        return jdbc.update("UPDATE recon_agent_run SET status = ?, error_msg = ?, finished_at = CURRENT_TIMESTAMP"
+                        + " WHERE status = ? AND created_at < ?",
+                RunStatus.FAILED.name(), truncate(reason, 1000), RunStatus.RUNNING.name(), cutoff);
     }
 
     public Optional<AgentRun> findRun(long id) {

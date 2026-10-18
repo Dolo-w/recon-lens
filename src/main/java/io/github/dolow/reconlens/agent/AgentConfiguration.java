@@ -202,7 +202,8 @@ public class AgentConfiguration {
                                                io.github.dolow.reconlens.rule.RuleTrialRunner ruleTrialRunner,
                                                AgentProperties agentProperties) {
         return new TrialTaskRegistry(agentRunRepository, agentOrchestrator, ruleTrialRunner,
-                agentProperties.getTrialThreads(), agentProperties.getTrialQueueCapacity());
+                agentProperties.getTrialThreads(), agentProperties.getTrialQueueCapacity(),
+                agentProperties.getStaleRunMinutes());
     }
 
     /**
@@ -214,6 +215,16 @@ public class AgentConfiguration {
     @Bean
     public io.github.dolow.reconlens.rule.RuleTrialScheduler ruleTrialScheduler(TrialTaskRegistry registry) {
         return registry::submitTrial;
+    }
+
+    /**
+     * 文件导入的后台任务登记处（{@code recon_import_file(async=true)}）。
+     *
+     * <p>与试算队列分开是有意的：导入会长时间占一条连接做批量写，和试算挤同一条队列会互相饿死。
+     */
+    @Bean(destroyMethod = "shutdown")
+    public ImportTaskRegistry importTaskRegistry(FileImporter fileImporter) {
+        return new ImportTaskRegistry(fileImporter);
     }
 
     // ---------------- M5：巡检 ----------------

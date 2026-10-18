@@ -1,9 +1,9 @@
--- 演示数据：账单（我方）与结算（对方）各 10 条，故意埋了 4 条差异，方便 clone 下直接看到引擎的分流能力
+-- 演示数据（MERGE ... KEY(id)：同一个 H2 内存库被多个 Spring 上下文重复初始化时不会撞主键）：账单（我方）与结算（对方）各 10 条，故意埋了 4 条差异，方便 clone 下直接看到引擎的分流能力
 -- 金额超差（相对偏差 0.02% > 0.01% 容差）ORD20260003、结算缺失 ORD20260009、
 -- 账单缺失 ORD20260011、两侧重复 ORD20260006；
 -- 另有 1 条容差内不报：ORD20260004 相对偏差 0.005% < 0.01%，演示"容差内不算差异"
 
-INSERT INTO bill_left (id, order_no, customer_id, amount, status, updated_at) VALUES
+MERGE INTO bill_left (id, order_no, customer_id, amount, status, updated_at) KEY (id) VALUES
  (1,  'ORD20260001', 'C001', 1200.50, 'PAID',   '2026-10-01 10:00:00'),
  (2,  'ORD20260002', 'C001',  800.00, 'PAID',   '2026-10-01 10:01:00'),
  (3,  'ORD20260003', 'C002', 1500.00, 'PAID',   '2026-10-01 10:02:00'),
@@ -15,7 +15,7 @@ INSERT INTO bill_left (id, order_no, customer_id, amount, status, updated_at) VA
  (9,  'ORD20260006', 'C005',  950.25, 'PAID',   '2026-10-01 10:08:00'),
  (10, 'ORD20260009', 'C008',  780.00, 'PAID',   '2026-10-01 10:09:00');
 
-INSERT INTO bill_right (id, order_no, customer_id, amount, status, updated_at) VALUES
+MERGE INTO bill_right (id, order_no, customer_id, amount, status, updated_at) KEY (id) VALUES
  (1,  'ORD20260001', 'C001', 1200.50, 'PAID',   '2026-10-01 10:00:05'),
  (2,  'ORD20260002', 'C001',  800.00, 'PAID',   '2026-10-01 10:01:05'),
  (3,  'ORD20260003', 'C002', 1500.30, 'PAID',   '2026-10-01 10:02:05'),

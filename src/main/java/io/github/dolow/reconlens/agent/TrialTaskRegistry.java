@@ -4,7 +4,10 @@ import io.github.dolow.reconlens.rule.RuleTrialRunner;
 import io.github.dolow.reconlens.store.AgentRunRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -34,14 +37,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       内存表只回答"现在跑到哪一步了"，查不到就落库查 —— 而不是假装没有这个任务。</li>
  * </ol>
  *
- * <p><b>进程重启会丢什么</b>：丢"排队中/进行中"的会话状态（库里那行会停在 RUNNING）。
- * 这是有意的取舍：没有心跳的异步任务，重启后分不清"还在跑"和"已经死了"，
- * 与其猜，不如让运维从 {@code recon_agent_run} 里看到 RUNNING 就知道它需要重新发起
- * （试算本身有租约回收，样本表不会漏）。
+ * <p><b>进程重启会丢什么</b>：丢"排队中/进行中"的会话状态。启动时
+ * {@link #run(ApplicationArguments)} 会把库里残留的 QUEUED/RUNNING 会话标成 FAILED 并写明原因 ——
+ * 否则运维看到一行永远 RUNNING 的记录，分不清"还在跑"和"进程半路死了"。
+ * 试算本身有租约回收，样本表不会漏。
  */
-public class TrialTaskRegistry {
+public class TrialTaskRegistry implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(TrialTaskRegistry.class);
+
+    /** 默认的遗留会话判定窗口（分钟）。 */
+    static final int DEFAULT_STALE_RUN_MINUTES = 10;
 
     public enum Status {
         QUEUED, RUNNING, SUCCESS, BLOCKED, FAILED;
@@ -73,12 +79,21 @@ public class TrialTaskRegistry {
     private final AgentOrchestrator orchestrator;
     private final RuleTrialRunner trialRunner;
     private final ExecutorService pool;
+    /** 只清理"开始超过这么久还没结束"的会话：另一个进程正在跑的不算遗留。 */
+    private final int staleRunMinutes;
     private final ConcurrentHashMap<Long, Task> tasks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> draftIndex = new ConcurrentHashMap<>();
 
     public TrialTaskRegistry(AgentRunRepository runs, AgentOrchestrator orchestrator,
                              RuleTrialRunner trialRunner, int threads, int queueCapacity) {
+        this(runs, orchestrator, trialRunner, threads, queueCapacity, DEFAULT_STALE_RUN_MINUTES);
+    }
+
+    public TrialTaskRegistry(AgentRunRepository runs, AgentOrchestrator orchestrator,
+                             RuleTrialRunner trialRunner, int threads, int queueCapacity,
+                             int staleRunMinutes) {
         this.runs = runs;
+        this.staleRunMinutes = staleRunMinutes;
         this.orchestrator = orchestrator;
         this.trialRunner = trialRunner;
         AtomicInteger counter = new AtomicInteger();
@@ -92,6 +107,30 @@ public class TrialTaskRegistry {
                     return thread;
                 },
                 new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    /**
+     * 启动时把库里残留的排队/运行中会话标成失败。
+     *
+     * <p>内存任务表是空的：这些会话这次进程不会再执行，但它们也不会自己消失。
+     * 留着 RUNNING 会让人误判成"还在跑"，所以宁可标记成 FAILED 并写清原因。
+     *
+     * <p>只清理"开始超过 {@code recon.agent.stale-run-minutes}（默认 10）分钟"的行：
+     * Web 与 MCP 是两个进程共用一个库，看见刚创建的 RUNNING 行时，它很可能正在另一个进程里跑。
+     */
+    @Override
+    public void run(ApplicationArguments args) {
+        try {
+            int marked = runs.failUnfinished(
+                    "进程重启时该会话仍在排队/运行中，已标记为失败；需要的话重新提交（recon_draft_rule 或 recon_define_rule）",
+                    Duration.ofMinutes(staleRunMinutes));
+            if (marked > 0) {
+                log.warn("启动清理：{} 条排队/运行中的 Agent 会话被标记为失败（上一次进程没有收尾）", marked);
+            }
+        } catch (RuntimeException e) {
+            // 清理失败不该阻止应用启动：它只是让状态更诚实，不是主流程
+            log.warn("启动清理残留会话失败（不影响启动）：{}", e.toString());
+        }
     }
 
     /**
@@ -125,7 +164,14 @@ public class TrialTaskRegistry {
      *
      * @return 会话号，可直接用于 {@code recon_trial_status(runId=...)}
      */
-    public long submitTrial(String code, int version, String operator) {
+    public synchronized long submitTrial(String code, int version, String operator) {
+        Long running = inFlightTrial(code, version);
+        if (running != null) {
+            // 同一版草稿重复提交：两次试算会互相覆盖 recon_rule.trial_*，还会白占一条队列。
+            // 直接把手上的号码还回去，调用方拿它轮询即可。
+            log.info("规则 {} v{} 已有在跑的试算 #{}，复用而不重复排队", code, version, running);
+            return running;
+        }
         String who = operator == null || operator.isBlank() ? "api" : operator;
         String goal = "对已定义的草稿跑一次影子试算：" + code + " v" + version;
         long runId = runs.startRun(goal, AgentGoal.GoalTrigger.API.name(), who);
@@ -142,6 +188,17 @@ public class TrialTaskRegistry {
         return runId;
     }
 
+    private Long inFlightTrial(String code, int version) {
+        for (Task task : tasks.values()) {
+            if (task.status().inFlight()
+                    && task.code() != null && task.code().equals(code)
+                    && task.version() != null && task.version() == version) {
+                return task.runId();
+            }
+        }
+        return null;
+    }
+
     private void executeTrial(long runId, Task queued, String who) {
         tasks.computeIfPresent(runId, (id, task) -> task.withStatus(Status.RUNNING));
         try {
@@ -155,14 +212,24 @@ public class TrialTaskRegistry {
                     message, queued.submittedAt(), Instant.now());
             tasks.put(runId, done);
             draftIndex.put(key(done.code(), done.version()), runId);
+            // 成功/硬拦也要落终态，否则库里的会话一直停在 RUNNING（启动清理会把它当遗留任务）
+            runs.finishRun(runId,
+                    hardBlock ? AgentRunRepository.RunStatus.BLOCKED : AgentRunRepository.RunStatus.SUCCESS,
+                    done.code(), null, done.version(),
+                    message.length() > 2000 ? message.substring(0, 2000) : message);
         } catch (RuntimeException e) {
             log.error("后台试算 #{} 异常终止：{}", runId, e.toString());
+            String message = "试算异常：" + e;
             tasks.put(runId, new Task(runId, queued.goal(), Status.FAILED, queued.code(), queued.version(),
-                    "试算异常：" + e, queued.submittedAt(), Instant.now()));
+                    message, queued.submittedAt(), Instant.now()));
+            // 库里的会话必须落终态：漏了这一步，试算会永远停在 RUNNING，查不到结论也看不出失败原因
+            runs.finishRun(runId, AgentRunRepository.RunStatus.FAILED, queued.code(), null,
+                    queued.version(), message.length() > 2000 ? message.substring(0, 2000) : message);
         }
     }
 
-    private void execute(long runId, AgentGoal goal, String who) {        tasks.computeIfPresent(runId, (id, task) -> task.withStatus(Status.RUNNING));
+    private void execute(long runId, AgentGoal goal, String who) {
+        tasks.computeIfPresent(runId, (id, task) -> task.withStatus(Status.RUNNING));
         try {
             AgentOrchestrator.AgentRunResult result = orchestrator.execute(runId, goal, who);
             Status status = switch (result.status()) {

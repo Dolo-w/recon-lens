@@ -8,7 +8,7 @@ import io.github.dolow.reconlens.domain.ApprovalMode;
 import io.github.dolow.reconlens.domain.CoverageReason;
 import io.github.dolow.reconlens.domain.TrialState;
 import io.github.dolow.reconlens.config.ReconProperties;
-import io.github.dolow.reconlens.rule.RuleLifecycleService;
+import io.github.dolow.reconlens.rule.ApprovalRelay;
 import io.github.dolow.reconlens.store.AgentRunRepository;
 import io.github.dolow.reconlens.store.RuleRepository;
 import io.modelcontextprotocol.json.McpJsonMapper;
@@ -52,19 +52,22 @@ public class AgentMcpTools {
     private final RuleRepository rules;
     private final io.github.dolow.reconlens.agent.TableRegistrar registrar;
     private final io.github.dolow.reconlens.agent.FileImporter importer;
-    private final RuleLifecycleService lifecycle;
+    private final io.github.dolow.reconlens.agent.ImportTaskRegistry importTasks;
+    private final ApprovalRelay lifecycle;
     private final ReconProperties properties;
     private final ObjectMapper json = new ObjectMapper();
 
     public AgentMcpTools(TrialTaskRegistry registry, AgentRunRepository runs, RuleRepository rules,
                          io.github.dolow.reconlens.agent.TableRegistrar registrar,
                          io.github.dolow.reconlens.agent.FileImporter importer,
-                         RuleLifecycleService lifecycle, ReconProperties properties) {
+                         io.github.dolow.reconlens.agent.ImportTaskRegistry importTasks,
+                         ApprovalRelay lifecycle, ReconProperties properties) {
         this.registry = registry;
         this.runs = runs;
         this.rules = rules;
         this.registrar = registrar;
         this.importer = importer;
+        this.importTasks = importTasks;
         this.lifecycle = lifecycle;
         this.properties = properties;
     }
@@ -170,7 +173,9 @@ public class AgentMcpTools {
                   "file":{"type":"string","description":"导入目录内的相对路径，如 orders.csv 或 2026/账单.xlsx"},
                   "action":{"type":"string","enum":["preview","confirm"],"description":"preview=只读解析（缺省）；confirm=人工确认后建表灌数"},
                   "table":{"type":"string","description":"confirm 必填：目标表名（[schema.]标识符）；已存在的表会被拒绝"},
-                  "operator":{"type":"string","description":"可选：确认人标识，记入注册审计"}},
+                  "operator":{"type":"string","description":"可选：确认人标识，记入注册审计"},
+                  "sheet":{"type":"string","description":"可选：Excel 的 Sheet 名或从 0 开始的序号（缺省第一张）；CSV 忽略"},
+                  "async":{"type":"boolean","description":"confirm 时是否后台执行（大文件建议 true）；preview 忽略"}},
                  "required":["file"],"additionalProperties":false}
                 """,
                 """
@@ -178,7 +183,9 @@ public class AgentMcpTools {
                   "file":{"type":"string"},
                   "table":{"type":"string"},
                   "action":{"type":"string"},
-                  "imported":{"type":"boolean","description":"confirm 时是否导入成功"},
+                  "imported":{"type":"boolean","description":"confirm 时是否导入成功（async 时为 null）"},
+                  "taskId":{"type":"integer","description":"async=true 时返回的后台任务号"},
+                  "status":{"type":"string","description":"async=true 时的任务状态：QUEUED"},
                   "columns":{"type":"array","items":{"type":"string"},"description":"规范化后的列名（进 DDL 的）"},
                   "originalHeaders":{"type":"array","items":{"type":"string"},"description":"文件里的原始表头"},
                   "columnTypes":{"type":"array","items":{"type":"string"},"description":"推断的列类型"},
@@ -189,7 +196,31 @@ public class AgentMcpTools {
                 args -> importFile(McpToolFactory.text(args, "file", true),
                         McpToolFactory.text(args, "action", false),
                         McpToolFactory.text(args, "table", false),
-                        McpToolFactory.text(args, "operator", false))));
+                        McpToolFactory.text(args, "operator", false),
+                        McpToolFactory.text(args, "sheet", false),
+                        flag(args, "async"))));
+
+        specs.add(McpToolFactory.tool(jsonMapper, "recon_import_status",
+                "查询 recon_import_file(action=confirm, async=true) 的后台导入进度。"
+                        + "状态：QUEUED / RUNNING / SUCCESS（rows 为导入行数）/ FAILED（error 为原因）。"
+                        + "任务表在内存里，进程重启后旧任务号查不到 —— 那时直接查库确认表是否建成。",
+                """
+                {"type":"object","properties":{
+                  "taskId":{"type":"integer","description":"recon_import_file 返回的任务号"}},
+                 "required":["taskId"],"additionalProperties":false}
+                """,
+                """
+                {"type":"object","properties":{
+                  "taskId":{"type":"integer"},
+                  "status":{"type":"string","enum":["QUEUED","RUNNING","SUCCESS","FAILED","UNKNOWN"]},
+                  "file":{"type":"string"},
+                  "table":{"type":"string"},
+                  "rows":{"type":"integer"},
+                  "error":{"type":"string"},
+                  "message":{"type":"string"}},
+                 "required":["taskId","status","message"],"additionalProperties":true}
+                """,
+                args -> importStatus(McpToolFactory.integer(args, "taskId", 0L, true))));
 
         specs.add(McpToolFactory.tool(jsonMapper, "recon_submit_approval",
                 "把一条已通过试算的规则草稿推过审批闸门 —— **只转发用户的决定，不自己审批**。\n"
@@ -262,10 +293,26 @@ public class AgentMcpTools {
     }
 
     /** 导入工具：preview 只读文件；confirm 建表灌数 + 注册白名单，只在人工确认后发起。 */
-    McpToolFactory.ToolResult importFile(String file, String action, String table, String operator) {
+    McpToolFactory.ToolResult importFile(String file, String action, String table, String operator,
+                                         String sheet, boolean async) {
         boolean confirm = "confirm".equalsIgnoreCase(action == null ? "" : action.trim());
-        io.github.dolow.reconlens.agent.FileImporter.ImportPreview p =
-                confirm ? importer.confirm(file, table, operator) : importer.preview(file);
+        if (confirm && async) {
+            long taskId = importTasks.submit(file, table, operator, sheet);
+            Map<String, Object> structured = new LinkedHashMap<>();
+            McpToolFactory.put(structured, "file", file);
+            McpToolFactory.put(structured, "table", table);
+            McpToolFactory.put(structured, "action", "confirm");
+            McpToolFactory.put(structured, "taskId", taskId);
+            McpToolFactory.put(structured, "status", "QUEUED");
+            String message = "已排队导入（任务号 #" + taskId + "）：后台建表 + 灌数 + 注册白名单。"
+                    + "用 recon_import_status(taskId=" + taskId + ") 轮询；62 万行 × 20 列约 26 秒，"
+                    + "期间不要重复提交同一张表（表已存在会被拒绝）。";
+            McpToolFactory.put(structured, "message", message);
+            return McpToolFactory.ToolResult.of(message, structured);
+        }
+        io.github.dolow.reconlens.agent.FileImporter.ImportPreview p = confirm
+                ? importer.confirm(file, table, operator, sheet)
+                : importer.preview(file, sheet);
 
         Map<String, Object> structured = new LinkedHashMap<>();
         McpToolFactory.put(structured, "file", p.file());
@@ -307,6 +354,51 @@ public class AgentMcpTools {
         }
         McpToolFactory.put(structured, "message", sb.toString());
         return McpToolFactory.ToolResult.of(sb.toString(), structured);
+    }
+
+    /** 查后台导入进度（{@code recon_import_file(action=confirm, async=true)} 的任务号）。 */
+    McpToolFactory.ToolResult importStatus(long taskId) {
+        Optional<io.github.dolow.reconlens.agent.ImportTaskRegistry.Task> found = importTasks.find(taskId);
+        Map<String, Object> structured = new LinkedHashMap<>();
+        McpToolFactory.put(structured, "taskId", taskId);
+        if (found.isEmpty()) {
+            String message = "查不到导入任务 #" + taskId + "：任务表在内存里，进程重启后旧任务号会失效。"
+                    + "表建没建成请直接查数据库（recon_registered_table 或 SELECT COUNT(*) FROM 表名）。";
+            McpToolFactory.put(structured, "status", "UNKNOWN");
+            McpToolFactory.put(structured, "message", message);
+            return McpToolFactory.ToolResult.of(message, structured);
+        }
+        var task = found.get();
+        McpToolFactory.put(structured, "status", task.status().name());
+        McpToolFactory.put(structured, "file", task.file());
+        McpToolFactory.put(structured, "table", task.table());
+        McpToolFactory.put(structured, "rows", task.rows());
+        McpToolFactory.put(structured, "error", task.error());
+        // 这里刻意不写 switch(status)：枚举 switch 会生成 AgentMcpTools$N 匿名类，
+        // ArchUnit 的"非 agent 包不得依赖 agent 包"会把它当成新类（类名不再等于 AgentMcpTools）而报错。
+        String message = importStatusMessage(taskId, task);
+        McpToolFactory.put(structured, "message", message);
+        return McpToolFactory.ToolResult.of(message, structured);
+    }
+
+    private static String importStatusMessage(
+            long taskId, io.github.dolow.reconlens.agent.ImportTaskRegistry.Task task) {
+        return switch (task.status().name()) {
+            case "QUEUED" -> "导入任务 #" + taskId + " 排队中（同一时刻只跑一个导入），稍后再查。";
+            case "RUNNING" -> "导入任务 #" + taskId + " 进行中：" + task.file() + " → " + task.table()
+                    + "。62 万行约 26 秒，别重复提交。";
+            case "SUCCESS" -> "导入任务 #" + taskId + " 完成：" + task.file() + " → " + task.table()
+                    + "（" + task.rows() + " 行），已注册进闸门 1 白名单。";
+            case "FAILED" -> "导入任务 #" + taskId + " 失败：" + task.error()
+                    + "（表是否残留：失败时会尝试 DROP；若仍存在请手动清理后再试）";
+            default -> "导入任务 #" + taskId + " 状态 " + task.status().name() + "。";
+        };
+    }
+
+    /** MCP 客户端可能把布尔参数传成 true 或 "true"，两种都认。 */
+    private static boolean flag(Map<String, Object> args, String key) {
+        Object raw = args.get(key);
+        return raw instanceof Boolean b ? b : "true".equalsIgnoreCase(String.valueOf(raw));
     }
 
     McpToolFactory.ToolResult draftRule(String businessDescription, String ruleCode, String operator) {

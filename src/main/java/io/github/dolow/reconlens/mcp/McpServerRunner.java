@@ -35,8 +35,9 @@ import java.util.concurrent.CountDownLatch;
  *
  * <p><b>工具数是条件性的</b>：8 个基础工具永远在；{@code recon_diagnose} 不挂开关
  * （它读的是已有任务数据，与"有没有 Agent"无关），所以 Agent 关闭时是 <b>9</b> 个；
- * {@code recon.agent.enabled=true} 时再加 5 个（{@code recon_draft_rule} / {@code recon_trial_status} /
- * {@code recon_register_table} / {@code recon_import_file} / {@code recon_submit_approval}）→ <b>14</b>。
+ * {@code recon.agent.enabled=true} 时再加 6 个（{@code recon_draft_rule} / {@code recon_trial_status} /
+ * {@code recon_register_table} / {@code recon_import_file} / {@code recon_import_status} /
+ * {@code recon_submit_approval}）→ <b>15</b>。
  * 依赖用 {@code List<AgentMcpTools>} 注入：Agent 关闭时是空列表，而不是一个会 NPE 的 null。
  */
 @Component

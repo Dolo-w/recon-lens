@@ -42,6 +42,15 @@ public class SchemaCatalog {
     /** 动态注册表的刷新间隔。注册是低频动作，30 秒的跨进程可见性延迟完全可接受。 */
     private static final long DYNAMIC_TTL_NANOS = TimeUnit.SECONDS.toNanos(30);
 
+    /**
+     * 模型构建器（{@code POST /api/models}）生成的影子表名：{@code recon_model_<规则>_<哈希>_l/r}。
+     *
+     * <p>它不在 {@code recon.agent.schema.tables} 配置里，也不是导入注册的表，所以白名单要单独放行这一族。
+     * 放宽的边界很窄：前缀固定、字符集固定、长度有上限；闸门随后仍会按表名查列，表不存在照样报
+     * {@code UNKNOWN_TABLE}。
+     */
+    private static final Pattern MODEL_TABLE = Pattern.compile("recon_model_[a-z0-9_]{1,80}");
+
     private final DataSource dataSource;
     private final AgentProperties properties;
     private final io.github.dolow.reconlens.store.RegisteredTableRepository registry;
@@ -101,21 +110,30 @@ public class SchemaCatalog {
     }
 
     /**
-     * 表是否在白名单内。忽略 schema 前缀与大小写：配置写 {@code billing.bill_left}、
-     * 规则写 {@code bill_left}（或反过来）应当视为同一张表，否则运维会被一条看不见的配置坑到。
+     * 表是否在白名单内。忽略 schema 前缀（配置写 {@code billing.bill_left}、规则写 {@code bill_left}
+     * 视为同一张表），但<b>区分大小写</b>：MySQL 在 Linux 上 {@code lower_case_table_names=0}，
+     * {@code ORDERS} 与 {@code orders} 是两张不同的表。
+     *
+     * <p>忽略大小写会让"导入一张 ORDERS"顺带把真实业务表 {@code orders} 放进白名单 ——
+     * 那是模型自我扩权，比配错表名危险得多。要么配准，要么报错，不做模糊匹配。
      */
     public boolean allows(String table) {
         String bare = bareName(table);
         if (bare.isEmpty()) {
             return false;
         }
+        if (MODEL_TABLE.matcher(bare).matches()) {
+            // 模型构建器生成的影子表：名字由 recon_build_model 机械派生（规则代码 + 内容哈希 + 侧别），
+            // 不由人自由命名，也不接受外部输入。放行的同时闸门仍会查列，表不存在照样 UNKNOWN_TABLE。
+            return true;
+        }
         for (String allowed : configuredTables()) {
-            if (bareName(allowed).equalsIgnoreCase(bare)) {
+            if (bareName(allowed).equals(bare)) {
                 return true;
             }
         }
         for (String allowed : dynamicTablesSnapshot()) {
-            if (bareName(allowed).equalsIgnoreCase(bare)) {
+            if (bareName(allowed).equals(bare)) {
                 return true;
             }
         }
@@ -128,7 +146,7 @@ public class SchemaCatalog {
         for (String table : dynamicTablesSnapshot()) {
             boolean exists = false;
             for (String listed : all) {
-                if (bareName(listed).equalsIgnoreCase(bareName(table))) {
+                if (bareName(listed).equals(bareName(table))) {
                     exists = true;
                     break;
                 }
@@ -145,7 +163,7 @@ public class SchemaCatalog {
         if (!allows(table)) {
             return Optional.empty();
         }
-        String key = bareName(table).toLowerCase(Locale.ROOT);
+        String key = bareName(table);
         return cache.computeIfAbsent(key, k -> load(table));
     }
 

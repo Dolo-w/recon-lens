@@ -45,12 +45,14 @@ public class ShardRunner {
     }
 
     /**
-     * @param capture 非空时把每条差异留一份到内存（试算用）。生产路径传 {@code null}，
-     *                此时行为与引入试算之前完全一致 —— 差异只落库、只算摘要，不额外持有。
+     * @param capture 非空时把每条差异留一份到内存<b>并逐条计算摘要</b>（试算用）。
+     *                生产路径传 {@code null}：差异只落库，不算摘要 —— 摘要只为试算的幂等比较服务，
+     *                在正式对账里每条差异多花约 0.5 µs 却没有任何读者（摘要不落库）。
      */
     public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan, DiffCapture capture) {
         int maxAttempts = Math.max(1, rule.maxAttempts());
         String lastError = null;
+        boolean digestWanted = capture != null;
 
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             repository.markShardRunning(jobId, plan.shardId(), attempt);
@@ -60,19 +62,27 @@ public class ShardRunner {
                      RowCursor right = cursors.open(rule.right(), plan.whereRight())) {
                     validateFields(rule, left.columns(), true);
                     validateFields(rule, right.columns(), false);
-                    // 摘要与落库共用一条出口：算的就是"这次到底写出了什么"，不是另跑一遍
-                    DigestingDiffSink sink = new DigestingDiffSink(
-                            new BatchDiffSink(repository, DIFF_BATCH_SIZE),
-                            DiffSetDigest.accumulator(rule.left().keyType(),
-                                    properties.getEngine().getDiffDigestMaxKeys()));
-                    DiffSink outlet = capture == null ? sink : new CapturingDiffSink(sink, capture);
+                    // 摘要与落库共用一条出口：算的就是"这次到底写出了什么"，不是另跑一遍。
+                    // 只有试算才包摘要层：生产路径省掉每条差异的哈希与收集。
+                    DiffSink outlet;
+                    DigestingDiffSink sink = null;
+                    if (digestWanted) {
+                        sink = new DigestingDiffSink(
+                                new BatchDiffSink(repository, DIFF_BATCH_SIZE),
+                                DiffSetDigest.accumulator(rule.left().keyType(),
+                                        properties.getEngine().getDiffDigestMaxKeys()));
+                        outlet = new CapturingDiffSink(sink, capture);
+                    } else {
+                        outlet = new BatchDiffSink(repository, DIFF_BATCH_SIZE);
+                    }
                     MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, outlet);
                     repository.markShardSuccess(jobId, plan.shardId(), stats);
-                    DiffSetDigest digest = summarize(plan.shardId(), sink);
+                    DiffSetDigest digest = sink == null ? null : summarize(plan.shardId(), sink);
                     // digest == null 是"算不出摘要"（超上限），不是"没有差异"：必须带到上层，
                     // 否则两次都溢出的试算会拿两张空表做相等比较，把"无法判断"判成 PASS。
+                    // 生产路径（sink == null）不算摘要，"没有摘要"不等于"溢出"。
                     return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, stats, digest,
-                            digest == null, null,
+                            sink != null && digest == null, null,
                             capture == null ? java.util.List.of() : capture.snapshot());
                 }
             } catch (Exception e) {

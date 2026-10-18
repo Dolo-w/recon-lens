@@ -1,5 +1,7 @@
 package io.github.dolow.reconlens.model;
 
+import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.domain.RuleOrigin;
 import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.dsl.SideSpec;
@@ -38,18 +40,22 @@ public class ModelBuilder {
     private final JdbcTemplate jdbc;
     private final DataSource dataSource;
     private final RuleCatalog catalog;
+    private final ReconProperties properties;
 
-    public ModelBuilder(JdbcTemplate jdbc, DataSource dataSource, RuleCatalog catalog) {
+    public ModelBuilder(JdbcTemplate jdbc, DataSource dataSource, RuleCatalog catalog,
+                        ReconProperties properties) {
         this.jdbc = jdbc;
         this.dataSource = dataSource;
         this.catalog = catalog;
+        this.properties = properties;
     }
 
-    /** 一次构建的结果。 */
+    /** 一次构建的结果；{@code modelRuleLifecycle} 为 {@code DRAFT} 时模型规则还不能直接跑。 */
     public record ModelBuild(String ruleCode,
                              Integer ruleVersion,
                              String modelRuleCode,
                              Integer modelRuleVersion,
+                             String modelRuleLifecycle,
                              int shards,
                              List<Table> tables) {
 
@@ -103,9 +109,16 @@ public class ModelBuilder {
             tables.add(new ModelBuild.Table(target.side(), target.table(), count(target.table()), millis[i]));
         }
 
-        RuleCatalog.Resolved modelRule = catalog.defineMap(
-                ModelRuleWriter.write(spec, modelRuleCode, targets.get(0).table(), targets.get(1).table(), buckets),
-                "recon_build_model(" + spec.code() + ")", who);
+        Map<String, Object> modelRuleBody = ModelRuleWriter.write(
+                spec, modelRuleCode, targets.get(0).table(), targets.get(1).table(), buckets);
+        boolean requireApproval = properties.getModel().isRequireApproval();
+        RuleCatalog.Resolved modelRule = requireApproval
+                ? catalog.defineDraft(modelRuleBody, "recon_build_model(" + spec.code() + ")", who,
+                        RuleOrigin.HUMAN, null,
+                        "由 POST /api/models 机械生成：内容来源于已生效规则 " + spec.code()
+                                + " v" + resolved.version() + "，仍需试算与人工审批后才能生效")
+                : catalog.defineMap(modelRuleBody, "recon_build_model(" + spec.code() + ")", who);
+        String modelRuleLifecycle = requireApproval ? "DRAFT" : "ACTIVE";
         for (int i = 0; i < targets.size(); i++) {
             Target target = targets.get(i);
             ModelBuild.Table table = tables.get(i);
@@ -116,9 +129,11 @@ public class ModelBuilder {
                     target.source().dimension(), target.source().aggregated(), buckets, table.rows(),
                     table.buildMillis(), who);
         }
-        log.info("规则 {} 的模型表已就绪：{}（分片 {}，耗时 {} ms），模型规则 {} v{}",
-                spec.code(), tables, buckets, millis[0] + millis[1], modelRuleCode, modelRule.version());
-        return new ModelBuild(spec.code(), resolved.version(), modelRuleCode, modelRule.version(), buckets, tables);
+        log.info("规则 {} 的模型表已就绪：{}（分片 {}，耗时 {} ms），模型规则 {} v{}（{}）",
+                spec.code(), tables, buckets, millis[0] + millis[1], modelRuleCode, modelRule.version(),
+                modelRuleLifecycle);
+        return new ModelBuild(spec.code(), resolved.version(), modelRuleCode, modelRule.version(),
+                modelRuleLifecycle, buckets, tables);
     }
 
     /** 模型表的数据来源：按规则声明的粒度取数，聚合维度就地 GROUP BY，列只有 biz_key + 规则用得到的字段。 */

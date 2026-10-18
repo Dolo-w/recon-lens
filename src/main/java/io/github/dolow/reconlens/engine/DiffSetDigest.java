@@ -17,9 +17,14 @@ import java.util.TreeMap;
 /**
  * 差异集合摘要（设计文档 §5.3；原 {@code DiffFingerprint}，评审 R3 改名）。
  *
- * <p>对 {@code (diff_type, biz_key, field_name)} 归一化、排序后取 sha256，因此与落库顺序、
- * 分片数、并行度都无关 —— 这是 T2（同一份样本跑两次，摘要必须一致）能成立的前提。
- * 同时带分组计数，给人看"差异长什么样"。
+ * <p>对 {@code (diff_type, biz_key, field_name, left_value, right_value, delta_value)} 归一化、
+ * 排序后取 sha256，因此与落库顺序、分片数、并行度都无关 —— 这是 T2（同一份样本跑两次，摘要必须一致）
+ * 能成立的前提。同时带分组计数，给人看"差异长什么样"。
+ *
+ * <p>为什么包含取值：只比键集合时，"键一样、值全算错"在摘要上完全看不出来。T2 本身是同一份规则跑两次，
+ * 值不会变；但摘要的另一个用途是给人对比两份不同规则/不同取值的结论 —— 不含值就等于
+ * 把"结果不同"报成"结果相同"。代价是每条差异多两次字符串编码，实测约 +0.5 µs/条，
+ * 只发生在试算路径（生产路径不再计算摘要，见 {@code ShardRunner}）。
  *
  * <p><b>输入必须是内存态的 {@link DiffRecord}</b>（评审 B2）：{@code recon_diff} 落库时
  * {@code bizKey} 截到 128、{@code leftValue/rightValue} 截到 512。拿库里的记录算摘要，
@@ -137,11 +142,24 @@ public record DiffSetDigest(String sha256,
         }
 
         private String line(DiffRecord diff) {
-            // 三个字段都按"长度:内容"编码：业务键里出现分隔符也无歧义，
+            // 每个字段都按"长度:内容"编码：业务键里出现分隔符也无歧义，
             // 否则 ("ab","c") 与 ("a","bc") 会拼成同一个串
             return encode(String.valueOf(diff.diffType()))
                     + encode(ValueComparator.canonicalKey(keyType, diff.bizKey()))
-                    + (isRecordLevel(diff.field()) ? "-" : "+" + encode(diff.field()));
+                    + (isRecordLevel(diff.field()) ? "-" : "+" + encode(diff.field()))
+                    + encode(text(diff.leftValue()))
+                    + encode(text(diff.rightValue()))
+                    + encode(delta(diff.deltaValue()));
+        }
+
+        /** null 与空串必须能分清（前者是"这一侧没有值"，后者是"值是空字符串"）。 */
+        private static String text(String value) {
+            return value == null ? "\u0000null" : value;
+        }
+
+        /** {@code 1.0} 与 {@code 1.00} 是同一个数：不做归一化会让两次跑的摘要无端不同。 */
+        private static String delta(java.math.BigDecimal value) {
+            return value == null ? "\u0000null" : value.stripTrailingZeros().toPlainString();
         }
     }
 

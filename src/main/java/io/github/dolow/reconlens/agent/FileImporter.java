@@ -109,13 +109,22 @@ public class FileImporter {
 
     /** 只读预览：解析文件头与采样行，推断列类型与总行数。不改任何状态。 */
     public ImportPreview preview(String file) {
+        return preview(file, null);
+    }
+
+    /**
+     * 指定 Sheet 的预览（CSV 忽略该参数）。
+     *
+     * @param sheet Excel 的 Sheet 名或从 0 开始的序号；为空时取第一个
+     */
+    public ImportPreview preview(String file, String sheet) {
         List<String> headers;
         List<String> normalized;
         List<String> types;
         long rowCount;
         try {
             Path path = resolve(file);
-            try (ParsedFile parsed = open(path)) {
+            try (ParsedFile parsed = open(path, sheet)) {
                 headers = parsed.headers();
                 if (headers.isEmpty()) {
                     return new ImportPreview(file, null, List.of(), List.of(), List.of(), null,
@@ -126,7 +135,7 @@ public class FileImporter {
                             "列数 " + headers.size() + " 超过上限 " + properties.getFileImport().getMaxColumns()
                                     + "（recon.agent.file-import.max-columns）");
                 }
-                List<List<String>> sample = parsed.nextRows(SAMPLE_ROWS);
+                List<List<String>> sample = parsed.nextRows(properties.getFileImport().getInferenceSampleRows());
                 rowCount = sample.size() + parsed.countRemaining();
                 if (rowCount > properties.getFileImport().getMaxRows()) {
                     return new ImportPreview(file, null, List.of(), headers, List.of(), rowCount,
@@ -148,12 +157,17 @@ public class FileImporter {
      * 重试时不会撞"表已存在"，也不留"建了表但没灌完数"的中间态。
      */
     public ImportPreview confirm(String file, String table, String operator) {
+        return confirm(file, table, operator, null);
+    }
+
+    /** @param sheet Excel 的 Sheet 名或序号；为空时取第一个。CSV 忽略。 */
+    public ImportPreview confirm(String file, String table, String operator, String sheet) {
         String tableName = table == null ? "" : table.trim();
         if (!TABLE_NAME.matcher(tableName).matches()) {
             return new ImportPreview(file, tableName, List.of(), List.of(), List.of(), null,
                     "表名不合法：只允许 [schema.]标识符（字母/数字/下划线/$），不要引号或特殊字符");
         }
-        ImportPreview p = preview(file);
+        ImportPreview p = preview(file, sheet);
         if (p.error() != null) {
             return p;
         }
@@ -180,7 +194,7 @@ public class FileImporter {
         }
         long inserted;
         try {
-            inserted = loadRows(resolve(file), tableName, columns, types);
+            inserted = loadRows(resolve(file), tableName, columns, types, sheet);
         } catch (Exception e) {
             safeDrop(tableName);
             return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, p.rows(),
@@ -258,9 +272,9 @@ public class FileImporter {
         void close() throws IOException;
     }
 
-    private ParsedFile open(Path path) throws IOException {
+    private ParsedFile open(Path path, String sheet) throws IOException {
         return path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".csv")
-                ? openCsv(path) : openExcel(path);
+                ? openCsv(path) : openExcel(path, sheet);
     }
 
     private ParsedFile openCsv(Path path) throws IOException {
@@ -415,6 +429,12 @@ public class FileImporter {
                 eof = true;
                 return null;
             }
+            if (inQuotes) {
+                // RFC 4180：引号必须在记录结束前闭合。不报错的话，最后一条记录会被"整段吞掉"，
+                // 而前面几条看上去完全正常 —— 少一条数据比报错难查得多。
+                throw new IOException("最后一条记录的引号没有闭合（读到文件末尾仍处在引号内）："
+                        + "检查最后一行的双引号是否成对，或字段里的引号有没有写成两个 \"\"");
+            }
             record.add(field.toString());
             return record;
         }
@@ -452,7 +472,7 @@ public class FileImporter {
         }
     }
 
-    private ParsedFile openExcel(Path path) throws IOException {
+    private ParsedFile openExcel(Path path, String sheet) throws IOException {
         InputStream in = Files.newInputStream(path);
         Workbook workbook;
         try {
@@ -461,19 +481,19 @@ public class FileImporter {
             in.close();
             throw new IOException("Excel 解析失败（文件损坏或不是合法的工作簿）：" + rootMessage(e));
         }
-        return new ExcelFile(workbook);
+        return new ExcelFile(workbook, sheet);
     }
 
-    /** 只读第一个 Sheet；单元格一律转字符串（整数去掉无意义的 .0）。 */
+    /** 默认只读第一个 Sheet；显式指定 Sheet 名或序号时读那一张。单元格一律转字符串。 */
     private static final class ExcelFile implements ParsedFile {
         private final Workbook workbook;
         private final Sheet sheet;
         private final List<String> headers;
         private int nextRow;
 
-        ExcelFile(Workbook workbook) {
+        ExcelFile(Workbook workbook, String sheetRef) throws IOException {
             this.workbook = workbook;
-            this.sheet = workbook.getSheetAt(0);
+            this.sheet = selectSheet(workbook, sheetRef);
             Row headerRow = sheet.getRow(0);
             List<String> h = new ArrayList<>();
             if (headerRow != null) {
@@ -483,6 +503,39 @@ public class FileImporter {
             }
             this.headers = h;
             this.nextRow = 1;
+        }
+
+        /** 按名称或序号选 Sheet；没有指定就取第一张。 */
+        private static Sheet selectSheet(Workbook workbook, String sheetRef) throws IOException {
+            if (sheetRef == null || sheetRef.isBlank()) {
+                return workbook.getSheetAt(0);
+            }
+            String ref = sheetRef.trim();
+            try {
+                int index = Integer.parseInt(ref);
+                if (index < 0 || index >= workbook.getNumberOfSheets()) {
+                    throw new IOException("Sheet 序号 " + index + " 超出范围（这本工作簿共 "
+                            + workbook.getNumberOfSheets() + " 张：" + sheetNames(workbook) + "）");
+                }
+                return workbook.getSheetAt(index);
+            } catch (NumberFormatException notANumber) {
+                Sheet named = workbook.getSheet(ref);
+                if (named == null) {
+                    throw new IOException("找不到名称为 \"" + ref + "\" 的 Sheet（现有：" + sheetNames(workbook) + "）");
+                }
+                return named;
+            }
+        }
+
+        private static String sheetNames(Workbook workbook) {
+            StringBuilder names = new StringBuilder();
+            for (int i = 0; i < workbook.getNumberOfSheets(); i++) {
+                if (i > 0) {
+                    names.append(", ");
+                }
+                names.append(i).append('=').append(workbook.getSheetName(i));
+            }
+            return names.toString();
         }
 
         private static String cellText(Cell cell) {
@@ -588,7 +641,7 @@ public class FileImporter {
             int maxLen = 0;
             for (List<String> row : sample) {
                 String v = col < row.size() ? row.get(col) : "";
-                if (v == null || v.isBlank()) {
+                if (v == null || v.isBlank() || isNullLiteral(v)) {
                     continue;
                 }
                 anyValue = true;
@@ -661,11 +714,11 @@ public class FileImporter {
     // ------------------------------------------------------------------
     // 灌数：值全部走 PreparedStatement，标识符已从严校验
 
-    private long loadRows(Path path, String table, List<String> columns, List<String> types) throws IOException {
+    private long loadRows(Path path, String table, List<String> columns, List<String> types, String sheet) throws IOException {
         String placeholders = String.join(", ", Collections.nCopies(columns.size(), "?"));
         String sql = "INSERT INTO " + table + " (" + String.join(", ", columns) + ") VALUES (" + placeholders + ")";
         long inserted = 0;
-        try (ParsedFile parsed = open(path)) {
+        try (ParsedFile parsed = open(path, sheet)) {
             // CsvFile/ExcelFile 的构造已消费表头行，这里读到的都是数据
             while (true) {
                 List<List<String>> rows = parsed.nextRows(BATCH_SIZE);
@@ -685,7 +738,20 @@ public class FileImporter {
                     Object[] one = new Object[columns.size()];
                     for (int i = 0; i < columns.size() && i < types.size(); i++) {
                         String v = i < row.size() ? row.get(i) : "";
-                        one[i] = v == null || v.isBlank() ? null : convert(v, types.get(i));
+                        if (v == null || v.isBlank() || isNullLiteral(v)) {
+                            one[i] = null;
+                            continue;
+                        }
+                        try {
+                            one[i] = convert(v, types.get(i));
+                        } catch (RuntimeException e) {
+                            // 把"第几行第几列、原值、推断类型"一起报出来，否则只有一句 For input string: "abc"
+                            throw new IOException("第 " + (inserted + idx + 1) + " 行第 " + (i + 1) + " 列（"
+                                    + columns.get(i) + "）的值 \"" + abbreviate(v) + "\" 与推断类型 "
+                                    + types.get(i) + " 不符：" + e.getMessage()
+                                    + "（类型是前 " + properties.getFileImport().getInferenceSampleRows()
+                                    + " 行推断的，可以调大 recon.agent.file-import.inference-sample-rows）", e);
+                        }
                     }
                     params.add(one);
                 }
@@ -700,6 +766,19 @@ public class FileImporter {
      * 数字列显式转 Long/BigDecimal（H2 严格模式不接受字符串到数字的隐式转换），其余原样交驱动适配。
      * 格式坏值宁可抛错让整体回滚，也不静默塞 null —— 导入的数据要对账，坏值必须人看见。
      */
+    /**
+     * MySQL dump / 一些导出工具把"空"写成 {@code \N} 或 {@code NULL}。
+     * 按字符串导进来会变成真值 "NULL"，对账时两边一个 "NULL" 一个空就报差异 —— 这里统一当空处理。
+     */
+    private static boolean isNullLiteral(String value) {
+        return value != null && ("\\N".equals(value) || "NULL".equalsIgnoreCase(value.trim()));
+    }
+
+    /** 报错时截断原值，避免一行 1MB 的内容把日志和响应撑爆。 */
+    private static String abbreviate(String value) {
+        return value.length() <= 40 ? value : value.substring(0, 40) + "…（共 " + value.length() + " 字符）";
+    }
+
     private static Object convert(String value, String type) {
         if (type.startsWith("BIGINT")) {
             return Long.parseLong(value.trim());

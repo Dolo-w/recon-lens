@@ -12,6 +12,7 @@ import io.github.dolow.reconlens.store.RuleRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
 import java.util.HexFormat;
@@ -40,7 +41,7 @@ import java.util.Optional;
  * 这条约束不靠提示词，靠条件 UPDATE。
  */
 @Service
-public class RuleLifecycleService {
+public class RuleLifecycleService implements ApprovalRelay {
 
     private static final Logger log = LoggerFactory.getLogger(RuleLifecycleService.class);
 
@@ -145,6 +146,8 @@ public class RuleLifecycleService {
      * <p>顺序上先消费确认码再动状态机：码被用掉之后哪怕后续失败，也必须让人重新确认一次，
      * 而不是留着一个"用过一半"的凭据。
      */
+    @Override
+    @Transactional
     public void confirmApproval(String code, int version, String decision, String operator,
                                 String confirmationCode, String note) {
         requireOperator(operator);
@@ -187,12 +190,18 @@ public class RuleLifecycleService {
      *
      * <p>资格由服务端拿两版规则做字段级 diff 判定，<b>不接受操作人自述</b>。
      */
+    @Transactional
     public void skipTrial(String code, int version, String operator, String reason) {
         requireOperator(operator);
         if (reason == null || reason.isBlank()) {
             throw new RuleException("跳过试算必须写理由：否则它和\"还没跑\"在审核页上长得一模一样");
         }
         RuleRepository.RuleRow row = requireRow(code, version);
+        if (row.lifecycle() != RuleLifecycle.DRAFT && row.lifecycle() != RuleLifecycle.REVIEWING) {
+            throw new RuleException("规则 " + code + " v" + version + " 当前是 " + row.lifecycle()
+                    + "，只有草稿/待审版本才需要跳过试算；已生效版本的试算结论不能被覆盖"
+                    + "（它正是 approve 时判定可批性的依据）");
+        }
         RuleChange change = review(row.code(), row.version()).change();
         if (!change.skippable()) {
             throw new RuleException("SKIPPED_NOT_ALLOWED：这次改动触及安全语义 "
@@ -215,6 +224,7 @@ public class RuleLifecycleService {
      *
      * @param signature 签字说明：{@link ApprovalMode#NEED_SIGN} 与 {@link ApprovalMode#BLOCK_SIGNABLE} 必填
      */
+    @Transactional
     public void approve(String code, int version, String operator, String token, String signature) {
         requireOperator(operator);
         RuleRepository.RuleRow row = requireRow(code, version);
@@ -257,6 +267,7 @@ public class RuleLifecycleService {
     }
 
     /** 驳回：REVIEWING → REJECTED（草稿也可以直接驳回）。 */
+    @Transactional
     public void reject(String code, int version, String operator, String reason) {
         requireOperator(operator);
         if (reason == null || reason.isBlank()) {

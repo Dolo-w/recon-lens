@@ -57,8 +57,12 @@ CREATE TABLE IF NOT EXISTS recon_diff (
 CREATE UNIQUE INDEX IF NOT EXISTS uk_diff_shard_key
   ON recon_diff (job_id, shard_id, diff_type, biz_key, field_name);
 CREATE INDEX IF NOT EXISTS idx_diff_job_type ON recon_diff (job_id, diff_type);
+-- 试算的 diffsInWindow(jobId, lo, hi) 按 job_id + biz_key 范围扫；没有这条索引就是整段差异全表扫
+CREATE INDEX IF NOT EXISTS idx_diff_job_key ON recon_diff (job_id, biz_key);
 -- T5-c 的分母来自"最近一次同 code 的 PROD 任务"，按 code + kind 倒序取一条
 CREATE INDEX IF NOT EXISTS idx_job_code_kind ON recon_job (rule_code, kind, id);
+-- listJobs 是 WHERE kind='PROD' ORDER BY id DESC：上面那条索引以 rule_code 打头，服务不了这个查询
+CREATE INDEX IF NOT EXISTS idx_job_kind_id ON recon_job (kind, id);
 
 -- ============ 规则库：使用方可以不改代码、不重启就新增/修改对账维度 ============
 CREATE TABLE IF NOT EXISTS recon_rule (
@@ -245,7 +249,7 @@ CREATE INDEX IF NOT EXISTS idx_model_rule ON recon_model (rule_code, side);
 CREATE TABLE IF NOT EXISTS recon_registered_table (
   id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
   table_name       VARCHAR(128)  NOT NULL,
-  columns_snapshot VARCHAR(2048) NOT NULL,
+  columns_snapshot TEXT          NOT NULL,
   registered_by    VARCHAR(64)   NOT NULL,
   registered_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
