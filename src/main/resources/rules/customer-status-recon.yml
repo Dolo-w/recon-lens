@@ -29,8 +29,8 @@ right:
 shard:
   count: 2
   parallelism: 2
-  whereLeft: "MOD(CAST(SUBSTRING(customer_id, 2, 3) AS INT), {shards}) = {index}"
-  whereRight: "MOD(CAST(SUBSTRING(customer_id, 2, 3) AS INT), {shards}) = {index}"
+  whereLeft: "MOD(CAST(SUBSTRING(customer_id, 2, 3) AS SIGNED), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(customer_id, 2, 3) AS SIGNED), {shards}) = {index}"
 compare:
   - field: amount
     type: DECIMAL

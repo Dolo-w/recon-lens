@@ -1,0 +1,46 @@
+# 客户维度汇总对账：自定义 SQL 作为数据源 + 百分比容差
+# 演示两件事：① 数据源可以是一段聚合 SQL，不一定是单表；② 容差可以用百分比表达
+code: CUSTOMER_SUM_RECON
+name: 客户维度账单与结算汇总对账
+description: 按客户汇总金额后比对，允许 0.5% 的相对偏差（汇率/手续费抖动）
+
+left:
+  label: 账单汇总
+  # 自定义 SQL：必须把业务键别名为 keyField，其余字段用作比对字段
+  sql: "SELECT customer_id AS biz_key, SUM(amount) AS amount, COUNT(*) AS bill_count FROM bill_left GROUP BY customer_id"
+  keyField: biz_key
+  keyType: STRING
+  orderBy: biz_key
+
+right:
+  label: 结算汇总
+  sql: "SELECT customer_id AS biz_key, SUM(amount) AS amount, COUNT(*) AS settle_count FROM bill_right GROUP BY customer_id"
+  keyField: biz_key
+  keyType: STRING
+  orderBy: biz_key
+
+shard:
+  count: 2
+  parallelism: 2
+  # 对聚合结果按业务键取模分片（H2/MySQL 都支持 MOD；生产可换 CRC32/哈希列）
+  whereLeft: "MOD(LENGTH(biz_key), {shards}) = {index}"
+  whereRight: "MOD(LENGTH(biz_key), {shards}) = {index}"
+
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerancePercent: 0.005
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+
+options:
+  maxAttempts: 2

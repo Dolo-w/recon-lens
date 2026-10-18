@@ -21,6 +21,13 @@ recon:
   rules-location: ${RECON_RULES:file:./rules/}
   # YAML 会与库里的同名规则对齐：内容不一致时按文件覆盖成新版本；不想被覆盖就设 false
   seed-rules: ${RECON_SEED_RULES:true}
+  rules:
+    # 生产默认关闭：规则直写会绕过三道闸门。确需兼容旧脚本时打开，并同时配 RECON_REVIEW_API_KEY。
+    legacy-define-enabled: ${RECON_LEGACY_DEFINE_ENABLED:false}
+  review:
+    # 审批与规则直写共用的密钥；留空 = 两个入口一律 403（fail-closed）
+    api-key: ${RECON_REVIEW_API_KEY:}
+    token-secret: ${RECON_REVIEW_TOKEN_SECRET:}
   engine:
     parallelism: 8
     fetch-size: 2000

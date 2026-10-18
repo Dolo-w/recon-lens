@@ -5,6 +5,16 @@ spring:
   main:
     web-application-type: none
     banner-mode: off
+    # stdio 冷启动瘦身：每次 MCP 调用都要拉一个新 JVM，全量急切装配实测 2~3s，
+    # lazy 后 Bean 用到才建 —— 首个工具调用略慢，整体冷启动降到 ~1.5s。
+    # MCP 工具注册走 McpServerRunner（ApplicationRunner，本身就在启动路径上），不受影响。
+    lazy-initialization: true
+  sql:
+    init:
+      # 默认 always 只服务 H2 演示（自动建表开箱即用）；schema.sql 是 H2 方言，
+      # 连外部 MySQL 时必须跳过：RECON_SQL_INIT=never（或叠加 mysql profile），
+      # 否则启动即崩 —— 对 MySQL 执行 H2 方言脚本必然失败，表结构应由部署方管理。
+      mode: ${RECON_SQL_INIT:always}
 
 recon:
   mcp:

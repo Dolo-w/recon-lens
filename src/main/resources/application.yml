@@ -28,6 +28,11 @@ recon:
   rules-location: classpath:rules/
   # 是否把上面的 YAML 规则与规则库里的同名规则对齐（库里没有的作 v1；不一致按文件覆盖成新版本；已下线的不复活）
   seed-rules: true
+  rules:
+    # POST /api/rules 直写并立即生效的旧通路：默认关闭。
+    # 它不经过 草稿 → 试算 → 审批（闸门 1/2/3），打开时还必须配 recon.review.api-key，
+    # 否则请求一律 403（见 RuleController#requireLegacyDefineAllowed）。
+    legacy-define-enabled: false
   engine:
     # 分片并行度，默认取 min(规则内 parallelism, CPU*2)
     parallelism: 8

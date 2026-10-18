@@ -1,0 +1,50 @@
+# 演示规则：账单（我方） vs 结算（对方），按「客户 + 订单号」复合维度对账
+# 这份文件就是"配置"，不需要写代码就能换一套对账逻辑
+code: BILL_VS_SETTLE
+name: 账单与结算对账（客户+订单号）
+description: 按客户+订单号复合维度逐笔比对金额，金额相对偏差不超过 0.01%
+
+left:
+  label: 账单
+  table: bill_left
+  keyType: STRING
+  # 复合维度：引擎生成 CONCAT(customer_id, '|', order_no) AS __biz_key，按它升序归并
+  dimension: [customer_id, order_no]
+
+right:
+  label: 结算
+  table: bill_right
+  keyType: STRING
+  dimension: [customer_id, order_no]
+
+shard:
+  count: 2
+  parallelism: 2
+  # {shards} = 分片总数，{index} = 当前分片下标（0 起）。
+  # 两侧必须按「同一个业务键口径」切分：这里按订单号末两位取模（order_no 是维度列之一），
+  # 两侧同函数，同一笔业务必然落进同一分片。
+  whereLeft: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
+  whereRight: "MOD(CAST(SUBSTRING(order_no, 10, 2) AS SIGNED), {shards}) = {index}"
+
+compare:
+  - field: amount
+    type: DECIMAL
+    # tolerancePercent 是小数比率：0.0001 = 0.01%
+    tolerancePercent: 0.0001
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+
+missing:
+  # 账单缺失 = 只有结算有（左侧没有）
+  leftMissingDiffType: MISSING_LEFT
+  # 结算缺失 = 只有账单有（右侧没有）
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+
+options:
+  # 单分片失败重试次数（重跑时只重做失败分片，先删该分片旧差异，天然幂等）
+  maxAttempts: 2
