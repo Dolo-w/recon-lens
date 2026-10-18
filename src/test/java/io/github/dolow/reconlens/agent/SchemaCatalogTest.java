@@ -58,11 +58,14 @@ class SchemaCatalogTest {
     }
 
     @Test
-    void 白名单比对忽略schema前缀与大小写() {
-        SchemaCatalog catalog = catalog("billing.BILL_LEFT");
+    void 白名单比对忽略schema前缀但区分大小写() {
+        SchemaCatalog catalog = catalog("billing.bill_left");
 
         assertThat(catalog.allows("bill_left")).isTrue();
         assertThat(catalog.allows("billing.bill_left")).isTrue();
+        assertThat(catalog.allows("BILL_LEFT"))
+                .as("大小写不同就是另一张表：忽略大小写会让导入的 ORDERS 冒充真实 orders")
+                .isFalse();
         assertThat(catalog.allows("bill_right")).isFalse();
     }
 

@@ -80,4 +80,20 @@ class AgentBoundaryTest {
             .should().beAnnotatedWith(
                     org.springframework.boot.autoconfigure.condition.ConditionalOnProperty.class)
             .because("它是唯一允许反向依赖 agent 的类；没有条件装配，开关就失去了意义");
+
+    /**
+     * MCP 桥只能依赖"带确认码的审批转发"窄接口，不许直接引用审批服务本体。
+     *
+     * <p>为什么这条必要：{@code RuleLifecycleService} 上还有 {@code submit/approve/reject/skipTrial}
+     * 这些<b>不需要确认码</b>的入口。2026-10-18 实测过模型用一句自拟的"用户已同意"在 47 ms 内
+     * 把规则批成 ACTIVE —— 拦不住的原因之一就是桥拿到的是整个服务对象，随便挑一个方法调。
+     * 现在它拿到的是 {@code ApprovalRelay}：只有 {@code confirmApproval}，实现里必须先核销确认码。
+     */
+    @ArchTest
+    static final ArchRule mcp_不得直接依赖审批服务 = noClasses()
+            .that().resideInAPackage("io.github.dolow.reconlens.mcp..")
+            .should().dependOnClassesThat()
+            .areAssignableTo(io.github.dolow.reconlens.rule.RuleLifecycleService.class)
+            .because("MCP 桥只该拿到 ApprovalRelay（带确认码的窄接口）；直接引用 RuleLifecycleService "
+                    + "等于把不校验确认码的 submit/approve 也递给了模型");
 }

@@ -22,7 +22,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>两条路径都覆盖：行级规则（窄化，行数不变，重复键仍要报 DUPLICATE_KEY）与
  * 声明式维度 + 聚合规则（按维度汇总，行数变少）。分片桶列必须两侧同函数，否则会凭空多出单边缺失差异。
  */
-@SpringBootTest(properties = "recon.engine.run-demo-on-startup=false")
+@SpringBootTest(properties = {
+        "recon.engine.run-demo-on-startup=false",
+        // 本测试验模型表与 __MODEL 规则的取数口径，不验审批流程：把草稿化关掉、保持 ACTIVE
+        "recon.model.require-approval=false"
+})
 class ModelBuilderTest {
 
     @Autowired

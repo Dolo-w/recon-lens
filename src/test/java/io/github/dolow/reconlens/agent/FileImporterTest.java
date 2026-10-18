@@ -117,6 +117,39 @@ class FileImporterTest {
 
     // ---------------- Excel 解析 ----------------
 
+    /** 一个工作簿两张 Sheet：默认读第一张、可以按名字或序号读第二张，越界时列出候选而不是猜。 */
+    @Test
+    void excel解析_可以指定Sheet而不是只认第一张() throws IOException {
+        try (XSSFWorkbook wb = new XSSFWorkbook()) {
+            Sheet first = wb.createSheet("汇总");
+            Row firstHeader = first.createRow(0);
+            firstHeader.createCell(0).setCellValue("summary");
+            first.createRow(1).createCell(0).setCellValue("total");
+
+            Sheet second = wb.createSheet("明细");
+            Row header = second.createRow(0);
+            header.createCell(0).setCellValue("order_no");
+            header.createCell(1).setCellValue("amount");
+            for (int i = 1; i <= 2; i++) {
+                Row row = second.createRow(i);
+                row.createCell(0).setCellValue("SN10" + i);
+                row.createCell(1).setCellValue(10.5);
+            }
+            try (var out = Files.newOutputStream(importDir.resolve("multi.xlsx"))) {
+                wb.write(out);
+            }
+        }
+
+        assertThat(importer.preview("multi.xlsx").columns())
+                .as("不指定 Sheet 时仍然读第一张，保持老行为")
+                .containsExactly("summary");
+        assertThat(importer.preview("multi.xlsx", "明细").columns()).containsExactly("order_no", "amount");
+        assertThat(importer.preview("multi.xlsx", "1").rows()).as("从 0 开始的序号").isEqualTo(2L);
+
+        FileImporter.ImportPreview missing = importer.preview("multi.xlsx", "不存在的表");
+        assertThat(missing.error()).as("找不到 Sheet 要列出候选，而不是静默变成空表").contains("汇总").contains("明细");
+    }
+
     @Test
     void excel解析_数字去尾零_空行容忍() throws IOException {
         try (XSSFWorkbook wb = new XSSFWorkbook()) {

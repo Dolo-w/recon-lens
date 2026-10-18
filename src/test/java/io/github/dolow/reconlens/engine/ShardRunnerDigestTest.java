@@ -48,7 +48,12 @@ class ShardRunnerDigestTest {
         assertThat(run.result.stats().diffRows()).isEqualTo(2);
     }
 
-    /** 两行左侧、一行右侧：A1 金额差 0.5、A5 右侧缺失。 */
+    /**
+     * 两行左侧、一行右侧：A1 金额差 0.5、A5 右侧缺失。
+     *
+     * <p>摘要只在<b>试算路径</b>上产出（生产跑批算完就扔，见 {@code ShardRunner} 的注释），
+     * 所以这里必须传 {@link DiffCapture} 才会触发摘要。
+     */
     private ShardRun execute(int maxKeys) {
         ReconProperties properties = new ReconProperties();
         properties.getEngine().setDiffDigestMaxKeys(maxKeys);
@@ -60,7 +65,7 @@ class ShardRunnerDigestTest {
 
         ShardRunner runner = new ShardRunner(
                 new StubCursors(rule, List.of(leftA1, leftA5), List.of(rightA1)), repository, properties);
-        ShardResult result = runner.run(rule, 1L, new ShardPlan(0, null, null));
+        ShardResult result = runner.run(rule, 1L, new ShardPlan(0, null, null), new DiffCapture());
 
         ArgumentCaptor<List<DiffRecord>> batches = ArgumentCaptor.forClass(List.class);
         verify(repository, atLeastOnce()).insertDiffs(batches.capture());

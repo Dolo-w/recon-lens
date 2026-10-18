@@ -58,7 +58,7 @@ class McpToolCatalogTest {
      * 而 mock 的 specifications() 返回 null，addAll(null) 什么也不加 —— 数量断言会假绿/假红。
      */
     @Test
-    void fourteenToolsWhenAgentIsEnabled() {
+    void fifteenToolsWhenAgentIsEnabled() {
         AgentMcpTools agent = agent(mock(TrialTaskRegistry.class), mock(AgentRunRepository.class),
                 mock(RuleRepository.class),
                 mock(io.github.dolow.reconlens.agent.TableRegistrar.class),
@@ -66,10 +66,10 @@ class McpToolCatalogTest {
 
         List<String> names = McpServerRunner.toolNames(runnerWithAgent(agent).specifications(jsonMapper));
 
-        assertThat(names).hasSize(14)
+        assertThat(names).hasSize(15)
                 .containsAll(BASE_TOOLS)
                 .contains("recon_draft_rule", "recon_trial_status", "recon_register_table", "recon_import_file",
-                        "recon_submit_approval");
+                        "recon_import_status", "recon_submit_approval");
     }
 
     /** structuredContent 必须与声明了 outputSchema 的工具配套：有 schema 没内容，客户端会判定结果不合规。 */
@@ -277,7 +277,9 @@ class McpToolCatalogTest {
                 "PASS", "FULL", null, null, "digest", "{\"checks\":{}}")));
         AgentMcpTools agent = agent(mock(TrialTaskRegistry.class), mock(AgentRunRepository.class), rules,
                 mock(io.github.dolow.reconlens.agent.TableRegistrar.class),
-                mock(io.github.dolow.reconlens.agent.FileImporter.class), lifecycle, new ReconProperties());
+                mock(io.github.dolow.reconlens.agent.FileImporter.class),
+                mock(io.github.dolow.reconlens.agent.ImportTaskRegistry.class),
+                lifecycle, new ReconProperties());
 
         McpSchema.CallToolResult refused = McpServerRunner.invoke(
                 agentSpec(agent, "recon_submit_approval"),
@@ -323,6 +325,7 @@ class McpToolCatalogTest {
                                        io.github.dolow.reconlens.agent.TableRegistrar registrar,
                                        io.github.dolow.reconlens.agent.FileImporter importer) {
         return agent(registry, runs, rules, registrar, importer,
+                mock(io.github.dolow.reconlens.agent.ImportTaskRegistry.class),
                 mock(io.github.dolow.reconlens.rule.RuleLifecycleService.class),
                 new io.github.dolow.reconlens.config.ReconProperties());
     }
@@ -330,9 +333,10 @@ class McpToolCatalogTest {
     private static AgentMcpTools agent(TrialTaskRegistry registry, AgentRunRepository runs, RuleRepository rules,
                                        io.github.dolow.reconlens.agent.TableRegistrar registrar,
                                        io.github.dolow.reconlens.agent.FileImporter importer,
+                                       io.github.dolow.reconlens.agent.ImportTaskRegistry importTasks,
                                        io.github.dolow.reconlens.rule.RuleLifecycleService lifecycle,
                                        io.github.dolow.reconlens.config.ReconProperties properties) {
-        return new AgentMcpTools(registry, runs, rules, registrar, importer, lifecycle, properties);
+        return new AgentMcpTools(registry, runs, rules, registrar, importer, importTasks, lifecycle, properties);
     }
 
     private McpServerRunner runnerWithAgent(AgentMcpTools agent) {

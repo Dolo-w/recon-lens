@@ -24,7 +24,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 用例共享同一个内存库（{@code jdbc:h2:mem:recon;DB_CLOSE_DELAY=-1}），所以模型表的构建次数、模型规则的版本号
  * 会随用例顺序变化 —— 断言只认"是什么/对不对"，不认"第几次/第几版"。
  */
-@SpringBootTest(properties = "recon.engine.run-demo-on-startup=false")
+@SpringBootTest(properties = {
+        "recon.engine.run-demo-on-startup=false",
+        // 本用例验的是"建模型表 → 用它跑对账"的链路，不是审批流程；
+        // 默认的 require-approval=true 会把模型规则落成草稿，那条路在 ModelApprovalTest。
+        "recon.model.require-approval=false",
+        // 独立库名：默认 mem:recon 带 DB_CLOSE_DELAY=-1，同 JVM 多上下文会共用、data.sql 二次执行撞主键
+        "spring.datasource.url=jdbc:h2:mem:model_api;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
+})
 class ModelApiTest {
 
     @Autowired

@@ -69,6 +69,27 @@ class DiffSetDigestTest {
     }
 
     @Test
+    void anyOfTheComparedValuesChangeFlipsTheDigest() {
+        String base = sha(FieldType.STRING, List.of(amount("A1")));
+        DiffRecord sameKeyDifferentValue = DiffRecord.of(1L, 0, "AMOUNT_MISMATCH", Severity.HIGH,
+                "A1", "amount", "10.00", "10.05", new BigDecimal("0.05"), null);
+
+        // 只比键集合时，"键一样、值全算错"在摘要上完全看不出来
+        assertThat(sha(FieldType.STRING, List.of(sameKeyDifferentValue)))
+                .as("左右取值变了").isNotEqualTo(base);
+    }
+
+    @Test
+    void deltaScaleIsNormalizedSoTwoRunsOfTheSameDataAgree() {
+        DiffRecord scaled = DiffRecord.of(1L, 0, "AMOUNT_MISMATCH", Severity.HIGH,
+                "A1", "amount", "10.00", "10.01", new BigDecimal("0.0100"), null);
+
+        // 1.0 与 1.00 是同一个数；不归一化会让同一份数据两次跑的摘要无端不同
+        assertThat(sha(FieldType.STRING, List.of(scaled)))
+                .isEqualTo(sha(FieldType.STRING, List.of(amount("A1"))));
+    }
+
+    @Test
     void duplicateLinesAreNotSwallowed() {
         DiffSetDigest once = digestOf(FieldType.STRING, List.of(amount("A1")), 1000);
         DiffSetDigest twice = digestOf(FieldType.STRING, List.of(amount("A1"), amount("A1")), 1000);
