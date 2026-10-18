@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -29,16 +30,26 @@ public class ModelController {
 
     private final ModelBuilder builder;
     private final JdbcTemplate jdbc;
+    private final ApiSecurity security;
 
-    public ModelController(ModelBuilder builder, JdbcTemplate jdbc) {
+    public ModelController(ModelBuilder builder, JdbcTemplate jdbc, ApiSecurity security) {
         this.builder = builder;
         this.jdbc = jdbc;
+        this.security = security;
     }
 
+    /**
+     * 建模型表并落一条 {@code <规则>__MODEL} 规则。
+     *
+     * <p>这条接口会写一条<b>直接生效</b>的规则（{@code ModelBuilder} 走 {@code catalog.defineMap}），
+     * 所以在数据面写接口里也要过密钥：否则"能读规则"就等于"能造一条 ACTIVE 规则"。
+     */
     @PostMapping("/{ruleCode}")
     public Map<String, Object> build(@PathVariable String ruleCode,
                                      @RequestParam(required = false) Integer shards,
-                                     @RequestParam(required = false) String operator) {
+                                     @RequestParam(required = false) String operator,
+                                     @RequestHeader(value = "X-Api-Key", required = false) String apiKey) {
+        security.requireWrite(apiKey, "构建预处理模型表（会生成一条直接生效的 __MODEL 规则）");
         ModelBuilder.ModelBuild build = builder.build(ruleCode, shards, operator);
         return Map.of(
                 "ruleCode", build.ruleCode(),

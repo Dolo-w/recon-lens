@@ -1,12 +1,14 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.explain.DiffKnowledgeBase;
 import io.github.dolow.reconlens.explain.ExplainService;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -76,6 +78,40 @@ public class DiffController {
         body.put("explained", explained);
         body.put("explainer", explainService.llmName());
         return body;
+    }
+
+    /**
+     * 归因回流：人确认/修正一条差异的原因，写回知识库。
+     *
+     * <p>这是知识库置信度能升到 0.9 的唯一入口 —— 模型自己只能写 0.5。
+     */
+    @PostMapping("/{id}/attribution")
+    public Map<String, Object> correctAttribution(@PathVariable long id,
+                                                  @RequestBody AttributionRequest request) {
+        boolean stored = explainService.correct(id, request.cause(), request.action(), request.operator());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", id);
+        body.put("stored", stored);
+        body.put("layer", "KNOWLEDGE");
+        return body;
+    }
+
+    /** 知识库现状：进程内命中率 + 来源分布，用来判断成本是不是真的在降。 */
+    @GetMapping("/knowledge")
+    public Map<String, Object> knowledge(@RequestParam(defaultValue = "20") int limit) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        DiffKnowledgeBase.Snapshot snapshot = explainService.knowledgeSnapshot();
+        body.put("lookups", snapshot.lookups());
+        body.put("hits", snapshot.hits());
+        body.put("misses", snapshot.misses());
+        body.put("hitRate", snapshot.hitRate());
+        body.put("summary", snapshot.describe());
+        body.put("recent", explainService.recentKnowledge(Math.min(Math.max(limit, 1), MAX_LIMIT)));
+        return body;
+    }
+
+    /** 人工修正归因的请求体。{@code operator} 必填 —— 不知道谁改的，就没法追溯。 */
+    public record AttributionRequest(String cause, String action, String operator) {
     }
 
     @org.springframework.web.bind.annotation.ExceptionHandler(IllegalArgumentException.class)

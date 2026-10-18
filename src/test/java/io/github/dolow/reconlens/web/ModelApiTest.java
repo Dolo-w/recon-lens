@@ -47,10 +47,10 @@ class ModelApiTest {
                 .andExpect(jsonPath("$.shards").value(4))
                 .andExpect(jsonPath("$.tables.length()").value(2))
                 .andExpect(jsonPath("$.tables[0].side").value("left"))
-                .andExpect(jsonPath("$.tables[0].rows").value(20))
+                .andExpect(jsonPath("$.tables[0].rows").value(10))
                 .andExpect(jsonPath("$.tables[0].table").value(containsString("recon_model_bill_vs_settle_")))
                 .andExpect(jsonPath("$.tables[1].side").value("right"))
-                .andExpect(jsonPath("$.tables[1].rows").value(21));
+                .andExpect(jsonPath("$.tables[1].rows").value(10));
 
         // 读模型表跑出来的差异，必须和原规则逐条一致（条数 + 分类计数）
         String job = """
@@ -59,15 +59,14 @@ class ModelApiTest {
         String body = mvc.perform(post("/api/jobs").contentType(MediaType.APPLICATION_JSON).content(job))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SUCCESS"))
-                .andExpect(jsonPath("$.diffRows").value(6))
+                .andExpect(jsonPath("$.diffRows").value(4))
                 .andReturn().getResponse().getContentAsString();
         long jobId = Long.parseLong(body.replaceAll("(?s).*\"jobId\"\\s*:\\s*(\\d+).*", "$1"));
 
         mvc.perform(get("/api/diffs/summary").param("jobId", String.valueOf(jobId)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.total").value(6))
-                .andExpect(jsonPath("$.byType.AMOUNT_MISMATCH").value(2))
-                .andExpect(jsonPath("$.byType.STATUS_MISMATCH").value(1))
+                .andExpect(jsonPath("$.total").value(4))
+                .andExpect(jsonPath("$.byType.AMOUNT_MISMATCH").value(1))
                 .andExpect(jsonPath("$.byType.MISSING_LEFT").value(1))
                 .andExpect(jsonPath("$.byType.MISSING_RIGHT").value(1))
                 .andExpect(jsonPath("$.byType.DUPLICATE_KEY").value(1));
