@@ -24,9 +24,29 @@
     </encoder>
   </appender>
 
+  <!--
+    MCP 模式加一份文件日志：stderr 的读者是宿主，宿主一旦死亡/重启（见 2026-10-18
+    "注册确认调用悬空 35 分钟"事故），stderr 日志就随管道一起消失，事后无法取证。
+    落盘文件是唯一与宿主共存亡的证据链。路径可用系统属性/环境变量 mcp.log.dir 覆盖。
+  -->
+  <appender name="MCPFILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${mcp.log.dir:-logs}/recon-lens-mcp.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>${mcp.log.dir:-logs}/recon-lens-mcp.%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+      <maxFileSize>20MB</maxFileSize>
+      <maxHistory>7</maxHistory>
+      <totalSizeCap>200MB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
   <springProfile name="mcp">
     <root level="INFO">
       <appender-ref ref="STDERR"/>
+      <appender-ref ref="MCPFILE"/>
     </root>
   </springProfile>
 

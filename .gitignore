@@ -11,3 +11,6 @@ data/
 *.trace.db
 # 压测装置的运行产物（日志、应用输出）
 tools/mysql-bench/out/
+
+# IDE 运行配置（每个人不同）
+.run/
