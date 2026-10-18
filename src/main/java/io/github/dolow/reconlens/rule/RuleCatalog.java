@@ -67,9 +67,21 @@ public class RuleCatalog {
      * </ul>
      * 想让规则库完全自己说了算（库里的改动不被文件覆盖），把 {@code recon.seed-rules} 设为 false。
      */
+    /**
+     * 历史行的内容哈希回填<b>无条件</b>执行：它和"规则目录是不是权威"没有关系。
+     *
+     * <p>以前这句挂在 {@link #seedFromRuleDirectory()} 里，生产按建议配 {@code recon.seed-rules=false}
+     * 时整段提前 return —— 于是迁移前落库的行 {@code reviewed_spec_sha} 永远为 NULL，
+     * 而 NULL 在篡改检测里是"从没审过，不适用"，等于给老规则永久豁免。放到单独的
+     * {@code @PostConstruct} 就不依赖任何开关，且与 seed 的先后顺序无关（回填只读 spec_json）。
+     */
+    @PostConstruct
+    void backfillLegacySpecSha() {
+        backfillSpecSha();
+    }
+
     @PostConstruct
     void seedFromRuleDirectory() {
-        backfillSpecSha();
         if (!properties.isSeedRules()) {
             log.info("已关闭规则目录导入（recon.seed-rules=false），规则完全以数据库为准");
             return;
