@@ -3,15 +3,21 @@ package io.github.dolow.reconlens.mcp;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
+import io.github.dolow.reconlens.domain.ShardStatus;
 import io.github.dolow.reconlens.dsl.FieldRule;
+import io.github.dolow.reconlens.domain.RuleOrigin;
+import io.github.dolow.reconlens.domain.TrialState;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.engine.ReconEngine;
+import io.github.dolow.reconlens.explain.DiagnosisService;
 import io.github.dolow.reconlens.explain.ExplainService;
 import io.github.dolow.reconlens.model.ModelBuilder;
 import io.github.dolow.reconlens.rule.RuleCatalog;
+import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -31,14 +37,61 @@ public class ReconMcpTools {
     private final ReconRepository repository;
     private final ExplainService explain;
     private final ModelBuilder modelBuilder;
+    private final DiagnosisService diagnosis;
+    /**
+     * 弱依赖的试算触发口（rule 包接口，agent 装配提供实现）：
+     * agent 关闭时没有实现 Bean，define_rule 落草稿但不试算。
+     */
+    private final org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialRunner> trialRunner;
+    /**
+     * 试算排队口（同样弱依赖）：有它就把试算丢后台、立刻返回会话号；
+     * 没有它（Agent 未启用）就退回同步试算 —— 慢，但至少能定义规则。
+     */
+    private final org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialScheduler> trialScheduler;
 
     public ReconMcpTools(RuleCatalog catalog, ReconEngine engine, ReconRepository repository, ExplainService explain,
-                         ModelBuilder modelBuilder) {
+                         ModelBuilder modelBuilder, DiagnosisService diagnosis,
+                         org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialRunner> trialRunner,
+                         org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialScheduler> trialScheduler) {
         this.catalog = catalog;
         this.engine = engine;
         this.repository = repository;
         this.explain = explain;
         this.modelBuilder = modelBuilder;
+        this.diagnosis = diagnosis;
+        this.trialRunner = trialRunner;
+        this.trialScheduler = trialScheduler;
+    }
+
+    /**
+     * 任务级诊断：一次返回"哪里不对 + 疑似原因 + 建议动作"。
+     *
+     * <p><b>不依赖 Agent 开关</b>：诊断读的是已经存在的任务数据，和"要不要有 Agent"无关。
+     * 如果把它挂在 {@code recon.agent.enabled} 后面，"这任务为什么挂了"这个问题
+     * 就得先打开一个开关才能问 —— 那是把可观测性和实验性功能绑在一起。
+     */
+    public ReconMcpTools.DiagnosisView diagnose(long jobId) {
+        DiagnosisService.Diagnosis result = diagnosis.diagnose(jobId);
+        Map<String, Object> view = new LinkedHashMap<>();
+        McpToolFactory.put(view, "jobId", result.jobId());
+        McpToolFactory.put(view, "ruleCode", result.ruleCode());
+        McpToolFactory.put(view, "status", result.status());
+        McpToolFactory.put(view, "verdict", result.verdict().name());
+        McpToolFactory.put(view, "summary", result.summary());
+        McpToolFactory.put(view, "facts", result.facts().stream()
+                .map(fact -> Map.of("kind", fact.kind(), "detail", fact.detail())).toList());
+        McpToolFactory.put(view, "suggestions", result.suggestions().stream()
+                .map(item -> Map.of("action", item.action(), "reason", item.reason())).toList());
+        McpToolFactory.put(view, "samples", result.samples().stream()
+                .map(sample -> Map.of("diffId", sample.diffId(), "diffType", sample.diffType(),
+                        "severity", sample.severity(), "bizKey", sample.bizKey(),
+                        "explanation", sample.explanation()))
+                .toList());
+        return new DiagnosisView(result.describe(), view);
+    }
+
+    /** 诊断的工具返回值：人读文本 + 结构化视图。 */
+    public record DiagnosisView(String text, Map<String, Object> view) {
     }
 
     /** 列出规则库里的规则，让模型自己挑 ruleCode。 */
@@ -66,13 +119,18 @@ public class ReconMcpTools {
                     .append("，并行 ").append(rule.shard().effectiveParallelism())
                     .append("，单分片最多重试 ").append(rule.maxAttempts()).append(" 次");
         }
-        sb.append("\n\n要改对账维度或比对字段，直接调 recon_define_rule 提交新版本（不用改代码、不用重启）。");
+        sb.append("\n\n要改对账维度或比对字段，调 recon_define_rule 提交新版本 —— 落为草稿并自动跑影子试算，")
+          .append("审批（recon_submit_approval）通过后才生效，不用改代码、不用重启。");
         return sb.toString();
     }
 
     /**
      * 定义/修改一条规则：body 是规则文件里的那份配置（JSON 或 YAML 都行）。
-     * 提交后会立刻对后续任务生效，跑过的任务仍按自己的快照执行。
+     *
+     * <p><b>MCP 通路不允许直通生效</b>：落库为 DRAFT 草稿并自动跑影子试算，
+     * 审批（{@code recon_submit_approval}）通过前 {@code recon_run} 用不了这条规则。
+     * 直通 ACTIVE 的口子只留给 REST legacy（api-key + 显式开关 + warn 留痕）与种子导入 ——
+     * 否则宿主大模型随手一次 {@code recon_define_rule} 就把三道闸门整个绕过去了。
      */
     public String defineRule(String ruleBody, String operator) {
         String body = blankToNull(ruleBody);
@@ -80,18 +138,70 @@ public class ReconMcpTools {
             throw new IllegalArgumentException("ruleBody 不能为空");
         }
         String who = blankToNull(operator) == null ? "mcp" : operator;
-        boolean json = body.startsWith("{");
-        RuleCatalog.Resolved resolved = json
-                ? catalog.defineJson(body, "MCP 提交的 JSON 规则", who)
-                : catalog.defineYaml(body, "MCP 提交的 YAML 规则", who);
-        return "规则 " + resolved.spec().code() + " 已落库为 v" + resolved.version() + "，对账维度：左 " + resolved.spec().left().describe()
-                + "，右 " + resolved.spec().right().describe()
-                + "，比对字段 " + resolved.spec().compare().stream().map(FieldRule::field).collect(Collectors.joining("、"))
-                + "。\n下一次 recon_run 用 ruleCode=" + resolved.spec().code() + " 就是这一版。";
+        RuleCatalog.Resolved resolved = catalog.defineDraftText(body, "MCP 提交的规则", who,
+                RuleOrigin.MCP, null, "MCP recon_define_rule 提交（操作人 " + who + "）");
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("规则 ").append(resolved.spec().code()).append(" 已落库为草稿 v").append(resolved.version())
+                .append("（来源 MCP，操作人 ").append(who).append("）。")
+                .append("草稿不生效，recon_run 现在还用不了它；对账维度：左 ")
+                .append(resolved.spec().left().describe()).append("，右 ")
+                .append(resolved.spec().right().describe())
+                .append("，比对字段 ").append(resolved.spec().compare().stream()
+                        .map(FieldRule::field).collect(Collectors.joining("、"))).append("。\n");
+        try {
+            io.github.dolow.reconlens.rule.RuleTrialScheduler scheduler = trialScheduler.getIfAvailable();
+            io.github.dolow.reconlens.rule.RuleTrialRunner runner = trialRunner.getIfAvailable();
+            if (scheduler != null) {
+                long runId = scheduler.submit(resolved.spec().code(), resolved.version(), who);
+                sb.append("影子试算已排队（会话 #").append(runId).append("，单次约 1 分钟）。\n")
+                        .append("下一步：recon_trial_status(ruleCode=").append(resolved.spec().code())
+                        .append(", version=").append(resolved.version()).append(") 或 runId=").append(runId)
+                        .append(" 轮询结论，不要重复提交。\n");
+            } else if (runner == null) {
+                sb.append("影子试算未跑：Agent 能力未启用（recon.agent.enabled=false），")
+                        .append("请启用后重新提交，或由人在 REST 上跑试算。\n");
+            } else {
+                io.github.dolow.reconlens.rule.RuleTrialRunner.Result result =
+                        runner.run(resolved.spec().code(), resolved.version());
+                sb.append("影子试算已完成：可批性 ").append(result.state().approval()).append("，结论 ")
+                        .append(describeTrial(result.state())).append("。\n");
+            }
+        } catch (RuleException e) {
+            sb.append("影子试算未跑成（闸门拒绝）：").append(e.getMessage())
+                    .append("\n规则仍是草稿，修正后可再提交新版本。\n");
+        } catch (IllegalStateException e) {
+            sb.append("影子试算未排队：").append(e.getMessage())
+                    .append("\n规则已落库为草稿，稍后可重试试算。\n");
+        }
+        sb.append("要生效：先把试算结论讲给用户，用户确认后由用户领取一次性确认码")
+                .append("（POST /api/rule-reviews/").append(resolved.spec().code()).append("/")
+                .append(resolved.version()).append("/confirmation），再调 recon_submit_approval（ruleCode=")
+                .append(resolved.spec().code()).append(", version=").append(resolved.version())
+                .append(", decision=APPROVED, confirmedBy=用户标识, confirmationCode=用户给你的码）。")
+                .append("未启用 Agent 工具时，也可由人在 REST 审批接口走 submit → approve。");
+        return sb.toString();
+    }
+
+    private String describeTrial(TrialState state) {
+        if (state instanceof TrialState.Trialed t) {
+            return t.verdict() + " / 覆盖 " + t.coverage();
+        }
+        if (state instanceof TrialState.Skipped s) {
+            return "SKIPPED（" + s.skipReason() + "）";
+        }
+        return "未执行";
     }
 
     /** 同步跑一次对账，直接返回任务摘要。ruleJson 非空时用内联规则（不落规则库）。 */
     public String runReconciliation(String ruleCode, String ruleJson, String batchId, String remark) {
+        return runWithView(ruleCode, ruleJson, batchId, remark).text();
+    }
+
+    /** 一次调用同时产出"人话"与结构化视图：分开调等于把对账跑两遍。 */
+    public record RunOutcome(String text, Map<String, Object> view) {
+    }
+
+    public RunOutcome runWithView(String ruleCode, String ruleJson, String batchId, String remark) {
         RuleCatalog.Resolved resolved = resolveRun(ruleCode, ruleJson);
         String batch = blankToNull(batchId);
         if (batch == null) {
@@ -100,8 +210,23 @@ public class ReconMcpTools {
         String note = blankToNull(remark) == null ? "由 MCP 工具发起" : remark;
         ReconJob job = engine.run(resolved, batch, note);
         String rule = resolved.spec().code() + "（" + (resolved.version() == null ? "内联规则" : "v" + resolved.version()) + "）";
-        return "规则 " + rule + "\n" + jobSummary(job.id())
+        String text = "规则 " + rule + "\n" + jobSummary(job.id())
                 + "\n下一步：recon_list_diffs 看差异明细，recon_explain_job 生成归因。";
+
+        Map<String, Object> view = new LinkedHashMap<>();
+        McpToolFactory.put(view, "ruleCode", resolved.spec().code());
+        McpToolFactory.put(view, "ruleVersion", resolved.version());
+        McpToolFactory.put(view, "jobId", job.id());
+        McpToolFactory.put(view, "batchId", job.batchId());
+        McpToolFactory.put(view, "status", job.status().name());
+        McpToolFactory.put(view, "diffRows", job.diffRows());
+        McpToolFactory.put(view, "matchedRows", job.matchedRows());
+        McpToolFactory.put(view, "leftRows", job.leftRows());
+        McpToolFactory.put(view, "rightRows", job.rightRows());
+        McpToolFactory.put(view, "diffByType", repository.summaryByType(job.id()));
+        McpToolFactory.put(view, "diffBySeverity", repository.summaryBySeverity(job.id()));
+        McpToolFactory.put(view, "errorMsg", job.errorMsg());
+        return new RunOutcome(text, view);
     }
 
     private RuleCatalog.Resolved resolveRun(String ruleCode, String ruleJson) {
@@ -120,6 +245,11 @@ public class ReconMcpTools {
 
     /** 任务总览：状态、扫描量、差异分类、分片明细。 */
     public String jobSummary(long jobId) {
+        return jobSummaryWithView(jobId).text();
+    }
+
+    /** 同一次查询产出"人话"与结构化视图（MCP 的 structuredContent 用后者）。 */
+    public RunOutcome jobSummaryWithView(long jobId) {
         ReconJob job = repository.findJob(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("任务不存在：" + jobId));
         StringBuilder sb = new StringBuilder();
@@ -131,8 +261,10 @@ public class ReconMcpTools {
                 .append("｜扫描 左=").append(job.leftRows()).append(" 右=").append(job.rightRows())
                 .append("｜匹配 ").append(job.matchedRows())
                 .append("｜差异 ").append(job.diffRows()).append('\n');
-        sb.append("差异分类：").append(formatCounts(repository.summaryByType(jobId))).append('\n');
-        sb.append("严重级别：").append(formatCounts(repository.summaryBySeverity(jobId))).append('\n');
+        Map<String, Long> byType = repository.summaryByType(jobId);
+        Map<String, Long> bySeverity = repository.summaryBySeverity(jobId);
+        sb.append("差异分类：").append(formatCounts(byType)).append('\n');
+        sb.append("严重级别：").append(formatCounts(bySeverity)).append('\n');
         List<ReconShard> shards = repository.listShards(jobId);
         if (!shards.isEmpty()) {
             sb.append("分片明细：").append(shards.stream()
@@ -144,10 +276,31 @@ public class ReconMcpTools {
         if (job.errorMsg() != null && !job.errorMsg().isBlank()) {
             sb.append("失败原因：").append(job.errorMsg()).append('\n');
         }
+        Long durationMs = null;
         if (job.startedAt() != null && job.finishedAt() != null) {
-            sb.append("耗时 ").append(java.time.Duration.between(job.startedAt(), job.finishedAt()).toMillis()).append(" ms\n");
+            durationMs = java.time.Duration.between(job.startedAt(), job.finishedAt()).toMillis();
+            sb.append("耗时 ").append(durationMs).append(" ms\n");
         }
-        return sb.toString();
+
+        Map<String, Object> view = new LinkedHashMap<>();
+        McpToolFactory.put(view, "jobId", job.id());
+        McpToolFactory.put(view, "ruleCode", job.ruleCode());
+        McpToolFactory.put(view, "batchId", job.batchId());
+        McpToolFactory.put(view, "status", job.status().name());
+        McpToolFactory.put(view, "shardCount", job.shardCount());
+        McpToolFactory.put(view, "shardDone", job.shardDone());
+        McpToolFactory.put(view, "leftRows", job.leftRows());
+        McpToolFactory.put(view, "rightRows", job.rightRows());
+        McpToolFactory.put(view, "matchedRows", job.matchedRows());
+        McpToolFactory.put(view, "diffRows", job.diffRows());
+        McpToolFactory.put(view, "diffByType", byType);
+        McpToolFactory.put(view, "diffBySeverity", bySeverity);
+        McpToolFactory.put(view, "failedShards", shards.stream()
+                .filter(s -> s.status() == ShardStatus.FAILED)
+                .map(ReconShard::shardId).toList());
+        McpToolFactory.put(view, "durationMs", durationMs);
+        McpToolFactory.put(view, "errorMsg", job.errorMsg());
+        return new RunOutcome(sb.toString(), view);
     }
 
     /** 分页看差异明细。 */
