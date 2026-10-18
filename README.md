@@ -12,7 +12,7 @@
 **配置化的对账引擎 + 可对话的对账 Agent。**
 规则即数据：用 YAML 描述"对账维度 + 要比的字段"（复合键、聚合口径、分片策略都是声明式的），提交即生效；
 引擎按业务键流式归并对账，分片并行、断点重跑、差异自动分类归因；
-同时是一个 MCP server —— 14 个工具把全部能力暴露给 Agent，Agent 还能**听懂一句业务描述就起草新规则、影子试算、交人审批**。
+同时是一个 MCP server —— 15 个工具把全部能力暴露给 Agent，Agent 还能**听懂一句业务描述就起草新规则、影子试算、交人审批**。
 
 ---
 
@@ -55,7 +55,7 @@ recon-lens 把这件事拆成四件确定的事：
 flowchart LR
     R[rules/*.yml] -->|RuleParser 校验| CAT[(recon_rule<br/>规则库 / 版本 / 快照)]
     API[REST /api/**] --> CAT
-    AGENT[Agent / MCP 客户端] -->|stdio JSON-RPC| MCP[MCP server<br/>14 个工具]
+    AGENT[Agent / MCP 客户端] -->|stdio JSON-RPC| MCP[MCP server<br/>15 个工具]
     MCP --> CAT
     MCP --> ENG
     MCP --> DB
@@ -205,7 +205,7 @@ curl "http://localhost:8080/api/diffs/summary?jobId=1"
 | GET | `/api/rules`、`/api/rules/{code}` | 规则库列表 / 版本历史 |
 | POST | `/api/rules` | 提交一版新规则（`X-Operator` 记操作人） |
 | DELETE | `/api/rules/{code}` | 停用规则（版本保留，历史任务仍可按快照重跑） |
-| POST | `/api/models/{ruleCode}?shards=4` | 预处理物化：大表按规则粒度算成模型表并注册 `<CODE>__MODEL` 规则 |
+| POST | `/api/models/{ruleCode}?shards=4` | 预处理物化：大表按规则粒度算成模型表并注册 `<CODE>__MODEL` 规则（默认草稿，需审批；`recon.model.require-approval` 默认 true） |
 | GET | `/api/models` | 已物化的模型表清单 |
 
 > 提示：运行时提交规则 = 运行时改 SQL，生产上这个入口要挂在网关鉴权后面。
@@ -294,7 +294,7 @@ Agent 对表结构零假设 —— 全部结构信息来自表白名单 + 数据
 - `RECON_SQL_INIT=never` 必须设（schema.sql 是 H2 方言）；`DRIVER_CLASS_NAME` 必须显式给；
 - MCP 进程与 Web 实例要连**同一个库** —— 草稿、试算结论、审批全靠共享数据库状态。
 
-## 第 2 步：认识 14 个 MCP 工具
+## 第 2 步：认识 15 个 MCP 工具
 
 基础工具（始终可用）：
 
@@ -303,7 +303,7 @@ Agent 对表结构零假设 —— 全部结构信息来自表白名单 + 数据
 | `recon_list_rules` | 列出规则库（版本、两侧数据源、维度、比对字段） |
 | `recon_define_rule` | 提交规则体（JSON/YAML）落库为**草稿**并自动跑影子试算，经 `recon_submit_approval` 审批后才生效 |
 | `recon_run` | 同步跑一次对账（支持内联 `ruleJson` 试算） |
-| `recon_build_model` | 大表按规则粒度物化成模型表，每轮只读模型表 |
+| `recon_build_model` | 大表按规则粒度物化成模型表，每轮只读模型表（生成的 `<CODE>__MODEL` 规则默认是**草稿**，试算+审批后才生效；`recon.model.require-approval=false` 可退回直写 ACTIVE） |
 | `recon_job_summary` | 任务状态 / 分片完成度 / 差异分类 / 错误原因 |
 | `recon_list_diffs` | 差异明细（业务键、字段、左右值、相对偏差） |
 | `recon_explain_diff` / `recon_explain_job` | 单条 / 批量差异归因 |
@@ -443,7 +443,7 @@ node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项
 | --- | --- |
 | [docs/rule-dsl.md](docs/rule-dsl.md) | 规则 DSL 完整手册（维度 / 聚合 / 分片 / 容差 / 校验规则） |
 | [docs/agent-quickstart.md](docs/agent-quickstart.md) | Agent 本地运行与对接全流程实测指南 |
-| [docs/mcp.md](docs/mcp.md) | MCP 接入：14 个工具入参/返回、动态表注册、文件导入、stdio 坑位 |
+| [docs/mcp.md](docs/mcp.md) | MCP 接入：15 个工具入参/返回、动态表注册、文件导入、stdio 坑位 |
 | [docs/architecture.md](docs/architecture.md) | 架构说明 |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字（文首有结论速览） |
 | [tools/mysql-bench/](tools/mysql-bench/) | 压测装置（SQL / 脚本 / 规则） |

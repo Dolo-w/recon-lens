@@ -306,6 +306,10 @@ mkdir -p data/import && cp ~/Downloads/账单.xlsx data/import/
 #    ⚠️ file 必须再传一次 —— 两段式不是会话状态，confirm 只认这一次调用里的参数
 #    recon_import_file {file: "账单.xlsx", action: "confirm", table: "recon_bills", operator: "wang"}
 #    → {"imported":true,"rows":100000,"columns":[…],"message":"…"}
+#
+#    大文件（几十万行）加 async:true 立刻返回任务号，别赌客户端不超时：
+#    recon_import_file {file: "账单.xlsx", action: "confirm", table: "recon_bills", async: true}
+#    → {"taskId":7,"status":"QUEUED",…}    然后 recon_import_status {taskId: 7}
 # 4) 直接起草规则（或按 §3.5 手写）
 #    recon_draft_rule {businessDescription: "按流水号比对 recon_bills 和对侧表的金额"}
 ```
@@ -315,7 +319,8 @@ mkdir -p data/import && cp ~/Downloads/账单.xlsx data/import/
 - 默认文件必须在 `recon.agent.file-import.dir`（默认 `./data/import`）内，`../` 穿越与绝对路径都拒；
   设 `recon.agent.file-import.allow-absolute-paths=true` 后放行本地绝对路径（本地自用推荐，MCP 场景别开）；
 - 类型自动推断（BIGINT / DECIMAL(24,6) / DATETIME / VARCHAR / TEXT），中文表头规范化成 `col_N` 且保留原文对照；
-- CSV 支持 RFC 4180 引号转义、BOM、分号/制表符分隔；Excel 读第一个 Sheet、数字去尾零；
+- CSV 支持 RFC 4180 引号转义、BOM、分号/制表符分隔；Excel 读第一个 Sheet（可用 `sheet` 指定名称或序号）、数字去尾零；
+  字段里的 `\N` / `NULL` 字面量按空值处理（MySQL dump 常见），引号没闭合、某行比表头多列都会明确报错；
 - **编码只支持 UTF-8**（BOM 可以）。GBK/ANSI **会明确报错**（"CSV 不是合法的 UTF-8…"），不再静默入库乱码 ——
   按提示另存为 UTF-8 后重导（Excel：「另存为 → CSV UTF-8」）；
 - **绝不覆盖已有表**；灌数失败自动删回新建表；默认上限 10 万行 / 200 列 / 512 MB（`recon.agent.file-import.max-rows`、

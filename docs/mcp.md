@@ -6,7 +6,7 @@ MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模
 调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因、调 `recon_define_rule` 换一套对账维度、
 调 `recon_build_model` 把大表先物化好，全程不用人拼 URL。
 
-recon-lens 暴露 9 个工具（启用 Agent 后 14 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
+recon-lens 暴露 9 个工具（启用 Agent 后 15 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
 `ModelBuilder`），所以两条路的结果必然一致，不存在两套逻辑。
 
 ## 启动
@@ -63,7 +63,8 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 | `recon_draft_rule` | `businessDescription`（必填）、`ruleCode`、`operator` | 创建 Agent 会话，后台起草 + 闸门 1 + 影子试算，立即返回会话号。**businessDescription 按结构化逐项写明（键/字段与类型/diffType/容差/表名）一次通过，口语化描述极易被闸门拦截** |
 | `recon_trial_status` | `runId` 或 `ruleCode`+`version` | 试算进度与结论（逐项检查、覆盖等级、可批性）。生效须经 `recon_submit_approval` 审批 |
 | `recon_register_table` | `table`（必填）、`action`（`preview`/`confirm`）、`operator` | 把一张业务表注册进闸门 1 白名单（见下节「动态表注册」） |
-| `recon_import_file` | `file`（必填）、`action`（`preview`/`confirm`）、`table`（confirm 必填）、`operator` | 把导入目录里的 CSV/Excel 导入成表并注册白名单（见下节「文件导入」） |
+| `recon_import_file` | `file`（必填）、`action`（`preview`/`confirm`）、`table`（confirm 必填）、`operator`、`sheet`、`async` | 把导入目录里的 CSV/Excel 导入成表并注册白名单（见下节「文件导入」） |
+| `recon_import_status` | `taskId`（必填） | 查 `recon_import_file(async=true)` 的后台导入进度：QUEUED / RUNNING / SUCCESS（`rows`）/ FAILED（`error`） |
 | `recon_submit_approval` | `ruleCode`、`version`、`decision`（APPROVED/REJECTED）、`confirmedBy`（必填）、`confirmationCode`（**必填**）、`note` | 审批代办：Agent 只转发、不审批。`confirmationCode` 是用户从 REST（`POST /api/rule-reviews/{code}/{ver}/confirmation`）领到的**一次性确认码**（5 分钟过期、只能用一次、绑定 code/version/decision）—— 没有码直接拒绝，模型编不出码也就批不了 |
 
 工具返回的是**给人看的中文文本**，不是 JSON —— Agent 拿到就能直接转述给运营，不用再解释字段含义。
@@ -98,6 +99,10 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
    规范化列名（对照原始表头）、推断的列类型、数据行数；
 2. 人确认后：`recon_import_file {file: "orders.csv", action: "confirm", table: "recon_orders", operator: "alice"}`：
    建表灌数 + 注册，立即生效。
+   大文件（几十万行起）加 `async: true`：立刻返回 `taskId`，用
+   `recon_import_status {taskId: N}` 轮询 QUEUED / RUNNING / SUCCESS（`rows`）/ FAILED（`error`）——
+   同步导入 62 万行约 26 秒，容易撞客户端 30 秒超时。
+   Excel 有多张 Sheet 时用 `sheet` 指定名称或序号（缺省第一张）。
 
 关键行为：
 
@@ -106,7 +111,7 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
   本地自用可设 `recon.agent.file-import.allow-absolute-paths=true` 放行本地绝对路径
   （MCP 连接器场景保持默认关闭：导入工具本质是"读文件→入库"通道，放开等于把整台机器的文件递给智能体）；
   后缀限 `.csv` / `.xlsx` / `.xls`（对绝对路径同样生效）；
-- **类型推断**：采样前 500 行 —— 全整数 → `BIGINT`，有小数 → `DECIMAL(24,6)`，
+- **类型推断**：采样前 2000 行（`recon.agent.file-import.inference-sample-rows`） —— 全整数 → `BIGINT`，有小数 → `DECIMAL(24,6)`，
   形似日期 → `DATETIME`，超 255 字符 → `TEXT`，其余 `VARCHAR`（宽度取实测最大值），
   全空列给 `VARCHAR(255)`（宁可宽，不让灌数因推断激进而失败）；
 - **列名规范化**：只保留 ASCII 字母数字（其余转 `_`）、空表头补 `col_N`、重名加序号 ——

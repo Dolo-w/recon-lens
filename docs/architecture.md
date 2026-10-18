@@ -147,3 +147,19 @@ CI 配置在 `.github/workflows/build.yml`：`./mvnw -B test`（压测被 `suref
   想让规则库完全自己说了算（库里的改动不再被文件覆盖）就设 `recon.seed-rules=false`（此时启动完全不碰规则库）。
   `RuleCatalog` 对已解析规则按 `code` 做缓存，定义、覆盖或下线时失效。
 - 差异表会随批次累积；跨批次对比与归档策略留给使用方。
+
+## 部署边界：单实例、单租户（重要）
+
+这套代码的并发与隔离假设写在下面，**不是"以后再补"，是当前的边界**。越过这些边界不会报错，
+而是以"偶尔对不上/偶尔慢"的形式出现：
+
+| 假设 | 现状 | 越界后会发生什么 |
+| --- | --- | --- |
+| 只有**一个**进程写业务表 | `recon_job`/`recon_shard`/`recon_rule` 都靠乐观状态迁移（`transition(code, version, from, to)` 与分片 CAS），没有分布式锁 | 两个实例同时跑同一规则：重复的任务行、分片重复执行（结果幂等，但浪费资源），审计视图里两条 RUNNING |
+| 只有一个**实例**做巡检 | `PerceptionScheduler` 是进程内 `scheduleWithFixedDelay`，无租约 | N 个实例 → N 份巡检记录与告警（`recon_agent_run` 里能看到重复） |
+| 只有一个**实例**做后台试算/导入 | `TrialTaskRegistry` / `ImportTaskRegistry` 的任务表在内存 | 另一个实例查不到任务号（会明确报"查不到"），但两边的试算/导入会各跑一遍 |
+| 所有使用方共享**一套**表 | 没有 `tenant_id`：任务、规则、差异、知识库、白名单（`recon_registered_table`）全是全局的 | 两个团队共用一个库时，规则互相可见、白名单互相放宽、示例数据互相污染。要隔离就**一个部署一套库** |
+| 演示数据属于**演示**环境 | 默认 profile 用 H2 内存库 + `data.sql` 演示表；MySQL profile 下 `run-demo-on-startup=false`、`seed-rules` 可关 | 在用户库上开演示会往业务库写 demo 行（`bill_left`/`bill_right`）与 demo 任务，与真实批次混在一起 |
+
+要支持多实例，需要补的是：任务租约（`recon_job` 加 `lease_owner/lease_until` + 定时回收）、
+巡检与后台任务选主（DB 行锁或外部调度）、以及租户列（会牵动全部唯一键与索引）。
