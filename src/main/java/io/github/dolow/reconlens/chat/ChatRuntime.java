@@ -74,6 +74,19 @@ public class ChatRuntime {
     /** 等用户确认的写操作。与 pendingAction 同一个槽位，只是值固定为它。 */
     static final String CONFIRM_ACTION = "CONFIRM";
 
+    /** 历史结论有两种说法，等用户挑一个。 */
+    static final String PICK_CLAIM = "PICK_CLAIM";
+
+    /** 用户挑的说法：第一个/前者 或 第二个/后者。 */
+    private static final java.util.regex.Pattern PICK_FIRST =
+            java.util.regex.Pattern.compile("第一|前者|按1|按一|^1$|^a$|^A$");
+    private static final java.util.regex.Pattern PICK_SECOND =
+            java.util.regex.Pattern.compile("第二|后者|按2|按二|^2$|^b$|^B$");
+
+    /** 从一句话里捞规则编码：用来推历史结论的作用域。 */
+    private static final java.util.regex.Pattern RULE_CODE_IN_TEXT =
+            java.util.regex.Pattern.compile("[A-Z][A-Z0-9_]{2,40}");
+
     /** 「是」：确认执行。否定先判，所以"不好"不会被当成"好"。 */
     private static final java.util.regex.Pattern AFFIRM =
             java.util.regex.Pattern.compile("^(确认|好|可以|行|对|是|执行|跑|开始|ok|yes|嗯|没问题|就这么办)");
@@ -135,13 +148,21 @@ public class ChatRuntime {
      */
     private final DraftSlotFiller slotFiller;
 
+    /**
+     * 会话结论板：把定下来的事按主题记住（后写覆盖先写），每轮拼在摘要后面给模型看。
+     *
+     * <p>为什么需要它：压缩只让旧话变短，不会让旧话失效；用户改口之后，摘要里的旧结论
+     * 仍可能被当成当前有效。结论板不压过程，只保留"此刻还算数的那一句"。
+     */
+    private final ChatClaims claims;
+
     public ChatRuntime(ChatSessionService sessions, ChatSummaryService summaries, ToolRegistry registry,
             io.github.dolow.reconlens.recall.RecallAugmenter recall,
             io.github.dolow.reconlens.store.ReconRepository repository,
                        ReconEngine engine, RuleCatalog catalog, ObjectMapper json,
                        io.github.dolow.reconlens.chat.plan.ChatPlanner planner, ChatNarrator narrator,
                        io.github.dolow.reconlens.store.ChatDraftRepository chatDrafts, RuleNamer namer,
-                       DraftSlotFiller slotFiller) {
+                       DraftSlotFiller slotFiller, ChatClaims claims) {
         this.sessions = sessions;
         this.summaries = summaries;
         this.registry = registry;
@@ -155,6 +176,7 @@ public class ChatRuntime {
         this.chatDrafts = chatDrafts;
         this.namer = namer;
         this.slotFiller = slotFiller;
+        this.claims = claims;
     }
 
     /**
@@ -166,12 +188,28 @@ public class ChatRuntime {
         try {
             ChatSession session = sessions.require(scope, sessionId);
             sessions.append(scope, sessionId, "user", message);
+            // 这一句的轮次：append 之后 = 追加前的轮数 + 1。结论板用它标"这是第几轮定的"。
+            int userSeq = session.turnCount() + 1;
 
             ChatSlots slots = readSlots(session);
+            // 历史结论出现两种说法：上一轮已经问过"以哪个为准"，这一句是在回答它。
+            if (PICK_CLAIM.equals(slots.pendingAction())) {
+                Reply picked = resolvePick(session, slots, message, userSeq);
+                if (picked != null) {
+                    ChatSlots next = picked.slots().withIntent(ChatIntent.HELP.name());
+                    sessions.append(scope, sessionId, "assistant", picked.text(),
+                            envelope(ChatIntent.HELP, tools));
+                    saveSlotsWithRetry(scope, sessionId, session.stateRev(), next);
+                    emit(sink, picked, next, sessionId);
+                    return;
+                }
+                // 不是在挑：当新话题处理，别让这个问题永远挂着
+                slots = slots.clearPending();
+            }
             // 两段式的第二段：上一轮问过"确认吗"，这一句就是在回答它。
             // 必须放在规划器之前——"确认/取消"本身不构成任何动作，交给规划器只会被判成 HELP。
             if (CONFIRM_ACTION.equals(slots.pendingAction())) {
-                Confirmed confirmed = handleConfirm(scope, sessionId, slots, message, tools, sink);
+                Confirmed confirmed = handleConfirm(scope, sessionId, slots, message, tools, sink, userSeq);
                 if (confirmed != null) {
                     ChatSlots next = confirmed.reply().slots().withIntent(confirmed.intent().name());
                     sessions.append(scope, sessionId, "assistant", confirmed.reply().text(),
@@ -195,10 +233,14 @@ public class ChatRuntime {
             // 每轮重建一次系统事实（规则目录 + 最近任务 + 表名）：只读元数据，不读任何数据行。
             // 它同时是"给模型看的索引"和"校验模型输出的依据"——两件事用同一份事实，才不会自相矛盾。
             ContextFacts facts = ContextFacts.build(catalog, repository);
+            // 摘要（压缩过的历史）+〔当前有效〕（还没被推翻的结论）+〔历史结论〕（同一操作人跨会话）。
+            // 顺序就是优先级：越靠后越硬，当前会话的结论压过历史结论。
+            String contextText = composeContext(session.summary(), claims.render(sessionId),
+                    sharedBlock(session, slots, message));
             io.github.dolow.reconlens.chat.plan.ChatPlan plan = planner.plan(message, slots, facts, history,
-                            session.summary())
+                            contextText)
                     .orElseThrow(() -> new IllegalStateException("规划器必须给出结果"));
-            ChatIntentRouter.Call call = resumePending(plan.call(), slots, message);
+            ChatIntentRouter.Call call = resumePending(plan.call(), slots, message, tools);
             ChatIntentRouter.Call referenced = applyDraftReference(sessionId, call, message);
             if (referenced != call) {
                 // 「第二条」指的是本会话账本里的第 N 条草稿：解析结果要回执，用户才看得出按哪条理解的
@@ -219,6 +261,27 @@ public class ChatRuntime {
             sink.accept(ChatEvent.plan(plan));
             sink.accept(ChatEvent.intent(call.intent()));
 
+            // 历史结论里同一件事有两种说法：不替用户挑，先把两种摆出来问。
+            // 放在执行之前——按错口径跑一遍，差异清单会把人带沟里，比多问一句贵得多。
+            ChatClaims.Conflict conflict = conflictFor(session, call);
+            if (conflict != null) {
+                java.util.Map<String, String> args = new java.util.LinkedHashMap<>();
+                args.put("intent", call.intent().name());
+                args.put("ruleCode", call.ruleCode());
+                args.put("scope", conflict.scope());
+                args.put("key", conflict.key());
+                args.put("a", conflict.a().value());
+                args.put("b", conflict.b().value());
+                args.put("summary", "历史口径二选一");
+                Reply ask = Reply.text(conflict.describe(), slots.withPending(PICK_CLAIM, args));
+                ChatSlots next = ask.slots().withIntent(ChatIntent.HELP.name());
+                sessions.append(scope, sessionId, "assistant", ask.text(),
+                        envelope(ChatIntent.HELP, tools));
+                saveSlotsWithRetry(scope, sessionId, session.stateRev(), next);
+                emit(sink, ask, next, sessionId);
+                return;
+            }
+
             Reply reply;
             if (slots.hasPending() && message != null && CANCEL.matcher(message).find()) {
                 // 用户在回答"要哪张表"时说"算了"：这是在叫停，不是要重开一个话题
@@ -237,7 +300,7 @@ public class ChatRuntime {
             }
             ChatSlots next = reply.slots().withIntent(call.intent().name());
             // 起草成功才记一条账本：这是"本会话产生过哪些规则版本"的唯一事实来源。
-            recordDraftIfNeeded(sessionId, call, reply, null);
+            recordDraftIfNeeded(session, sessionId, call, reply, null, userSeq);
 
             sessions.append(scope, sessionId, "assistant", reply.text(), envelope(call.intent(), tools));
             saveSlotsWithRetry(scope, sessionId, session.stateRev(), next);
@@ -388,7 +451,8 @@ public class ChatRuntime {
      *
      * <p>写失败只记日志：账本是辅助索引，不能因为它写不进去，把一次已经成功的起草变成错误。
      */
-    private void recordDraftIfNeeded(long sessionId, ChatIntentRouter.Call call, Reply reply, String userWords) {
+    private void recordDraftIfNeeded(ChatSession session, long sessionId, ChatIntentRouter.Call call, Reply reply,
+                                     String userWords, int userSeq) {
         if (call == null || call.intent() != ChatIntent.DEFINE_RULE
                 || reply == null || reply.slots().hasPending()) {
             return;
@@ -397,6 +461,7 @@ public class ChatRuntime {
         if (code == null || sessionId <= 0) {
             return;
         }
+        String operator = session == null ? null : session.operator();
         try {
             // 注意：不能用 catalog.latestIfPresent —— 它只认 ACTIVE，而刚起草的是 DRAFT，
             // 那样账本会永远是空的（实测踩过）。要按"任意状态的最新一版"取。
@@ -414,6 +479,10 @@ public class ChatRuntime {
                 label = label + "，用户说：" + userWords;
             }
             chatDrafts.record(sessionId, code, latest.version(), label);
+            // 同一编码后起草的那些参数，覆盖的应当是同一主题：不能记成两条各说各的。
+            // 主题用编码而不是"第 N 条"——用户改的是这条规则的参数，不是"那次起草"。
+            claims.record(sessionId, operator, "draft:" + code, label, userSeq,
+                    io.github.dolow.reconlens.store.ChatClaimRepository.AUTHORITY_DRAFT);
         } catch (RuntimeException e) {
             log.warn("草稿账本写入失败 code={}：{}", code, e.toString());
         }
@@ -574,7 +643,7 @@ public class ChatRuntime {
      * 也不能被待确认状态挡住。
      */
     private Confirmed handleConfirm(SessionScope scope, long sessionId, ChatSlots slots, String message,
-                                    List<String> tools, Consumer<ChatEvent> sink) {
+                                    List<String> tools, Consumer<ChatEvent> sink, int userSeq) {
         String text = message == null ? "" : message.trim();
         if (text.isEmpty()) {
             return null;
@@ -600,7 +669,8 @@ public class ChatRuntime {
                 "已确认：" + slots.pendingArgs().getOrDefault("summary", describeCall(call)))));
         sink.accept(ChatEvent.intent(call.intent()));
         Reply reply = dispatch(scope, call, slots.clearPending(), text, tools, sink);
-        recordDraftIfNeeded(sessionId, call, reply, slots.pendingArgs().get("spoken"));
+        recordDraftIfNeeded(sessionOrNull(scope, sessionId), sessionId, call, reply,
+                slots.pendingArgs().get("spoken"), userSeq);
         return new Confirmed(Reply.text(reply.text(), reply.slots().clearPending()), call.intent());
     }
 
@@ -721,13 +791,123 @@ public class ChatRuntime {
     }
 
     /**
+     * 规划器的"上下文"一格 = 压缩过的历史 + 此刻还算数的结论。
+     *
+     * <p>顺序是刻意的：摘要先说"过去发生过什么"，结论板再说"现在按哪句"。
+     * 没有摘要时结论板单独成段；两者都没有时返回 {@code null}，与原来"没有摘要"等价。
+     */
+    private static String composeContext(String summary, String claimBlock, String sharedBlock) {
+        String s = summary == null ? "" : summary.trim();
+        String c = claimBlock == null ? "" : claimBlock.trim();
+        String h = sharedBlock == null ? "" : sharedBlock.trim();
+        StringBuilder sb = new StringBuilder();
+        if (!s.isEmpty()) {
+            sb.append(s);
+        }
+        if (!c.isEmpty()) {
+            if (sb.length() > 0) {
+                sb.append("\n\n");
+            }
+            sb.append(c);
+        }
+        if (!h.isEmpty()) {
+            if (sb.length() > 0) {
+                sb.append("\n\n");
+            }
+            sb.append(h);
+        }
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
+    /**
+     * 本轮要查的历史结论作用域：当前规则、当前表，以及这句话里点到的规则编码。
+     *
+     * <p>作用域只从"系统已经确认过的焦点"和"字面上的编码"来：宁可少带，
+     * 不要按相似度把不相干的规则结论塞进来——塞错一条比不塞更糟。
+     */
+    private String sharedBlock(ChatSession session, ChatSlots slots, String message) {
+        if (!claims.sharedEnabled() || session.operator() == null || session.operator().isBlank()) {
+            return "";
+        }
+        java.util.LinkedHashSet<String> scopes = new java.util.LinkedHashSet<>();
+        if (slots.ruleCode() != null) {
+            scopes.add("rule:" + slots.ruleCode());
+        }
+        if (slots.table() != null) {
+            scopes.add("table:" + slots.table());
+        }
+        if (message != null) {
+            java.util.regex.Matcher m = RULE_CODE_IN_TEXT.matcher(message);
+            while (m.find() && scopes.size() < 3) {
+                scopes.add("rule:" + m.group());
+            }
+        }
+        if (scopes.isEmpty()) {
+            return "";
+        }
+        return claims.renderShared(session.operator(), new java.util.ArrayList<>(scopes), session.id());
+    }
+
+    /** 本轮要动的那条规则，历史结论里有没有两种同级不同值的说法。 */
+    private ChatClaims.Conflict conflictFor(ChatSession session, ChatIntentRouter.Call call) {
+        if (!claims.sharedEnabled() || session == null || call == null || call.ruleCode() == null) {
+            return null;
+        }
+        if (call.intent() != ChatIntent.RUN && call.intent() != ChatIntent.BUILD_MODEL
+                && call.intent() != ChatIntent.DEFINE_RULE) {
+            return null;
+        }
+        return claims.conflict(session.operator(), "rule:" + call.ruleCode(), session.id());
+    }
+
+    /**
+     * 用户在"历史口径二选一"里挑了第一个/第二个。
+     *
+     * <p>挑完记一条 {@code OPERATOR_STATED}：从这一刻起，这个作用域里这个主题以它为准；
+     * 别的会话再问到同一件事，看到的也是这一条——它比草稿高一级，但压不过审批过的结论。
+     */
+    private Reply resolvePick(ChatSession session, ChatSlots slots, String message, int userSeq) {
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        String text = message.trim();
+        boolean first = PICK_FIRST.matcher(text).find();
+        boolean second = PICK_SECOND.matcher(text).find();
+        if (first == second) {
+            // 两个都中（"不是第一个是第二个"）或都不中：交给正常路由，别猜
+            return null;
+        }
+        String value = slots.pendingArgs().get(first ? "a" : "b");
+        String key = slots.pendingArgs().get("key");
+        if (value == null || key == null) {
+            return Reply.text("我记不清刚才问的是哪两样了，请再说一遍要按哪个口径。", slots.clearPending());
+        }
+        String operator = session == null ? null : session.operator();
+        long sessionId = session == null ? 0L : session.id();
+        claims.record(sessionId, operator, key, value, userSeq,
+                io.github.dolow.reconlens.store.ChatClaimRepository.AUTHORITY_STATED);
+        return Reply.text("记下了：" + value + "。之后按这个口径走，同一操作人的其他会话也算数。",
+                slots.clearPending());
+    }
+
+    /** 取会话，取不到就当没有（只影响"这条结论能不能跨会话"）。 */
+    private ChatSession sessionOrNull(SessionScope scope, long sessionId) {
+        try {
+            return sessions.require(scope, sessionId);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
      * 上一轮问了"要跑哪条规则"，这一轮用户只回了一个编码 —— 那是答案，不是新指令。
      *
      * <p>只对<b>写动作</b>做续接（跑一次 / 起草），且必须有确定性的证据：
      * 规则编码能在规则库里找到、或者起草参数能被解析出来。找不到就当没续接，
      * 退回正常路由——宁可多问一句，也不要拿"看起来像"的东西去执行。
      */
-    private ChatIntentRouter.Call resumePending(ChatIntentRouter.Call call, ChatSlots slots, String message) {
+    private ChatIntentRouter.Call resumePending(ChatIntentRouter.Call call, ChatSlots slots, String message,
+                                                List<String> tools) {
         if (!slots.hasPending() || message == null || message.isBlank()) {
             return call;
         }
@@ -737,6 +917,15 @@ public class ChatRuntime {
             // 只在 HELP 时接管：说「有哪些规则」这种明确换了话题的句子不抢。
             if (call.intent() == ChatIntent.HELP) {
                 return ChatIntentRouter.Call.of(ChatIntent.DEFINE_RULE);
+            }
+            // 模型有时把"左 bill_left"读成"看 bill_left 这张表"（只读动作）。
+            // 但上一轮问的是起草参数，只可能由起草来回答：只要能解析出参数就继续起草，
+            // 别让只读意图把半截草稿顶掉。短句 + 解析出参数才接管，避免抢走真正的问题。
+            if (call.intent() != ChatIntent.DEFINE_RULE && message.trim().length() <= 24) {
+                List<String> tables = tableNames(call(ToolNames.LIST_TABLES, java.util.Map.of(), tools).text());
+                if (!DraftIntake.parse(message, tables, null).toMap().isEmpty()) {
+                    return ChatIntentRouter.Call.of(ChatIntent.DEFINE_RULE);
+                }
             }
             // 「确认」这种短答：参数还没收齐，没有可确认的动作，应该继续问缺的那一项，
             // 而不是让模型把它猜成"审批"。

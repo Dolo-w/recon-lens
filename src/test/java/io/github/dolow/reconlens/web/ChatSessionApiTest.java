@@ -37,6 +37,9 @@ class ChatSessionApiTest {
     @Autowired
     private WebApplicationContext context;
 
+    @Autowired
+    private io.github.dolow.reconlens.chat.ChatClaims chatClaims;
+
     private MockMvc mvc;
 
     @BeforeEach
@@ -195,5 +198,29 @@ class ChatSessionApiTest {
                 .andExpect(jsonPath("$.turns[3].seq").value(4))
                 .andExpect(jsonPath("$.turnsHasMoreAfter").value(true))
                 .andExpect(jsonPath("$.nextAfter").value(5));
+    }
+
+    @Test
+    void 当前有效结论_按会话开出来_后说的覆盖先说的() throws Exception {
+        String created = mvc.perform(post("/api/chat/sessions")
+                        .header("X-Operator", "alice")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"title\":\"结论板\"}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        int id = JsonPath.read(created, "$.session.id");
+
+        chatClaims.record(id, "draft:ORDER_STATUS_RECON", "维度 order_no，比 amount（第 3 轮）", 3);
+        chatClaims.record(id, "draft:ORDER_STATUS_RECON", "维度 order_no，比 status（第 10 轮）", 10);
+
+        mvc.perform(get("/api/chat/sessions/" + id + "/claims").header("X-Operator", "alice"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].seq").value(10))
+                .andExpect(jsonPath("$.items[0].value", org.hamcrest.Matchers.containsString("比 status")))
+                .andExpect(jsonPath("$.block", org.hamcrest.Matchers.containsString("〔当前有效〕")));
+
+        mvc.perform(get("/api/chat/sessions/" + id + "/claims").header("X-Operator", "bob"))
+                .andExpect(status().isNotFound());
     }
 }

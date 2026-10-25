@@ -47,6 +47,12 @@ public class ChatConfiguration {
         return new io.github.dolow.reconlens.store.ChatDraftRepository(jdbcTemplate);
     }
 
+    /** 会话结论板：同一主题后写的覆盖先写的（"早就说过、后来推翻"只保留后者）。 */
+    @Bean
+    public ChatClaims chatClaims(io.github.dolow.reconlens.store.ChatClaimRepository chatClaimRepository,
+                                 @Value("${recon.chat.shared-claims.enabled:false}") boolean sharedClaimsEnabled) {
+        return new ChatClaims(chatClaimRepository, sharedClaimsEnabled);
+    }
     @Bean
     public ChatSessionService chatSessionService(ChatSessionRepository chatSessionRepository,
                                                  AgentRunRepository agentRunRepository) {
@@ -145,10 +151,10 @@ public class ChatConfiguration {
                                    RuleCatalog ruleCatalog, ObjectMapper objectMapper, ChatPlanner chatPlanner,
                                    ChatNarrator chatNarrator, RuleNamer ruleNamer,
                                    io.github.dolow.reconlens.store.ChatDraftRepository chatDraftRepository,
-                                   DraftSlotFiller draftSlotFiller) {
+                                   DraftSlotFiller draftSlotFiller, ChatClaims chatClaims) {
         return new ChatRuntime(chatSessionService, chatSummaryService, toolRegistry, recallAugmenter,
                 reconRepository, reconEngine, ruleCatalog, objectMapper, chatPlanner, chatNarrator,
-                chatDraftRepository, ruleNamer, draftSlotFiller);
+                chatDraftRepository, ruleNamer, draftSlotFiller, chatClaims);
     }
 
     /** 表单入口：与会话共用 {@link ChatRuntime#submit}，不另起一套动作实现。 */

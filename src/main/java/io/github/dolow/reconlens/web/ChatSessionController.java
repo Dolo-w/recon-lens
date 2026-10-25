@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.web;
 
+import io.github.dolow.reconlens.chat.ChatClaims;
 import io.github.dolow.reconlens.chat.ChatSession;
 import io.github.dolow.reconlens.chat.ChatSessionService;
 import io.github.dolow.reconlens.chat.ChatSummaryService;
@@ -46,12 +47,15 @@ public class ChatSessionController {
     private final ChatSessionService chatSessions;
     private final ChatSummaryService summaries;
     private final io.github.dolow.reconlens.store.ChatDraftRepository chatDrafts;
+    private final ChatClaims claims;
 
     public ChatSessionController(ChatSessionService chatSessions, ChatSummaryService summaries,
-                                 io.github.dolow.reconlens.store.ChatDraftRepository chatDrafts) {
+                                 io.github.dolow.reconlens.store.ChatDraftRepository chatDrafts,
+                                 ChatClaims claims) {
         this.chatSessions = chatSessions;
         this.summaries = summaries;
         this.chatDrafts = chatDrafts;
+        this.claims = claims;
     }
 
     @GetMapping
@@ -125,6 +129,35 @@ public class ChatSessionController {
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sessionId", id);
+        body.put("items", rows);
+        return body;
+    }
+
+    /**
+     * 这个会话的「当前有效结论」：同一主题后写的覆盖先写。
+     *
+     * <p>开出来的理由和草稿账本一样：模型每轮看到的〔当前有效〕到底是什么，人得能查。
+     * 它也正好是排查"旧结论为什么没生效"的入口——旧值不会出现在这里，这正是设计意图。
+     */
+    @GetMapping("/{id}/claims")
+    public Map<String, Object> claims(@RequestHeader(value = "X-Operator", required = false) String operator,
+                                      @PathVariable long id) {
+        SessionScope scope = scope(operator);
+        chatSessions.require(scope, id);
+        List<io.github.dolow.reconlens.store.ChatClaimRepository.ChatClaim> items = claims.items(id);
+        List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (io.github.dolow.reconlens.store.ChatClaimRepository.ChatClaim claim : items) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("key", claim.key());
+            row.put("value", claim.value());
+            row.put("seq", claim.seq());
+            row.put("source", claim.source());
+            row.put("updatedAt", claim.updatedAt());
+            rows.add(row);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("sessionId", id);
+        body.put("block", claims.render(id));
         body.put("items", rows);
         return body;
     }

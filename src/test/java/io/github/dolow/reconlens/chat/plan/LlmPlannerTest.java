@@ -54,6 +54,32 @@ class LlmPlannerTest {
         assertThat(planner.parse("不是 JSON")).isEmpty();
     }
 
+    // ---------------------------------------------------------------- 上下文裁剪
+
+    @Test
+    @DisplayName("上下文超长时只裁摘要，结论板一个字都不能少")
+    void 结论板不被截断() {
+        String history = "很久以前的对账背景。".repeat(200);
+        String claims = io.github.dolow.reconlens.chat.ChatClaims.HEADER
+                + "\n· ORDER_AMOUNT_RECON 起草参数：维度 order_no，比 amount（第 9 轮）";
+        String fitted = LlmPlanner.fitContext(history + "\n\n" + claims);
+
+        assertThat(fitted).contains(io.github.dolow.reconlens.chat.ChatClaims.HEADER).contains("比 amount");
+        assertThat(fitted.length()).isLessThan(history.length());
+        assertThat(fitted).endsWith(claims);
+    }
+
+    @Test
+    @DisplayName("没有结论板时按旧规则截断")
+    void 纯摘要照旧截断() {
+        String fitted = LlmPlanner.fitContext("x".repeat(2000));
+        assertThat(fitted).endsWith("…");
+        assertThat(fitted.length()).isLessThanOrEqualTo(1210);
+
+        assertThat(LlmPlanner.fitContext(null)).isEmpty();
+        assertThat(LlmPlanner.fitContext("短")).isEqualTo("短");
+    }
+
     @Test
     @DisplayName("工具名和中文动作名也能对回枚举")
     void 别名映射() throws Exception {

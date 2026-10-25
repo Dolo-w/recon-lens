@@ -19,6 +19,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(properties = {
         "recon.agent.enabled=true",
         "recon.engine.run-demo-on-startup=false",
+        "recon.chat.shared-claims.enabled=true",
         "spring.datasource.url=jdbc:h2:mem:chat_runtime;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
 })
 class ChatRuntimeTest {
@@ -28,6 +29,9 @@ class ChatRuntimeTest {
 
     @Autowired
     private ChatSessionService sessions;
+
+    @Autowired
+    private ChatClaims claims;
 
     @Test
     void 一句话跑完对账_槽位被记住_追问不必重复任务号() {
@@ -137,6 +141,32 @@ class ChatRuntimeTest {
     }
 
     @Test
+    void 起草确认后_结论板记口径_再起草同编码只留最新一条() {
+        SessionScope scope = SessionScope.of("qianqi");
+        long sessionId = sessions.open(scope, "结论板").id();
+
+        collect(scope, sessionId, "起草个规则");
+        collect(scope, sessionId, "左 bill_left 右 bill_right");
+        collect(scope, sessionId, "order_no");
+        collect(scope, sessionId, "比金额");
+        collect(scope, sessionId, "确认");
+
+        String first = claims.render(sessionId);
+        assertThat(first).contains("〔当前有效〕").contains("比 amount");
+
+        // 同一对表再起草一次、只改比对字段：主题相同（draft:编码），必须覆盖而不是并排
+        collect(scope, sessionId, "起草个规则");
+        collect(scope, sessionId, "左 bill_left 右 bill_right");
+        collect(scope, sessionId, "order_no");
+        collect(scope, sessionId, "比状态");
+        collect(scope, sessionId, "确认");
+
+        String latest = claims.render(sessionId);
+        assertThat(latest).contains("比 status");
+        assertThat(latest).doesNotContain("比 amount");
+    }
+
+    @Test
     void 翻一下顺序_左右对调_并且说清楚已对调() {
         SessionScope scope = SessionScope.of("wushi");
         long sessionId = sessions.open(scope, "翻顺序").id();
@@ -202,6 +232,30 @@ class ChatRuntimeTest {
 
         assertThat(text).contains("规则库现有").contains("生效");
         assertThat(text).doesNotContain("recon_").doesNotContain("ruleCode").doesNotContain("/api/");
+    }
+
+    /**
+     * 同一操作人的两个会话对同一条规则口径说法不同：执行前必须先问，不能猜。
+     *
+     * <p>如果直接挑一条执行，差出来的清单会被错误口径带偏——多问一句比跑错一次便宜。
+     */
+    @Test
+    void 跨会话口径冲突_执行前先反问_选完记成已确认() {
+        SessionScope scope = SessionScope.of("zhao");
+        long old = sessions.open(scope, "上周").id();
+        claims.record(old, "zhao", "draft:BILL_VS_SETTLE", "维度 order_no，比 amount", 4,
+                io.github.dolow.reconlens.store.ChatClaimRepository.AUTHORITY_STATED);
+        long other = sessions.open(scope, "昨天").id();
+        claims.record(other, "zhao", "draft:BILL_VS_SETTLE", "维度 status，比 amount", 6,
+                io.github.dolow.reconlens.store.ChatClaimRepository.AUTHORITY_STATED);
+
+        long now = sessions.open(scope, "今天").id();
+        String ask = text(collect(scope, now, "跑一下 BILL_VS_SETTLE"));
+        assertThat(ask).contains("两种说法").contains("以哪个为准");
+        assertThat(sessions.require(scope, now).stateJson()).contains("PICK_CLAIM");
+
+        String picked = text(collect(scope, now, "第二个"));
+        assertThat(picked).contains("记下了").contains("其他会话");
     }
 
     private List<ChatEvent> collect(SessionScope scope, long sessionId, String message) {

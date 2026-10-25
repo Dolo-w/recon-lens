@@ -48,15 +48,18 @@ public class RuleLifecycleService implements ApprovalRelay {
     private final RuleRepository repository;
     private final RuleCatalog catalog;
     private final ApprovalConfirmationRepository confirmations;
+    private final io.github.dolow.reconlens.store.ChatClaimRepository claims;
     private final ObjectMapper json;
     private final String tokenSecret;
 
     public RuleLifecycleService(RuleRepository repository, RuleCatalog catalog,
-                                ApprovalConfirmationRepository confirmations, ObjectMapper json,
-                                ReconProperties properties) {
+                                ApprovalConfirmationRepository confirmations,
+                                io.github.dolow.reconlens.store.ChatClaimRepository claims,
+                                ObjectMapper json, ReconProperties properties) {
         this.repository = repository;
         this.catalog = catalog;
         this.confirmations = confirmations;
+        this.claims = claims;
         this.json = json;
         String configured = properties.getReview().getTokenSecret();
         if (configured == null || configured.isBlank()) {
@@ -264,12 +267,33 @@ public class RuleLifecycleService implements ApprovalRelay {
         // 放在同一个事务里，因为"谁取代了谁"必须和"这一版生效"是同一个事实。
         int archived = repository.archiveSiblings(code, version);
         catalog.invalidate(code);
+        // 审批通过 = 人给这版口径签了字：写进跨会话结论（HUMAN_APPROVED）。
+        // 同一操作人以后在任一对话里问"这条规则按什么口径"，读到的就是这一条，而不是旧草稿。
+        // 写失败只记日志：它不该让"已经生效"这件事变成一个失败。
+        try {
+            claims.promote(operator, code, version, promotionValue(parse(row)));
+        } catch (RuntimeException e) {
+            log.warn("审批结论写入失败 code={} v{}：{}", code, version, e.toString());
+        }
         if (archived > 0) {
             log.info("规则 {} v{} 生效，归档了 {} 个旧草稿（superseded_by=v{}）", code, version, archived, version);
         }
         log.info("规则 {} v{} 已批准生效（操作人 {}，试算 {}，签字 {}，可批性 {}）",
                 code, version, operator, state.getClass().getSimpleName(),
                 signature == null ? "-" : "有", mode);
+    }
+
+    /** 审批通过后写进结论板的一句话：人话、跟起草时记的那条同一个说法。 */
+    private static String promotionValue(RuleSpec spec) {
+        String key = spec.left() != null && spec.left().keyField() != null
+                ? spec.left().keyField()
+                : (spec.left() != null && !spec.left().dimensionColumns().isEmpty()
+                        ? String.join("+", spec.left().dimensionColumns())
+                        : "?");
+        String compare = spec.compare().stream()
+                .map(io.github.dolow.reconlens.dsl.FieldRule::field)
+                .collect(java.util.stream.Collectors.joining("、"));
+        return "维度 " + key + "，比 " + compare;
     }
 
     /** 驳回：REVIEWING → REJECTED（草稿也可以直接驳回）。 */

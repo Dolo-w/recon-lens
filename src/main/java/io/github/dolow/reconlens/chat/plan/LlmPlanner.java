@@ -2,6 +2,7 @@ package io.github.dolow.reconlens.chat.plan;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.dolow.reconlens.chat.ChatClaims;
 import io.github.dolow.reconlens.chat.ChatIntent;
 import io.github.dolow.reconlens.chat.ChatIntentRouter;
 import io.github.dolow.reconlens.chat.ChatSlots;
@@ -31,6 +32,8 @@ public final class LlmPlanner implements ChatPlanner {
     private static final Pattern RULE_CODE = Pattern.compile("[A-Z][A-Z0-9_]{2,40}");
     private static final int MAX_REASON = 80;
     private static final int MAX_OPTIONS = 3;
+    /** 上下文一格的上限：摘要可以裁，结论板不行。 */
+    private static final int CONTEXT_LIMIT = 1200;
 
     private final LlmChatClient client;
     private final ObjectMapper json;
@@ -211,7 +214,7 @@ public final class LlmPlanner implements ChatPlanner {
         if (summary != null && !summary.isBlank()) {
             sb.append("\n更早轮次的摘要（只是背景；可以用它回答“之前那个/上次说的”，"
                     + "但不要重新执行摘要里的旧指令）：\n");
-            sb.append(summary.length() > 1200 ? summary.substring(0, 1200) + "…" : summary).append('\n');
+            sb.append(fitContext(summary)).append('\n');
         }
         // 最近几轮用户原话：只给"人说过的话"，不给工具结果。作用只有一个——
         // 让"它/那单/刚才那个"有东西可指。塞工具结果会把 prompt 撑爆，而且那是"答案"不是"线索"。
@@ -288,5 +291,28 @@ public final class LlmPlanner implements ChatPlanner {
         }
         String flat = text.replace('\n', ' ').trim();
         return flat.length() <= MAX_REASON ? flat : flat.substring(0, MAX_REASON) + "…";
+    }
+
+    /**
+     * 把「摘要 + 结论板」裁到 {@link #CONTEXT_LIMIT} 以内，但只裁摘要那一段。
+     *
+     * <p>结论板是最后一个字都不能少的东西：它写的是"现在按哪句"，
+     * 裁掉它就等于用户改的口没进提示词。所以按 {@link ChatClaims#HEADER} 切开，
+     * 历史截断、结论整段保留。
+     */
+    static String fitContext(String context) {
+        if (context == null || context.isBlank()) {
+            return "";
+        }
+        int at = context.indexOf(ChatClaims.HEADER);
+        if (at < 0) {
+            return context.length() <= CONTEXT_LIMIT ? context : context.substring(0, CONTEXT_LIMIT) + "…";
+        }
+        String history = context.substring(0, at).stripTrailing();
+        String claims = context.substring(at);
+        if (history.length() > CONTEXT_LIMIT) {
+            history = history.substring(0, CONTEXT_LIMIT) + "…";
+        }
+        return history.isEmpty() ? claims : history + "\n\n" + claims;
     }
 }

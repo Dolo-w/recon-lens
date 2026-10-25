@@ -342,6 +342,26 @@ CREATE TABLE IF NOT EXISTS recon_chat_draft (
   KEY idx_chat_draft_session (session_id, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 会话结论板：同一主题后写的覆盖先写（claim_key 唯一）。
+-- 摘要是"把过程变短"，这张表是"把结论变准"：不存历史版本，只存此刻还算数的那一条。
+CREATE TABLE IF NOT EXISTS recon_chat_claim (
+  id         BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id BIGINT       NOT NULL,
+  claim_key  VARCHAR(160) NOT NULL,
+  claim_value VARCHAR(255) NOT NULL,
+  claim_seq  INT          NOT NULL,
+  source     VARCHAR(16)  NOT NULL DEFAULT 'USER',
+  operator   VARCHAR(64)  NULL,
+  scope      VARCHAR(96)  NULL,
+  authority  VARCHAR(24)  NOT NULL DEFAULT 'OPERATOR_STATED',
+  rule_code  VARCHAR(64)  NULL,
+  rule_version INT        NULL,
+  updated_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_chat_claim (session_id, claim_key),
+  KEY idx_chat_claim_session (session_id, updated_at),
+  KEY idx_chat_claim_shared (operator, scope, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ============ 长期记忆：案例与口径文档 ============
 
 CREATE TABLE IF NOT EXISTS recon_case_memory (

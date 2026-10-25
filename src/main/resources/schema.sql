@@ -345,6 +345,26 @@ CREATE TABLE IF NOT EXISTS recon_chat_draft (
 CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_draft ON recon_chat_draft (session_id, rule_code, rule_version);
 CREATE INDEX IF NOT EXISTS idx_chat_draft_session ON recon_chat_draft (session_id, created_at);
 
+-- 会话结论板：同一主题后写的覆盖先写（claim_key 唯一）。
+-- 摘要是"把过程变短"，这张表是"把结论变准"：不存历史版本，只存此刻还算数的那一条。
+CREATE TABLE IF NOT EXISTS recon_chat_claim (
+  id         BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id BIGINT       NOT NULL,
+  claim_key  VARCHAR(160) NOT NULL,
+  claim_value VARCHAR(255) NOT NULL,
+  claim_seq  INT          NOT NULL,
+  source     VARCHAR(16)  NOT NULL DEFAULT 'USER',
+  operator   VARCHAR(64),
+  scope      VARCHAR(96),
+  authority  VARCHAR(24)  NOT NULL DEFAULT 'OPERATOR_STATED',
+  rule_code  VARCHAR(64),
+  rule_version INT,
+  updated_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_claim ON recon_chat_claim (session_id, claim_key);
+CREATE INDEX IF NOT EXISTS idx_chat_claim_session ON recon_chat_claim (session_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_chat_claim_shared ON recon_chat_claim (operator, scope, updated_at);
+
 -- ============ 长期记忆：案例与口径文档 ============
 
 -- 一条"这类差异最后怎么处理的"。与 recon_diff_kb 的分工：
