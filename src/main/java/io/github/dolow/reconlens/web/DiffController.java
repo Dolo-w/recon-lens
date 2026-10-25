@@ -1,6 +1,7 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.recall.RecallAugmenter;
 import io.github.dolow.reconlens.explain.DiffKnowledgeBase;
 import io.github.dolow.reconlens.explain.ExplainService;
 import io.github.dolow.reconlens.store.ReconRepository;
@@ -26,10 +27,12 @@ public class DiffController {
 
     private final ReconRepository repository;
     private final ExplainService explainService;
+    private final RecallAugmenter recall;
 
-    public DiffController(ReconRepository repository, ExplainService explainService) {
+    public DiffController(ReconRepository repository, ExplainService explainService, RecallAugmenter recall) {
         this.repository = repository;
         this.explainService = explainService;
+        this.recall = recall;
     }
 
     @GetMapping
@@ -38,11 +41,18 @@ public class DiffController {
                                     @RequestParam(defaultValue = "0") int offset,
                                     @RequestParam(defaultValue = "50") int limit) {
         int safeLimit = Math.min(Math.max(limit, 1), MAX_LIMIT);
-        List<DiffRecord> items = repository.listDiffs(jobId, diffType, Math.max(offset, 0), safeLimit);
+        int from = Math.max(offset, 0);
+        List<DiffRecord> items = repository.listDiffs(jobId, diffType, from, safeLimit);
+        long total = repository.countDiffs(jobId, diffType);
+        boolean truncated = from + items.size() < total;
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("total", repository.countDiffs(jobId, diffType));
-        body.put("offset", Math.max(offset, 0));
+        body.put("total", total);
+        body.put("offset", from);
         body.put("limit", safeLimit);
+        // ADR-0001 N7：截断必须留翻页出口，而且要是**结构化字段**——
+        // 只写在文案里（"共 137 条"）机器翻不动，宿主/前端还得去正则。
+        body.put("truncated", truncated);
+        body.put("nextOffset", truncated ? from + items.size() : null);
         body.put("items", items);
         return body;
     }
@@ -61,10 +71,26 @@ public class DiffController {
     @PostMapping("/{id}/explain")
     public Map<String, Object> explainOne(@PathVariable long id) {
         String text = explainService.explain(id);
+        // 归因之后补"同类案例 + 口径依据"；检索失败不影响归因本身
+        String recallText = "";
+        try {
+            DiffRecord diff = repository.findDiff(id).orElse(null);
+            if (diff != null) {
+                String ruleCode = repository.findJob(diff.jobId()).map(j -> j.ruleCode()).orElse(null);
+                // 带上这次任务的数据版本：口径变过的旧案例不该被当成同源经验（ADR-0002）
+                String datasetVersion = repository.jobFacts(diff.jobId())
+                        .map(ReconRepository.JobFacts::datasetVersion).orElse(null);
+                recallText = recall.augment(ruleCode, diff.diffType(), diff.field(), diff.bizKey(),
+                        datasetVersion);
+            }
+        } catch (RuntimeException ignored) {
+            // 记忆只是附加信息，检索挂了也要把归因返回
+        }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", id);
-        body.put("explanation", text);
+        body.put("explanation", text + recallText);
         body.put("explainer", explainService.llmName());
+        body.put("recalled", !recallText.isEmpty());
         return body;
     }
 

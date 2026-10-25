@@ -9,6 +9,7 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -207,6 +208,53 @@ public class AgentRunRepository {
                         (Integer) rs.getObject("cost_ms"),
                         toInstant(rs.getTimestamp("created_at"))),
                 runId);
+    }
+
+    /**
+     * 审计用：按状态与时间窗筛运行记录。
+     *
+     * <p>三个条件都可空——审计是"把账翻出来看"，不该逼人先知道要筛什么。
+     * 时间窗是左闭右开，避免两个相邻窗口把同一条记录算两次。
+     */
+    public List<AgentRun> runs(String status, java.time.Instant from, java.time.Instant to, int limit) {
+        int size = limit <= 0 ? 200 : Math.min(limit, 2000);
+        StringBuilder sql = new StringBuilder("SELECT * FROM recon_agent_run WHERE 1=1");
+        List<Object> args = new ArrayList<>();
+        if (status != null && !status.isBlank()) {
+            sql.append(" AND status = ?");
+            args.add(status.trim());
+        }
+        if (from != null) {
+            sql.append(" AND created_at >= ?");
+            args.add(Timestamp.from(from));
+        }
+        if (to != null) {
+            sql.append(" AND created_at < ?");
+            args.add(Timestamp.from(to));
+        }
+        sql.append(" ORDER BY id DESC LIMIT ?");
+        args.add(size);
+        return jdbc.query(sql.toString(), this::mapRun, args.toArray());
+    }
+
+    private AgentRun mapRun(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        java.sql.Timestamp finished = rs.getTimestamp("finished_at");
+        return new AgentRun(
+                rs.getLong("id"),
+                rs.getString("goal"),
+                rs.getString("trigger_type"),
+                rs.getString("status"),
+                rs.getString("plan_json"),
+                rs.getBoolean("plan_truncated"),
+                rs.getString("rule_code"),
+                (Long) rs.getObject("job_id", Long.class),
+                (Integer) rs.getObject("draft_version", Integer.class),
+                rs.getInt("llm_calls"),
+                rs.getInt("llm_tokens"),
+                rs.getString("error_msg"),
+                rs.getString("created_by"),
+                rs.getTimestamp("created_at").toInstant(),
+                finished == null ? null : finished.toInstant());
     }
 
     public List<AgentRun> recentRuns(int limit) {
