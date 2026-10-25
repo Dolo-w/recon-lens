@@ -15,6 +15,7 @@ import io.github.dolow.reconlens.store.TrialSampleRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import io.github.dolow.reconlens.tool.TableAllowList;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -57,6 +58,17 @@ public class AgentConfiguration {
     public SchemaCatalog schemaCatalog(DataSource dataSource, AgentProperties properties,
                                        RegisteredTableRepository registeredTableRepository) {
         return new SchemaCatalog(dataSource, properties, registeredTableRepository);
+    }
+
+    /**
+     * 白名单的只读视图，给 {@code tool} / {@code chat} 用。
+     *
+     * <p>为什么不让它们直接注入 {@code SchemaCatalog}：本包属于 {@code agent..}，
+     * ArchUnit 禁止其它包依赖它（保证 {@code recon.agent.enabled=false} 能完整退场）。
+     */
+    @Bean
+    public TableAllowList tableAllowList(SchemaCatalog schemaCatalog) {
+        return new SchemaTableAllowList(schemaCatalog);
     }
 
     /** 动态表注册（两段式 preview → confirm）：新用户接入不改配置、不重启。 */

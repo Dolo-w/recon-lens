@@ -51,7 +51,7 @@ class FileImporterTest {
         dataSource = ds;
         jdbc = new JdbcTemplate(ds);
         jdbc.execute("CREATE TABLE IF NOT EXISTS recon_registered_table (id BIGINT AUTO_INCREMENT PRIMARY KEY,"
-                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL,"
+                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL, schema_hash VARCHAR(64), row_count BIGINT,"
                 + " registered_by VARCHAR(64) NOT NULL, registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
 
         properties = new AgentProperties();

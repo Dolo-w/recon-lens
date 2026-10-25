@@ -33,7 +33,7 @@ class SchemaCatalogTest {
         jdbc.execute("DROP TABLE IF EXISTS bill_secret");
         jdbc.execute("CREATE TABLE IF NOT EXISTS bill_secret (id BIGINT PRIMARY KEY, secret VARCHAR(32))");
         jdbc.execute("CREATE TABLE IF NOT EXISTS recon_registered_table (id BIGINT AUTO_INCREMENT PRIMARY KEY,"
-                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL,"
+                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL, schema_hash VARCHAR(64), row_count BIGINT,"
                 + " registered_by VARCHAR(64) NOT NULL, registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
         jdbc.update("DELETE FROM recon_registered_table");
         registry = new io.github.dolow.reconlens.store.RegisteredTableRepository(jdbc);
@@ -104,7 +104,7 @@ class SchemaCatalogTest {
 
     @Test
     void 动态注册的表进入白名单() {
-        registry.upsert("bill_secret", "id,secret", "tester");
+        registry.upsert("bill_secret", "id,secret", "hash", 0L, "tester");
         SchemaCatalog catalog = catalogWithRegistry();   // 配置白名单为空：只剩动态半边
 
         assertThat(catalog.allows("bill_secret")).isTrue();
@@ -115,7 +115,7 @@ class SchemaCatalogTest {
 
     @Test
     void 动态注册不放过配置白名单里的其他表() {
-        registry.upsert("bill_secret", "id,secret", "tester");
+        registry.upsert("bill_secret", "id,secret", "hash", 0L, "tester");
         SchemaCatalog catalog = catalogWithRegistry("bill_left");
 
         assertThat(catalog.allows("bill_left")).isTrue();

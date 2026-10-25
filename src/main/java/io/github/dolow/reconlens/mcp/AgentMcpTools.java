@@ -273,6 +273,9 @@ public class AgentMcpTools {
         McpToolFactory.put(structured, "registered", confirm && p.error() == null);
         McpToolFactory.put(structured, "columns", p.columns());
         McpToolFactory.put(structured, "rows", p.rows());
+        McpToolFactory.put(structured, "change", p.changeText());
+        McpToolFactory.put(structured, "addedColumns", p.added());
+        McpToolFactory.put(structured, "removedColumns", p.removed());
 
         String message;
         if (p.error() != null) {
@@ -280,11 +283,13 @@ public class AgentMcpTools {
         } else if (confirm) {
             message = "表 " + p.table() + " 已注册进闸门 1 白名单（" + p.columns().size() + " 列，登记人 "
                     + (operator == null || operator.isBlank() ? "api" : operator.trim())
-                    + "），立即生效。\n现在可以用 recon_draft_rule 针对这张表起草规则了。";
+                    + "），立即生效。\n" + p.changeText()
+                    + "。\n现在可以用 recon_draft_rule 针对这张表起草规则了。";
         } else {
             message = "表 " + p.table() + " 预览：" + p.columns().size() + " 列"
                     + (p.rows() != null ? "，约 " + p.rows() + " 行" : "")
                     + "。\n列清单：" + String.join(", ", p.columns())
+                    + "\n" + p.changeText()
                     + "\n确认无误后再次调用本工具（action=confirm）完成注册 —— "
                     + "注册会放宽安全边界，必须先经用户确认。";
         }

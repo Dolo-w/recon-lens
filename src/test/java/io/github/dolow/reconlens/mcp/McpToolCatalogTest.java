@@ -42,12 +42,12 @@ class McpToolCatalogTest {
     private final ReconMcpTools tools = mock(ReconMcpTools.class);
 
     private static final List<String> BASE_TOOLS = List.of(
-            "recon_list_rules", "recon_define_rule", "recon_build_model", "recon_run",
+            "recon_list_rules", "recon_list_jobs", "recon_list_tables", "recon_describe_table", "recon_define_rule", "recon_build_model", "recon_run",
             "recon_job_summary", "recon_list_diffs", "recon_explain_diff", "recon_explain_job",
             "recon_diagnose");
 
     @Test
-    void nineToolsWhenAgentIsDisabled() {
+    void twelveToolsWhenAgentIsDisabled() {
         List<String> names = McpServerRunner.toolNames(runnerWithoutAgent().specifications(jsonMapper));
 
         assertThat(names).containsExactlyElementsOf(BASE_TOOLS);
@@ -58,7 +58,7 @@ class McpToolCatalogTest {
      * 而 mock 的 specifications() 返回 null，addAll(null) 什么也不加 —— 数量断言会假绿/假红。
      */
     @Test
-    void fifteenToolsWhenAgentIsEnabled() {
+    void eighteenToolsWhenAgentIsEnabled() {
         AgentMcpTools agent = agent(mock(TrialTaskRegistry.class), mock(AgentRunRepository.class),
                 mock(RuleRepository.class),
                 mock(io.github.dolow.reconlens.agent.TableRegistrar.class),
@@ -66,7 +66,7 @@ class McpToolCatalogTest {
 
         List<String> names = McpServerRunner.toolNames(runnerWithAgent(agent).specifications(jsonMapper));
 
-        assertThat(names).hasSize(15)
+        assertThat(names).hasSize(18)
                 .containsAll(BASE_TOOLS)
                 .contains("recon_draft_rule", "recon_trial_status", "recon_register_table", "recon_import_file",
                         "recon_import_status", "recon_submit_approval");
@@ -157,11 +157,13 @@ class McpToolCatalogTest {
         io.github.dolow.reconlens.agent.TableRegistrar registrar =
                 mock(io.github.dolow.reconlens.agent.TableRegistrar.class);
         when(registrar.preview("t_order")).thenReturn(new io.github.dolow.reconlens.agent.TableRegistrar.Preview(
-                "t_order", List.of("order_no", "amount"), 1234L, null));
+                "t_order", List.of("order_no", "amount"), 1234L, null, List.of("amount"), List.of(), 1000L));
         when(registrar.preview("nope")).thenReturn(new io.github.dolow.reconlens.agent.TableRegistrar.Preview(
-                "nope", List.of(), null, "数据源里查不到这张表的元数据（表不存在，或连接账号没有元数据权限）"));
+                "nope", List.of(), null, "数据源里查不到这张表的元数据（表不存在，或连接账号没有元数据权限）",
+                List.of(), List.of(), null));
         when(registrar.confirm(eq("nope"), any())).thenReturn(new io.github.dolow.reconlens.agent.TableRegistrar.Preview(
-                "nope", List.of(), null, "数据源里查不到这张表的元数据（表不存在，或连接账号没有元数据权限）"));
+                "nope", List.of(), null, "数据源里查不到这张表的元数据（表不存在，或连接账号没有元数据权限）",
+                List.of(), List.of(), null));
         AgentMcpTools agent = agent(mock(TrialTaskRegistry.class), mock(AgentRunRepository.class),
                 mock(RuleRepository.class), registrar, mock(io.github.dolow.reconlens.agent.FileImporter.class));
 
@@ -317,7 +319,8 @@ class McpToolCatalogTest {
     }
 
     private McpServerRunner runnerWithoutAgent() {
-        return new McpServerRunner(tools, List.of());
+        return new McpServerRunner(tools,
+                new io.github.dolow.reconlens.tool.ReconToolRegistry(tools, org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), org.mockito.Mockito.mock(io.github.dolow.reconlens.rule.RuleCatalog.class), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), new io.github.dolow.reconlens.store.TableInspector(new org.springframework.jdbc.core.JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:mcp_catalog")), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class)), org.mockito.Mockito.mock(io.github.dolow.reconlens.store.ReconRepository.class)), List.of());
     }
 
     /** 5 参便捷构造：审批依赖用默认值（api-key 未配置 = fail-closed）。 */
@@ -340,7 +343,8 @@ class McpToolCatalogTest {
     }
 
     private McpServerRunner runnerWithAgent(AgentMcpTools agent) {
-        return new McpServerRunner(tools, List.of(agent));
+        return new McpServerRunner(tools,
+                new io.github.dolow.reconlens.tool.ReconToolRegistry(tools, org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), org.mockito.Mockito.mock(io.github.dolow.reconlens.rule.RuleCatalog.class), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), new io.github.dolow.reconlens.store.TableInspector(new org.springframework.jdbc.core.JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:mcp_catalog")), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class)), org.mockito.Mockito.mock(io.github.dolow.reconlens.store.ReconRepository.class)), List.of(agent));
     }
 
     private McpServerFeatures.SyncToolSpecification spec(String name) {

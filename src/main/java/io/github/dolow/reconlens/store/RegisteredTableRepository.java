@@ -29,20 +29,33 @@ public class RegisteredTableRepository {
         this.jdbc = jdbc;
     }
 
-    public record Registration(String tableName, String columnsSnapshot, String registeredBy, java.time.Instant registeredAt) {
+    public record Registration(String tableName, String columnsSnapshot, String schemaHash, Long rowCount,
+                               String registeredBy, java.time.Instant registeredAt) {
+
+        public java.util.List<String> columns() {
+            return columnsSnapshot == null || columnsSnapshot.isBlank()
+                    ? java.util.List.of()
+                    : java.util.List.of(columnsSnapshot.split(","));
+        }
     }
 
-    /** 幂等注册：同一张表重复注册就覆盖快照与登记人。 */
-    public void upsert(String tableName, String columnsSnapshot, String registeredBy) {
+    /**
+     * 幂等注册：同一张表重复注册就覆盖快照与登记人。
+     *
+     * <p>指纹（{@code schema_hash} + {@code row_count}）一起写：<b>注册那一刻</b>的结构与行数，
+     * 是之后判断"这份数据换过没有"的基准（ADR-0002 D3）。行数拿不到（权限/方言）时写 null，
+     * 不因此挡住注册 —— 但快照里会明确是 null，而不是 0。
+     */
+    public void upsert(String tableName, String columnsSnapshot, String schemaHash, Long rowCount, String registeredBy) {
         int updated = jdbc.update(
-                "UPDATE recon_registered_table SET columns_snapshot = ?, registered_by = ?,"
-                        + " registered_at = CURRENT_TIMESTAMP WHERE table_name = ?",
-                columnsSnapshot, registeredBy, tableName);
+                "UPDATE recon_registered_table SET columns_snapshot = ?, schema_hash = ?, row_count = ?,"
+                        + " registered_by = ?, registered_at = CURRENT_TIMESTAMP WHERE table_name = ?",
+                columnsSnapshot, schemaHash, rowCount, registeredBy, tableName);
         if (updated == 0) {
             jdbc.update("INSERT INTO recon_registered_table"
-                            + " (table_name, columns_snapshot, registered_by, registered_at)"
-                            + " VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-                    tableName, columnsSnapshot, registeredBy);
+                            + " (table_name, columns_snapshot, schema_hash, row_count, registered_by, registered_at)"
+                            + " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                    tableName, columnsSnapshot, schemaHash, rowCount, registeredBy);
         }
     }
 
@@ -51,12 +64,33 @@ public class RegisteredTableRepository {
         return jdbc.queryForList("SELECT table_name FROM recon_registered_table ORDER BY table_name", String.class);
     }
 
+    /** 全部已注册的表（含注册那一刻的列快照、指纹、行数与登记人）。 */
+    public List<Registration> list() {
+        return jdbc.query(
+                "SELECT table_name, columns_snapshot, schema_hash, row_count, registered_by, registered_at"
+                        + " FROM recon_registered_table ORDER BY table_name",
+                (rs, i) -> new Registration(rs.getString("table_name"), rs.getString("columns_snapshot"),
+                        rs.getString("schema_hash"),
+                        rs.getObject("row_count") == null ? null : rs.getLong("row_count"),
+                        rs.getString("registered_by"),
+                        rs.getTimestamp("registered_at") == null ? null : rs.getTimestamp("registered_at").toInstant()));
+    }
+
+    /**
+     * 按<b>列名</b>取，不按位置取。
+     *
+     * <p>这里踩过一次：上一版用 {@code rs.getString(1..5)}，加一列就整体错位，而且错得"像有数据"。
+     * 加列是这类表最常见的变化，按位置取等于给自己埋雷。
+     */
     public Optional<Registration> find(String tableName) {
         List<Registration> rows = jdbc.query(
-                "SELECT table_name, columns_snapshot, registered_by, registered_at"
+                "SELECT table_name, columns_snapshot, schema_hash, row_count, registered_by, registered_at"
                         + " FROM recon_registered_table WHERE table_name = ?",
-                (rs, i) -> new Registration(rs.getString(1), rs.getString(2), rs.getString(3),
-                        rs.getTimestamp(4).toInstant()),
+                (rs, i) -> new Registration(rs.getString("table_name"), rs.getString("columns_snapshot"),
+                        rs.getString("schema_hash"),
+                        rs.getObject("row_count") == null ? null : rs.getLong("row_count"),
+                        rs.getString("registered_by"),
+                        rs.getTimestamp("registered_at") == null ? null : rs.getTimestamp("registered_at").toInstant()),
                 tableName);
         return rows.stream().findFirst();
     }

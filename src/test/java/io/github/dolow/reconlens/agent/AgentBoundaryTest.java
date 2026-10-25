@@ -96,4 +96,39 @@ class AgentBoundaryTest {
             .areAssignableTo(io.github.dolow.reconlens.rule.RuleLifecycleService.class)
             .because("MCP 桥只该拿到 ApprovalRelay（带确认码的窄接口）；直接引用 RuleLifecycleService "
                     + "等于把不校验确认码的 submit/approve 也递给了模型");
+
+    /**
+     * ADR-0001 N2：<b>任何 runtime 都不得直接持有审批服务</b>，会话 runtime 也算。
+     *
+     * <p>这条不是形式主义。{@code ChatRuntime} 是被"一句话"驱动的——模型/路由解析出什么就调什么。
+     * 只要它能拿到 {@code RuleLifecycleService}，用户在会话里说一句"那就批了吧"，
+     * 实现者顺手写一行 {@code lifecycle.approve(...)} 就能把规则推成 ACTIVE，
+     * 而审批链要求的 {@code confirmationCode} + 内容哈希会被完全绕开。
+     * 现在 chat 包里一个引用都没有；这条规则保证它<b>将来也不会有</b>，
+     * 而不是靠"这次我记得"。
+     */
+    @ArchTest
+    static final ArchRule 会话不得直接依赖审批服务 = noClasses()
+            .that().resideInAPackage("io.github.dolow.reconlens.chat..")
+            .should().dependOnClassesThat()
+            .areAssignableTo(io.github.dolow.reconlens.rule.RuleLifecycleService.class)
+            .because("会话是受自然语言驱动的 runtime：能拿到审批服务就能绕过确认码直接发布。"
+                    + "审批只能经 ReconMcpTools.recon_submit_approval → ApprovalRelay（核销确认码）");
+
+    /**
+     * ADR-0001 N8 的编译期那一半：会话仓储只许 {@code chat} 包直接用。
+     *
+     * <p>仓储的方法签名里虽然有 {@code SessionScope}（运行时收窄），但**签名能被绕过**：
+     * 谁都可以 {@code new SessionScope("alice")} 造一个别人的 scope。真正的约束是
+     * "只有一处代码负责构造 scope" —— 也就是 web 层必须经 {@code ChatSessionService}
+     * （它从请求头取 operator），而不是自己 new 一个 scope 去查库。
+     */
+    @ArchTest
+    static final ArchRule 会话仓储只许会话包直接用 = noClasses()
+            .that().resideOutsideOfPackages(
+                    "io.github.dolow.reconlens.chat..", "io.github.dolow.reconlens.store..")
+            .should().dependOnClassesThat()
+            .haveFullyQualifiedName("io.github.dolow.reconlens.store.ChatSessionRepository")
+            .because("收窄条件必须只有一处：web 层自己查仓储意味着它自己构造 SessionScope，"
+                    + "而 operator 来自请求头——绕过校验只差一行 new");
 }

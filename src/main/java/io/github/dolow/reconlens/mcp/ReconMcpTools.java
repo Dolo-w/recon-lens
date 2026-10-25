@@ -125,6 +125,63 @@ public class ReconMcpTools {
     }
 
     /**
+     * 起草的结果事实。
+     *
+     * <p>会话侧按它写「人话回执」，MCP 侧按它拼「给 agent 的操作指引」——两边共用同一份事实，
+     * 但不共用同一段文字：给 agent 的「下一步调 recon_trial_status」不能出现在人机会话里。
+     */
+    public record DraftReceipt(String code, int version, String operator,
+                               String leftDesc, String rightDesc, String dimension, String compares,
+                               Long runId, String trialState, String trialDetail) {
+
+        public Map<String, Object> asMap() {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("code", code);
+            out.put("version", version);
+            out.put("operator", operator);
+            out.put("dimension", dimension);
+            out.put("compares", compares);
+            out.put("trialState", trialState);
+            if (runId != null) {
+                out.put("runId", runId);
+            }
+            if (trialDetail != null) {
+                out.put("trialDetail", trialDetail);
+            }
+            return out;
+        }
+
+        /** 给 MCP 宿主大模型看的回执：带工具名与接口路径，便于它接着调。 */
+        public String agentText() {
+            StringBuilder sb = new StringBuilder(256);
+            sb.append("规则 ").append(code).append(" 已落库为草稿 v").append(version)
+                    .append("（来源 MCP，操作人 ").append(operator).append("）。")
+                    .append("草稿不生效，recon_run 现在还用不了它；对账维度：左 ").append(leftDesc)
+                    .append("，右 ").append(rightDesc).append("，比对字段 ").append(compares).append("。\n");
+            switch (trialState) {
+                case "queued" -> sb.append("影子试算已排队（会话 #").append(runId).append("，单次约 1 分钟）。\n")
+                        .append("下一步：recon_trial_status(ruleCode=").append(code)
+                        .append(", version=").append(version).append(") 或 runId=").append(runId)
+                        .append(" 轮询结论，不要重复提交。\n");
+                case "agent-disabled" -> sb.append("影子试算未跑：Agent 能力未启用（recon.agent.enabled=false），")
+                        .append("请启用后重新提交，或由人在 REST 上跑试算。\n");
+                case "done" -> sb.append("影子试算已完成：可批性 ").append(trialDetail).append("。\n");
+                case "rejected" -> sb.append("影子试算未跑成（闸门拒绝）：").append(trialDetail)
+                        .append("\n规则仍是草稿，修正后可再提交新版本。\n");
+                default -> sb.append("影子试算未排队：").append(trialDetail)
+                        .append("\n规则已落库为草稿，稍后可重试试算。\n");
+            }
+            sb.append("要生效：先把试算结论讲给用户，用户确认后由用户领取一次性确认码")
+                    .append("（POST /api/rule-reviews/").append(code).append("/").append(version)
+                    .append("/confirmation），再调 recon_submit_approval（ruleCode=").append(code)
+                    .append(", version=").append(version)
+                    .append(", decision=APPROVED, confirmedBy=用户标识, confirmationCode=用户给你的码）。")
+                    .append("未启用 Agent 工具时，也可由人在 REST 审批接口走 submit → approve。");
+            return sb.toString();
+        }
+    }
+
+    /**
      * 定义/修改一条规则：body 是规则文件里的那份配置（JSON 或 YAML 都行）。
      *
      * <p><b>MCP 通路不允许直通生效</b>：落库为 DRAFT 草稿并自动跑影子试算，
@@ -133,53 +190,51 @@ public class ReconMcpTools {
      * 否则宿主大模型随手一次 {@code recon_define_rule} 就把三道闸门整个绕过去了。
      */
     public String defineRule(String ruleBody, String operator) {
+        return draft(ruleBody, operator).agentText();
+    }
+
+    /** 只做"落草稿 + 排试算"，产出结构化事实；文字由调用方按读者挑。 */
+    public DraftReceipt draft(String ruleBody, String operator) {
         String body = blankToNull(ruleBody);
         if (body == null) {
             throw new IllegalArgumentException("ruleBody 不能为空");
         }
         String who = blankToNull(operator) == null ? "mcp" : operator;
         RuleCatalog.Resolved resolved = catalog.defineDraftText(body, "MCP 提交的规则", who,
-                RuleOrigin.MCP, null, "MCP recon_define_rule 提交（操作人 " + who + "）");
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("规则 ").append(resolved.spec().code()).append(" 已落库为草稿 v").append(resolved.version())
-                .append("（来源 MCP，操作人 ").append(who).append("）。")
-                .append("草稿不生效，recon_run 现在还用不了它；对账维度：左 ")
-                .append(resolved.spec().left().describe()).append("，右 ")
-                .append(resolved.spec().right().describe())
-                .append("，比对字段 ").append(resolved.spec().compare().stream()
-                        .map(FieldRule::field).collect(Collectors.joining("、"))).append("。\n");
+                RuleOrigin.MCP, null, "通过 MCP 接口提交（操作人 " + who + "）");
+        RuleSpec spec = resolved.spec();
+        String compares = spec.compare().stream()
+                .map(FieldRule::field).collect(Collectors.joining("、"));
+        String dimension = spec.left().dimensionColumns() == null || spec.left().dimensionColumns().isEmpty()
+                ? spec.left().keyField()
+                : String.join("+", spec.left().dimensionColumns());
+        Long runId = null;
+        String trialState;
+        String trialDetail = null;
         try {
             io.github.dolow.reconlens.rule.RuleTrialScheduler scheduler = trialScheduler.getIfAvailable();
             io.github.dolow.reconlens.rule.RuleTrialRunner runner = trialRunner.getIfAvailable();
             if (scheduler != null) {
-                long runId = scheduler.submit(resolved.spec().code(), resolved.version(), who);
-                sb.append("影子试算已排队（会话 #").append(runId).append("，单次约 1 分钟）。\n")
-                        .append("下一步：recon_trial_status(ruleCode=").append(resolved.spec().code())
-                        .append(", version=").append(resolved.version()).append(") 或 runId=").append(runId)
-                        .append(" 轮询结论，不要重复提交。\n");
+                runId = scheduler.submit(spec.code(), resolved.version(), who);
+                trialState = "queued";
             } else if (runner == null) {
-                sb.append("影子试算未跑：Agent 能力未启用（recon.agent.enabled=false），")
-                        .append("请启用后重新提交，或由人在 REST 上跑试算。\n");
+                trialState = "agent-disabled";
             } else {
                 io.github.dolow.reconlens.rule.RuleTrialRunner.Result result =
-                        runner.run(resolved.spec().code(), resolved.version());
-                sb.append("影子试算已完成：可批性 ").append(result.state().approval()).append("，结论 ")
-                        .append(describeTrial(result.state())).append("。\n");
+                        runner.run(spec.code(), resolved.version());
+                trialState = "done";
+                trialDetail = result.state().approval() + "，结论 " + describeTrial(result.state());
             }
         } catch (RuleException e) {
-            sb.append("影子试算未跑成（闸门拒绝）：").append(e.getMessage())
-                    .append("\n规则仍是草稿，修正后可再提交新版本。\n");
+            trialState = "rejected";
+            trialDetail = e.getMessage();
         } catch (IllegalStateException e) {
-            sb.append("影子试算未排队：").append(e.getMessage())
-                    .append("\n规则已落库为草稿，稍后可重试试算。\n");
+            trialState = "failed";
+            trialDetail = e.getMessage();
         }
-        sb.append("要生效：先把试算结论讲给用户，用户确认后由用户领取一次性确认码")
-                .append("（POST /api/rule-reviews/").append(resolved.spec().code()).append("/")
-                .append(resolved.version()).append("/confirmation），再调 recon_submit_approval（ruleCode=")
-                .append(resolved.spec().code()).append(", version=").append(resolved.version())
-                .append(", decision=APPROVED, confirmedBy=用户标识, confirmationCode=用户给你的码）。")
-                .append("未启用 Agent 工具时，也可由人在 REST 审批接口走 submit → approve。");
-        return sb.toString();
+        return new DraftReceipt(spec.code(), resolved.version(), who,
+                spec.left().describe(), spec.right().describe(), dimension, compares,
+                runId, trialState, trialDetail);
     }
 
     private String describeTrial(TrialState state) {
@@ -333,7 +388,9 @@ public class ReconMcpTools {
         }
         long rest = total - diffs.size() - from;
         if (rest > 0) {
-            sb.append("（还有 ").append(rest).append(" 条：调大 limit 或换 offset 继续看）\n");
+            // 直接给出下一个 offset：模型照着填就行，不必自己算 "from + size"
+            sb.append("（还有 ").append(rest).append(" 条；继续看用 offset=")
+                    .append(from + diffs.size()).append("）\n");
         }
         return sb.toString();
     }

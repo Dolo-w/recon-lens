@@ -24,7 +24,7 @@ class RegisteredTableRepositoryTest {
         ds.setPassword("");
         jdbc = new JdbcTemplate(ds);
         jdbc.execute("CREATE TABLE IF NOT EXISTS recon_registered_table (id BIGINT AUTO_INCREMENT PRIMARY KEY,"
-                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL,"
+                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL, schema_hash VARCHAR(64), row_count BIGINT,"
                 + " registered_by VARCHAR(64) NOT NULL, registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
         repository = new RegisteredTableRepository(jdbc);
     }
@@ -36,15 +36,16 @@ class RegisteredTableRepositoryTest {
 
     @Test
     void 首次注册插入_重复注册覆盖() {
-        repository.upsert("t_a", "id,amount", "alice");
+        repository.upsert("t_a", "id,amount", null, null, "alice");
 
         assertThat(repository.tableNames()).containsExactly("t_a");
         assertThat(repository.find("t_a")).hasValueSatisfying(r -> {
             assertThat(r.columnsSnapshot()).isEqualTo("id,amount");
             assertThat(r.registeredBy()).isEqualTo("alice");
+            assertThat(r.columns()).containsExactly("id", "amount");
         });
 
-        repository.upsert("t_a", "id,amount,extra", "bob");
+        repository.upsert("t_a", "id,amount,extra", null, null, "bob");
 
         assertThat(repository.tableNames()).as("同一张表只有一行（当前状态，不是历史）").containsExactly("t_a");
         assertThat(repository.find("t_a")).hasValueSatisfying(r -> {
@@ -54,9 +55,36 @@ class RegisteredTableRepositoryTest {
     }
 
     @Test
+    void 指纹按列名集合哈希_顺序和大小写不影响_少一列就变() {
+        String a = io.github.dolow.reconlens.store.DatasetFingerprints.hash(java.util.List.of("id", "Amount"));
+        String b = io.github.dolow.reconlens.store.DatasetFingerprints.hash(java.util.List.of("amount", "id"));
+        String c = io.github.dolow.reconlens.store.DatasetFingerprints.hash(java.util.List.of("id"));
+        assertThat(a).as("同一个列集合换个顺序不该算结构变了").isEqualTo(b);
+        assertThat(a).as("少一列必须算结构变了").isNotEqualTo(c);
+        assertThat(a).hasSize(64);
+    }
+
+    @Test
+    void 注册时写入的指纹能被读回来() {
+        repository.upsert("t_fp", "id,amount", "abc123", 42L, "alice");
+
+        assertThat(repository.find("t_fp")).hasValueSatisfying(r -> {
+            assertThat(r.schemaHash()).isEqualTo("abc123");
+            assertThat(r.rowCount()).isEqualTo(42L);
+        });
+    }
+
+    @Test
+    void 行数拿不到时存null而不是0() {
+        repository.upsert("t_fp", "id", "abc123", null, "alice");
+
+        assertThat(repository.find("t_fp")).hasValueSatisfying(r -> assertThat(r.rowCount()).isNull());
+    }
+
+    @Test
     void 多张表按名字排序返回() {
-        repository.upsert("t_b", "id", "alice");
-        repository.upsert("t_a", "id", "alice");
+        repository.upsert("t_b", "id", null, null, "alice");
+        repository.upsert("t_a", "id", null, null, "alice");
 
         assertThat(repository.tableNames()).containsExactly("t_a", "t_b");
         assertThat(repository.find("t_missing")).isEmpty();
@@ -69,7 +97,7 @@ class RegisteredTableRepositoryTest {
             wide.append("very_long_column_name_").append(i).append(',');
         }
         // VARCHAR(2048) 装不下 —— 失败要抛出来，静默截断的快照会把审核人骗过去
-        assertThatCode(() -> repository.upsert("t_wide", wide.toString(), "alice"))
+        assertThatCode(() -> repository.upsert("t_wide", wide.toString(), null, null, "alice"))
                 .as("插入应当因列宽超限而失败；若驱动不拦截，说明该环境的前提与本断言不符")
                 .isInstanceOf(RuntimeException.class);
     }

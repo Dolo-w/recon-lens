@@ -37,7 +37,7 @@ class TableRegistrarTest {
                 + " amount DECIMAL(18,2))");
         jdbc.execute("INSERT INTO t_order (id, order_no, amount) VALUES (1, 'A1', 10.00), (2, 'A2', 20.00)");
         jdbc.execute("CREATE TABLE IF NOT EXISTS recon_registered_table (id BIGINT AUTO_INCREMENT PRIMARY KEY,"
-                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL,"
+                + " table_name VARCHAR(128) NOT NULL, columns_snapshot VARCHAR(2048) NOT NULL, schema_hash VARCHAR(64), row_count BIGINT,"
                 + " registered_by VARCHAR(64) NOT NULL, registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
         registry = new RegisteredTableRepository(jdbc);
         registrar = new TableRegistrar(catalog(), registry, jdbc);
