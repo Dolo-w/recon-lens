@@ -12,13 +12,14 @@
 **配置化的对账引擎 + 可对话的对账 Agent。**
 规则即数据：用 YAML 描述"对账维度 + 要比的字段"（复合键、聚合口径、分片策略都是声明式的），提交即生效；
 引擎按业务键流式归并对账，分片并行、断点重跑、差异自动分类归因；
-同时是一个 MCP server —— 15 个工具把全部能力暴露给 Agent，Agent 还能**听懂一句业务描述就起草新规则、影子试算、交人审批**。
+同时是一个 MCP server —— 18 个工具把全部能力暴露给 Agent，Agent 还能**听懂一句业务描述就起草新规则、影子试算、交人审批**。
 
 ---
 
 ## 目录
 
 - [项目介绍](#项目介绍)
+- [三种使用方式（P0 / P1 / P2）](#三种使用方式p0--p1--p2)
 - [引擎使用指导](#引擎使用指导)
 - [Agent 对接指导](#agent-对接指导)
 - [文档索引](#文档索引)
@@ -55,7 +56,7 @@ recon-lens 把这件事拆成四件确定的事：
 flowchart LR
     R[rules/*.yml] -->|RuleParser 校验| CAT[(recon_rule<br/>规则库 / 版本 / 快照)]
     API[REST /api/**] --> CAT
-    AGENT[Agent / MCP 客户端] -->|stdio JSON-RPC| MCP[MCP server<br/>15 个工具]
+    AGENT[Agent / MCP 客户端] -->|stdio JSON-RPC| MCP[MCP server<br/>18 个工具]
     MCP --> CAT
     MCP --> ENG
     MCP --> DB
@@ -68,6 +69,112 @@ flowchart LR
     EXP --> API2[差异查询 / 补归因 / 重试]
     AGENT -.->|起草→试算→审批| LLM[OpenAI 兼容 LLM<br/>规则起草]
 ```
+
+# 三种使用方式（P0 / P1 / P2）
+
+同一个 jar，按环境里有什么自动分三档，能力只增不减：P1 包含 P0，P2 包含 P1。
+
+| 档位 | 环境要求 | 谁在听人话 | 额外得到 | 典型用途 |
+| --- | --- | --- | --- | --- |
+| **P0** 零依赖 | JDK 17，一个进程 | 关键词词表（确定性、毫秒级、0 成本） | 引擎 + REST + 18 个 MCP 工具 + 表单/词表会话 + 审批面板 | 单机、内网、断网环境；只想要一个会跑的引擎 |
+| **P1** 有记忆 | P0 实例持续跑，不用改配置 | 仍是词表 | 滚动摘要、轮次分页、案例记忆、口径检索（关键词；接 bge-m3 则为向量） | 会话很长；要回答"上次为什么差" |
+| **P2** 有模型 | P1 + `DEEPSEEK_API_KEY` | 模型优先，词表只做快路径与降级 | 口语化意图、多轮指代、槽位填充、规则起名、人话回执、摘要归纳、差异归因 | 运营用大白话直接问账 |
+
+三条边界在所有档位都一样，不因有没有模型而改变：
+
+- **模型只建议，不落库**：输出经白名单解析与事实校验，写库的永远是代码；
+- **写动作先回执，后执行**：改规则、跑对账都要用户明确确认；
+- **规则生效必须人批**：草稿 → 影子试算 → 人工批准 → ACTIVE，聊天里说"批准"不算数。
+
+没配 key 时 P2 的路径自动空转（`GET /api/chat/planner` 返回 `modelEnabled=false`），行为与 P1 完全一致——**key 不是启动前提**。
+
+## P0：无模型、无宿主，只用浏览器
+
+```bash
+java -jar target/recon-lens-0.1.0.jar \
+  --server.port=18080 \
+  --recon.agent.enabled=true \
+  --recon.review.api-key=<审批密钥>
+```
+
+- `--recon.agent.enabled=true` 才会注册 Agent 的 6 个 MCP 工具与会话接口（`/api/chat/**`）；关掉就是纯引擎；
+- `--recon.review.api-key` 是审批通道的口令，**不配则审批接口一律 403**（fail-closed）。口令自己定，页面"审批密钥"里填同一个值。
+
+打开 `http://localhost:18080/` 就能完成整条闭环：输入"跑一下 BILL_VS_SETTLE"、点 15 个表单按钮、起草、取审批票、批准。
+
+P0 能做到的：
+
+- 对账全流程：起草 → 试算 → 看差异 → 审批 → 生效实跑，全程不离页面；
+- 词表能听懂的句子：`有哪些规则`、`跑一下 <规则编码>`、`看差异 / 为什么差 / 重跑失败分片`、`查任务 #N`、`有哪些表 / <表名> 有哪些字段`、`起草个规则`；
+- 同样的能力走 REST（`/api/rules`、`/api/reconcile`、`/api/jobs/{id}/diffs` ...）和 MCP stdio（12 个基础工具）；
+- 规则起草走模板骨架：能落库、能跑通，但命名是 `AUTO_` 前缀、不会追问业务语义。
+
+P0 的边界：复杂口语、多轮指代、"这两张表按订单和状态对"这类一句话多参数会触发澄清；回执是模板句，不会归纳。
+
+## P1：同一个实例，自动获得记忆
+
+P0 的实例跑起来之后，不需要任何新配置就会多出这些能力（数据在会话语义里累积）：
+
+- **滚动摘要**：每轮把"任务号 / 规则编码 / 差异 top 坐标"做成坐标行；窗口用到 55% 自动把旧轮折成摘要（`recon.chat.window-tokens`，默认 8000）。可用 `GET /api/chat/sessions/{id}/summary` 查看；
+- **轮次分页**：`GET /api/chat/sessions/{id}?before=<seq>`，长会话不用整段重放；
+- **案例记忆**：`POST /api/cases` 落一条"任务 → 结论"，下次同一数据指纹/规则命中时自动带进上下文（`recon_case_memory`）；
+- **口径检索**：`POST /api/docs` 导入口径文档，`GET /api/docs/search?q=...` 按关键词召回（`recon_doc_chunk` 的全文索引兜底）；会话里（`GET /api/chat/recall`）会把命中的口径带进提问。
+
+想要语义检索再开向量（可选）：
+
+```bash
+--recon.recall.embedding.url=http://127.0.0.1:11434/v1/embeddings \
+--recon.recall.embedding.model=bge-m3 \
+--recon.recall.embedding.dim=1024
+```
+
+没配就按关键词；配了但服务连不上会**降级并标注 `degraded`**，不会丢结果。
+
+## P2：配一把 key，模型接管"听懂"
+
+```bash
+$env:DEEPSEEK_API_KEY="sk-..."
+java -jar target/recon-lens-0.1.0.jar \
+  --server.port=18080 \
+  --recon.agent.enabled=true \
+  --recon.review.api-key=<审批密钥>
+```
+
+模型（默认 `deepseek-chat`，任何 OpenAI 兼容端点都行，`recon.chat.llm.*` 可改）负责：
+
+| 环节 | 模型做什么 | 代码兜什么底 |
+| --- | --- | --- |
+| 意图路由 | 判断这一句是查规则、跑对账、看差异还是起草规则 | 12 字以内的纯查询走词表快路径；模型失败/超时熔断后整段退回词表 |
+| 多轮指代 | 把"这两个"、"就这两张"接到上一问的候选上 | 挂起问题随每轮带给模型；回答不上时按候选做确定性兜底 |
+| 槽位填充 | 把"用订单和状态对金额"拆成左右表/业务键/比对字段 | 候选列白名单校验，值必须来自真实列名 |
+| 规则起名 | 给草稿起 `ORDER_STATUS_RECON` 这类业务名 | 名字格式/唯一性由代码校验，不合格退回 `AUTO_` |
+| 回执与摘要 | 把工具结果翻成人话、把长会话折成几句 | 坐标行（任务号/规则编码/差异 key）由代码写死，不交给模型 |
+| 差异归因 | 解释"差在哪、像什么原因" | 模板归因永远可用；LLM 失败安静降级 |
+
+保护措施（不依赖模型自觉）：
+
+- 模型输出先过白名单/枚举/正则校验，动作不在表里就是 `HELP`；
+- 规则体（YAML/SQL）由确定性模板生成，模型只填参数，不改结构；
+- 连续失败 3 次熔断 5 分钟，期间全部走词表；
+- 写动作（跑对账、改规则）一律先给回执，等"确认"；
+- 审批只认控制台/接口里的人工确认，会话里说"批准"不生效。
+
+注意两套 LLM 配置是分开的：会话路由/回执用 `recon.chat.llm.*`（默认开）；差异归因用 `recon.llm.*`（默认 `enabled=false`，要归因时单独开）。
+
+验证当前档位：
+
+```bash
+curl -s http://localhost:18080/api/chat/planner
+# {"planner":"词表路由（确定性，0 成本） → 模型路由：...（正常）","modelEnabled":true}
+```
+
+## 怎么选
+
+- 只要"规则化、可重跑、能审批"的对账引擎：**P0**，一个进程、零外联；
+- 想让系统自己沉淀"上次怎么差的、口径是什么"：**P1**，什么都不用加，跑起来就有；
+- 想让运营不学任何编码、用大白话直接问账：**P2**，一把 key。
+
+三档共用同一份数据模型与同一套工具实现——切换档位不改代码，只改环境。
 
 # 引擎使用指导
 
@@ -230,6 +337,11 @@ mysql -h <你的实例> -u <用户名> -p recon_demo < src/main/resources/schema
 - 连接池默认 24：每个分片同时持左右两个游标，池子至少要 `2 × recon.engine.parallelism`，否则会出现"全在等连接"的假慢（实测慢 6~11 倍）
 - 大表灌数用 `tools/parallel-load.mjs`（N 并发 + 先灌数后建索引，200 万行实测 168.7s）
 - 规则目录可挂 `file:./rules/` 当种子来源；`recon.seed-rules: false` 可关
+- **业务键排序口径自动对齐**：MySQL 的 `utf8mb4_general_ci` 是大小写不敏感排序（`apple < Zebra`），而 Java 按码元比较（`Zebra < apple`）。
+  归并式对账要求两者一致，否则同一条记录会被两侧各报一次缺失。引擎会自动把业务键包装成
+  `CONVERT(... USING utf16) COLLATE utf16_bin`（与 Java 逐码元严格等价），启动日志会打
+  `业务键排序口径：MySQL：…`。**只有用声明式 `dimension` 的规则才受保护**；写法里自带 `orderBy` 的旧规则会打印一条 WARN，
+  引擎无法替规则作者决定排序语义，请改成声明式维度。
 
 性能数字（百万级 H2 一键复现 + 独立 MySQL 2M×2 真机、`-Xmx256m`）与调优结论见 [docs/benchmark.md](docs/benchmark.md)，
 一句话版：**分片只影响耗时，不影响结果**；函数谓词切分每片全表扫，把分片桶做成索引列（或用 `rangeKey` 范围分片）才能真提速。
@@ -294,13 +406,15 @@ Agent 对表结构零假设 —— 全部结构信息来自表白名单 + 数据
 - `RECON_SQL_INIT=never` 必须设（schema.sql 是 H2 方言）；`DRIVER_CLASS_NAME` 必须显式给；
 - MCP 进程与 Web 实例要连**同一个库** —— 草稿、试算结论、审批全靠共享数据库状态。
 
-## 第 2 步：认识 15 个 MCP 工具
+## 第 2 步：认识 18 个 MCP 工具
 
 基础工具（始终可用）：
 
 | 工具 | 用途 |
 |---|---|
 | `recon_list_rules` | 列出规则库（版本、两侧数据源、维度、比对字段） |
+| `recon_list_tables` | 看数据：规则正在用的表 + 通过对话注册过的表（列、行数、结构哈希、登记人） |
+| `recon_describe_table` | 看字段：列名/类型/可空/主键/行数（`sample=true` 才采样且样例默认脱敏；`advice=true` 给维度与比对字段候选 + 可粘贴骨架） |
 | `recon_define_rule` | 提交规则体（JSON/YAML）落库为**草稿**并自动跑影子试算，经 `recon_submit_approval` 审批后才生效 |
 | `recon_run` | 同步跑一次对账（支持内联 `ruleJson` 试算） |
 | `recon_build_model` | 大表按规则粒度物化成模型表，每轮只读模型表（生成的 `<CODE>__MODEL` 规则默认是**草稿**，试算+审批后才生效；`recon.model.require-approval=false` 可退回直写 ACTIVE） |
@@ -443,7 +557,7 @@ node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项
 | --- | --- |
 | [docs/rule-dsl.md](docs/rule-dsl.md) | 规则 DSL 完整手册（维度 / 聚合 / 分片 / 容差 / 校验规则） |
 | [docs/agent-quickstart.md](docs/agent-quickstart.md) | Agent 本地运行与对接全流程实测指南 |
-| [docs/mcp.md](docs/mcp.md) | MCP 接入：15 个工具入参/返回、动态表注册、文件导入、stdio 坑位 |
+| [docs/mcp.md](docs/mcp.md) | MCP 接入：18 个工具入参/返回、动态表注册、文件导入、stdio 坑位 |
 | [docs/architecture.md](docs/architecture.md) | 架构说明 |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字（文首有结论速览） |
 | [tools/mysql-bench/](tools/mysql-bench/) | 压测装置（SQL / 脚本 / 规则） |
