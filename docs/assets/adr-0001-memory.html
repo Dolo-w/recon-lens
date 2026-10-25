@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>recon-lens 记忆与检索分层</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600&family=Noto+Serif+SC:wght@400&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --color-paper:  #f5f5f5;
+      --color-ink:    #2d3142;
+      --color-muted:  #4f5d75;
+      --color-soft:   #7a8399;
+      --color-accent: #eb6c36;
+      --color-link:   #2e5aa8;
+      --font-sans:    'Geist', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'HarmonyOS Sans SC', system-ui, sans-serif;
+      --font-serif:   'Instrument Serif', 'Noto Serif', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', Georgia, serif;
+      --font-mono:    'Geist Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    }
+    body {
+      font-family: var(--font-sans);
+      background: var(--color-paper);
+      color: var(--color-ink);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 3.5rem 2rem 4rem;
+      -webkit-font-smoothing: antialiased;
+    }
+    .frame { max-width: 1280px; width: 100%; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    .eyebrow {
+      font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500;
+      letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted);
+      margin-bottom: 0.6rem;
+    }
+    h1 {
+      font-family: var(--font-serif);
+      font-size: clamp(1.6rem, 2.2vw + 0.9rem, 2.35rem);
+      font-weight: 400; letter-spacing: -0.01em; line-height: 1.18;
+      margin-bottom: 0.7rem;
+    }
+    .lede {
+      max-width: 74ch; font-size: 0.9rem; line-height: 1.75;
+      color: var(--color-muted); margin-bottom: 1.6rem;
+    }
+    .lede strong { font-weight: 600; color: var(--color-ink); }
+    .lede code { font-family: var(--font-mono); font-size: 0.8rem; color: var(--color-ink); }
+    svg { width: 100%; min-width: 1280px; display: block; }
+
+    svg .snum   { font-family: 'Geist Mono',ui-monospace,Consolas,monospace; font-size: 8px; font-weight: 500; letter-spacing: 0.1em; fill: #7a8399; }
+    svg .sname  { font-family: 'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif; font-size: 12.5px; font-weight: 600; fill: #2d3142; }
+    svg .stool  { font-family: 'Geist Mono',ui-monospace,Consolas,monospace; font-size: 8.5px; font-weight: 500; fill: #4f5d75; }
+    svg .sdesc  { font-family: 'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif; font-size: 9.2px; font-weight: 400; fill: #7a8399; }
+    svg .shead  { font-family: 'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif; font-size: 10px; font-weight: 600; fill: #2d3142; }
+    svg .sbody  { font-family: 'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif; font-size: 9.5px; font-weight: 400; fill: #4f5d75; }
+    svg .sechead{ font-family: 'Geist Mono',ui-monospace,Consolas,monospace; font-size: 8px; font-weight: 500; letter-spacing: 0.14em; fill: #7a8399; }
+    svg .alabel { font-family: 'Geist Mono',ui-monospace,Consolas,monospace; font-size: 8.5px; font-weight: 500; letter-spacing: 0.08em; fill: #7a8399; }
+    svg .legend { font-family: 'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif; font-size: 10px; fill: #4f5d75; }
+
+    .stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 1.6rem; }
+    .card { background: #fff; border: 1px solid rgba(45,49,66,0.12); border-radius: 6px; padding: 16px 18px 18px; }
+    .card .k { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--color-soft); }
+    .card h3 { font-family: var(--font-serif); font-size: 1.02rem; font-weight: 400; letter-spacing: -0.01em; margin: 8px 0 6px; }
+    .card p { font-size: 0.78rem; line-height: 1.62; color: var(--color-muted); }
+    .card p code { font-family: var(--font-mono); font-size: 0.72rem; color: var(--color-ink); }
+    footer.note { margin-top: 1.5rem; font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.1em; color: var(--color-soft); }
+    @media print { body { padding: 0; } .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Memory &amp; retrieval · ADR-0001</p>
+    <h1>记忆不是一层，是三层各查各的</h1>
+    <p class="lede">
+      左列四个梯级从上往下走：三个入口共用一个会话层，会话层去查一次长期记忆，查之前先过一道<strong>检索路由</strong>——
+      能键匹配就别做语义。多数人把“记忆”当成一个向量库，但对账场景里真正需要向量检索的只有最后那张表。
+    </p>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1280 700" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mem-title mem-desc">
+        <title id="mem-title">recon-lens 记忆与检索分层</title>
+        <desc id="mem-desc">四层结构。第一层是入口三档：L0 表单驱动（零模型）、L1 内置会话（POST /api/chat 与 ChatRuntime）、L2 宿主增强（MCP 十五个工具）。三者都汇入第二层短期记忆：槽位 state_json、最近 N 轮原文、滚动摘要（含被否决的方案）。短期记忆向下经过第三层检索路由，按成本递增分三档：键匹配、元数据加全文、元数据加向量。最后落到第四层长期记忆的四张表：结构化事实（recon_rule、recon_table_registry）与归因知识库（recon_diff_kb）走键匹配，案例记忆（recon_case_memory，待建）走元数据过滤加时间衰减，口径文档（recon_doc_chunk，待建）才需要语义向量。长期记忆通过右侧通道写回沉淀到会话层。</desc>
+        <defs>
+          <marker id="ar" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="ar-soft" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#7a8399"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- 层标签 -->
+        <text x="124" y="128" class="sechead" text-anchor="end">01 · 入口</text>
+        <text x="124" y="252" class="sechead" text-anchor="end">02 · 短期</text>
+        <text x="124" y="392" class="sechead" text-anchor="end">03 · 检索</text>
+        <text x="124" y="540" class="sechead" text-anchor="end">04 · 长期</text>
+
+        <!-- ══ 01 入口三档 ══════════════════════════════════════════════ -->
+        <rect x="140" y="92" width="306" height="64" rx="6" fill="rgba(45,49,66,0.05)"/>
+        <rect x="140" y="92" width="306" height="64" rx="6" fill="none" stroke="#7a8399" stroke-width="1"/>
+        <text x="156" y="110" class="snum">L0 · 没有模型</text>
+        <text x="156" y="129" class="sname">表单驱动</text>
+        <text x="156" y="144" class="sdesc">八个固定动作，零 LLM、结果可复现</text>
+
+        <rect x="467" y="92" width="306" height="64" rx="6" fill="#ffffff"/>
+        <rect x="467" y="92" width="306" height="64" rx="6" fill="none" stroke="#2d3142" stroke-width="1"/>
+        <text x="483" y="110" class="snum">L1 · 有 API key</text>
+        <text x="483" y="129" class="sname">内置会话</text>
+        <text x="483" y="144" class="stool">POST /api/chat · ChatRuntime</text>
+
+        <rect x="794" y="92" width="306" height="64" rx="6" fill="#ffffff"/>
+        <rect x="794" y="92" width="306" height="64" rx="6" fill="none" stroke="#2d3142" stroke-width="1"/>
+        <text x="810" y="110" class="snum">L2 · 有宿主</text>
+        <text x="810" y="129" class="sname">宿主增强</text>
+        <text x="810" y="144" class="stool">MCP 15 tools · stdio（+ HTTP 待加）</text>
+
+        <!-- ══ 02 短期记忆 ══════════════════════════════════════════════ -->
+        <rect x="140" y="200" width="960" height="96" rx="6" fill="#ffffff"/>
+        <rect x="140" y="200" width="960" height="96" rx="6" fill="none" stroke="#2d3142" stroke-width="1"/>
+        <text x="156" y="219" class="snum">短期 · 只在会话内 · 按 operator 隔离</text>
+
+        <line x1="460" y1="228" x2="460" y2="284" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+        <line x1="780" y1="228" x2="780" y2="284" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
+
+        <text x="156" y="246" class="shead">槽位 state_json</text>
+        <text x="156" y="263" class="sbody">当前 ruleCode · jobId · shard</text>
+        <text x="156" y="278" class="sdesc">指代靠它解析，不靠模型猜</text>
+
+        <text x="476" y="246" class="shead">最近 N 轮原文</text>
+        <text x="476" y="263" class="sbody">按 token 预算裁剪，先丢最早</text>
+        <text x="476" y="278" class="sdesc">recon_chat_turn</text>
+
+        <text x="796" y="246" class="shead">滚动摘要</text>
+        <text x="796" y="263" class="sbody">窗口占用过 55% 才压，回写 session</text>
+        <text x="796" y="278" class="sdesc">必须记下「被否决的方案」</text>
+
+        <!-- ══ 03 检索路由 ══════════════════════════════════════════════ -->
+        <rect x="140" y="344" width="960" height="88" rx="6" fill="rgba(235,108,54,0.07)"/>
+        <rect x="140" y="344" width="960" height="88" rx="6" fill="none" stroke="#eb6c36" stroke-width="1.2"/>
+        <text x="156" y="363" class="snum" fill="#eb6c36">检索路由 · 先便宜后贵</text>
+
+        <text x="156" y="386" class="shead">① 键匹配</text>
+        <text x="156" y="403" class="sdesc">0 token，命中即用</text>
+        <text x="156" y="418" class="sdesc">对账场景的主力</text>
+
+        <text x="476" y="386" class="shead">② 元数据 + 全文</text>
+        <text x="476" y="403" class="sdesc">先按表/字段/来源过滤</text>
+        <text x="476" y="418" class="sdesc">MySQL FULLTEXT，几千条够用</text>
+
+        <text x="796" y="386" class="shead">③ 元数据 + 向量</text>
+        <text x="796" y="403" class="sdesc">最后手段，别当默认</text>
+        <text x="796" y="418" class="sdesc">只给小体量自由文本</text>
+
+        <!-- ══ 04 长期记忆 ══════════════════════════════════════════════ -->
+        <rect x="140" y="488" width="225" height="96" rx="6" fill="#ffffff"/>
+        <rect x="140" y="488" width="225" height="96" rx="6" fill="none" stroke="#2d3142" stroke-width="1"/>
+        <text x="154" y="506" class="snum">① 键匹配 · 现有</text>
+        <text x="154" y="526" class="sname">结构化事实</text>
+        <text x="154" y="541" class="stool">recon_rule · registry</text>
+        <text x="154" y="558" class="sdesc">维度/容差/白名单</text>
+        <text x="154" y="572" class="sdesc">SQL 精确查，不用检索</text>
+
+        <rect x="385" y="488" width="225" height="96" rx="6" fill="#ffffff"/>
+        <rect x="385" y="488" width="225" height="96" rx="6" fill="none" stroke="#2d3142" stroke-width="1"/>
+        <text x="399" y="506" class="snum">① 键匹配 · 现有</text>
+        <text x="399" y="526" class="sname">归因知识库</text>
+        <text x="399" y="541" class="stool">recon_diff_kb</text>
+        <text x="399" y="558" class="sdesc">cause_key → 原因</text>
+        <text x="399" y="572" class="sdesc">置信度 人 0.9 / 模型 0.5</text>
+
+        <rect x="630" y="488" width="225" height="96" rx="6" fill="#ffffff"/>
+        <rect x="630" y="488" width="225" height="96" rx="6" fill="none" stroke="#7a8399" stroke-width="1" stroke-dasharray="4 4"/>
+        <text x="644" y="506" class="snum">② 过滤 + 衰减 · 待建</text>
+        <text x="644" y="526" class="sname">案例记忆</text>
+        <text x="644" y="541" class="stool">recon_case_memory</text>
+        <text x="644" y="558" class="sdesc">谁定的、为什么这么定</text>
+        <text x="644" y="572" class="sdesc">按时间衰减排序</text>
+
+        <rect x="875" y="488" width="225" height="96" rx="6" fill="#ffffff"/>
+        <rect x="875" y="488" width="225" height="96" rx="6" fill="none" stroke="#7a8399" stroke-width="1" stroke-dasharray="4 4"/>
+        <text x="889" y="506" class="snum">③ 语义 · 待建</text>
+        <text x="889" y="526" class="sname">口径文档</text>
+        <text x="889" y="541" class="stool">recon_doc_chunk</text>
+        <text x="889" y="558" class="sdesc">制度/手册，自由文本</text>
+        <text x="889" y="572" class="sdesc">唯一真要向量的一张</text>
+
+        <!-- ══ 连接线 ══════════════════════════════════════════════════ -->
+        <line x1="293" y1="156" x2="293" y2="200" stroke="#4f5d75" stroke-width="1.1" marker-end="url(#ar)"/>
+        <line x1="620" y1="156" x2="620" y2="200" stroke="#4f5d75" stroke-width="1.1" marker-end="url(#ar)"/>
+        <line x1="947" y1="156" x2="947" y2="200" stroke="#4f5d75" stroke-width="1.1" marker-end="url(#ar)"/>
+
+        <line x1="620" y1="296" x2="620" y2="344" stroke="#4f5d75" stroke-width="1.1" marker-end="url(#ar)"/>
+        <rect x="598" y="311" width="46" height="14" fill="#f5f5f5"/>
+        <text x="626" y="322" class="alabel">查什么</text>
+
+        <line x1="620" y1="432" x2="620" y2="488" stroke="#4f5d75" stroke-width="1.1" marker-end="url(#ar)"/>
+        <rect x="598" y="451" width="46" height="14" fill="#f5f5f5"/>
+        <text x="626" y="462" class="alabel">怎么查</text>
+
+        <!-- 写回通道 -->
+        <path d="M 1100 536 H 1150 V 248 H 1100" fill="none" stroke="#7a8399" stroke-width="1.1" stroke-dasharray="4 4" marker-end="url(#ar-soft)"/>
+        <text x="1166" y="392" class="alabel" transform="rotate(-90 1166 392)" text-anchor="middle">写回 · 沉淀</text>
+
+        <!-- ══ 图例 ════════════════════════════════════════════════════ -->
+        <rect x="140" y="636" width="14" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="162" y="645" class="legend">现有</text>
+
+        <rect x="226" y="636" width="14" height="10" rx="2" fill="#ffffff" stroke="#7a8399" stroke-width="1" stroke-dasharray="3 3"/>
+        <text x="248" y="645" class="legend">待建</text>
+
+        <rect x="312" y="636" width="14" height="10" rx="2" fill="rgba(235,108,54,0.07)" stroke="#eb6c36" stroke-width="1.2"/>
+        <text x="334" y="645" class="legend">关键决策点</text>
+
+        <rect x="440" y="636" width="14" height="10" rx="2" fill="rgba(45,49,66,0.05)" stroke="#7a8399" stroke-width="1"/>
+        <text x="462" y="645" class="legend">零模型下限</text>
+
+        <text x="600" y="645" class="sdesc">三档入口共用同一份 ToolRegistry 与同一套闸门 —— 否则会出现「控制台能批、宿主不能批」</text>
+    <text x="600" y="660" class="sdesc">只有会话按 operator 隔离；案例记忆与口径文档是团队资产，按人隔开等于把知识锁在个人手里</text>
+      </svg>
+    </div>
+
+    <div class="stats">
+      <div class="card">
+        <p class="k">Three doors, one memory</p>
+        <h3>三档入口，一套记忆</h3>
+        <p>L0 表单、L1 内置会话、L2 宿主，共用同一份工具清单和同一套审批闸门。分档只影响「谁在编排」，不影响「能做什么」。</p>
+      </div>
+      <div class="card">
+        <p class="k">Structured first</p>
+        <h3>能键匹配就别做语义</h3>
+        <p>对账里的记忆九成是结构化事实：口径、维度、容差、cause_key。它们用 SQL 精确查，比向量更准、更快、还能解释为什么命中。</p>
+      </div>
+      <div class="card">
+        <p class="k">Who writes wins</p>
+        <h3>写回有主，会话不是签字</h3>
+        <p>人确认写回置信度 0.9，模型自述 0.5。聊天里说过「我同意」不等于审批——审批只认确认码和内容哈希。</p>
+      </div>
+    </div>
+
+    <footer class="note">recon-lens v0.1.0 · 记忆与检索 · ADR-0001 · 与全链路能力图配套</footer>
+  </div>
+</body>
+</html>

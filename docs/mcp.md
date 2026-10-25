@@ -6,7 +6,7 @@ MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模
 调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因、调 `recon_define_rule` 换一套对账维度、
 调 `recon_build_model` 把大表先物化好，全程不用人拼 URL。
 
-recon-lens 暴露 9 个工具（启用 Agent 后 15 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
+recon-lens 暴露 12 个工具（启用 Agent 后 18 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
 `ModelBuilder`），所以两条路的结果必然一致，不存在两套逻辑。
 
 ## 启动
@@ -48,6 +48,8 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 | 工具 | 入参 | 返回 |
 | --- | --- | --- |
 | `recon_list_rules` | 无 | 列出规则库里的对账规则（版本、两侧数据源、对账维度、比对字段、分片与重试配置） |
+| `recon_list_tables` | 无 | 看数据：规则正在用的表 + 通过对话注册进白名单的表（列、行数、结构哈希、登记人；白名单 = 配置 ∪ 已注册表） |
+| `recon_describe_table` | `table`（必填）、`maxColumns` | 看字段：列名/类型/可空/长度、主键、行数（优先注册快照，缺失才现算并标来源）。不在白名单的表按 404 口径拒绝 |
 | `recon_define_rule` | `ruleBody`（必填）、`operator` | 提交一份规则体（JSON 或 YAML）落库为草稿并自动跑影子试算，审批（recon_submit_approval）通过才生效；返回版本号、试算可批性与两侧维度 |
 | `recon_run` | `ruleCode`、`ruleJson`、`batchId`、`remark`（**都非必填**） | 同步跑完一次对账，返回任务号、扫描量、差异分类、分片明细 |
 | `recon_build_model` | `ruleCode`（必填）、`shards`、`operator` | 预处理物化：按规则声明的粒度把两侧数据提前汇总成模型表，并注册一条读模型表的 `<CODE>__MODEL` 规则 |
