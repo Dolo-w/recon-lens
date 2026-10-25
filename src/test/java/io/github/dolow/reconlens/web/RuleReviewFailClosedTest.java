@@ -36,6 +36,19 @@ class RuleReviewFailClosedTest {
 
         assertThatThrownBy(() -> controller.review("ANY_RULE", 1, "wrong"))
                 .isInstanceOf(RuleReviewController.ReviewForbiddenException.class)
-                .hasMessageContaining("X-Api-Key 无效");
+                .hasMessageContaining("不一致");
+    }
+
+    @Test
+    void 被拒时给出可照做的下一步_而不是只报一个错误码() {
+        ReconProperties properties = new ReconProperties();
+        properties.getReview().setApiKey("s3cret");
+        RuleReviewController controller = new RuleReviewController(null, properties);
+
+        RuleReviewController.ReviewForbiddenException e = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> controller.review("ANY_RULE", 1, "wrong"),
+                RuleReviewController.ReviewForbiddenException.class);
+
+        assertThat(e.hint()).contains("--recon.review.api-key");
     }
 }

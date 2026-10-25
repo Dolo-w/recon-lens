@@ -4,6 +4,11 @@ CREATE TABLE IF NOT EXISTS recon_job (
   rule_code     VARCHAR(64)  NOT NULL,
   rule_version  INT,
   rule_snapshot TEXT,
+  -- ADR-0002：本次读的是哪些物理表（表名 + schema_hash + 行数）。
+  -- retry/resume 只读这里钉住的表，绝不重新解析 ACTIVE —— 否则两次不同的对账会被缝成一个 job。
+  data_snapshot TEXT,
+  -- 冗余一份便于列表页展示，格式 "LEFT=SALES_BILL@v2,RIGHT=SETTLE_BILL@v1"；解析仍以 data_snapshot 为准
+  dataset_version VARCHAR(256),
   batch_id      VARCHAR(64)  NOT NULL,
   status        VARCHAR(16)  NOT NULL,
   -- PROD / TRIAL：试算与 canary 也写这张表（要拿分片记录与差异），但绝不能进生产基线
@@ -96,6 +101,9 @@ CREATE TABLE IF NOT EXISTS recon_rule (
   -- 两个哈希缺一不可，它们钉住的是时间轴上的两个不同时刻。
   trial_spec_sha        CHAR(64)    NULL,
   trial_report          MEDIUMTEXT  NULL,
+  -- 归档：被同 code 的新 ACTIVE 版本取代时写这里（不删行，只折叠）
+  superseded_by INT         NULL,
+  superseded_at TIMESTAMP   NULL,
   created_by  VARCHAR(64),
   created_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -250,10 +258,135 @@ CREATE TABLE IF NOT EXISTS recon_registered_table (
   id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
   table_name       VARCHAR(128)  NOT NULL,
   columns_snapshot TEXT          NOT NULL,
+  -- ADR-0002 L1 指纹：列名+类型排序后的 SHA-256、以及注册时的行数。
+  -- 只用来回答「结构变了没、行数变了没」，不许据此声称「数据一致」（见 ADR-0002 N7）。
+  schema_hash      VARCHAR(64),
+  row_count        BIGINT,
   registered_by    VARCHAR(64)   NOT NULL,
   registered_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_registered_table_name ON recon_registered_table (table_name);
+
+-- ADR-0002：数据集身份（逻辑名 → 物理表）。我们管身份，不管内容，数据始终留在客户的表里。
+-- 一个逻辑名只能有一个 ACTIVE 版本：MySQL 8 与 H2 都没有可移植的部分唯一索引，
+-- 所以用 active_slot（ACTIVE 时 = logical_name，其余为 NULL）+ 普通唯一索引来实现。
+CREATE TABLE IF NOT EXISTS recon_dataset (
+  id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  logical_name     VARCHAR(128)  NOT NULL,
+  version          INT           NOT NULL,
+  table_name       VARCHAR(128)  NOT NULL,
+  schema_hash      VARCHAR(64)   NOT NULL,
+  row_count        BIGINT,
+  content_checksum VARCHAR(64),
+  status           VARCHAR(12)   NOT NULL DEFAULT 'ACTIVE',
+  active_slot      VARCHAR(128),
+  supersedes_id    BIGINT,
+  relation         VARCHAR(16)   NOT NULL,
+  source           VARCHAR(16)   NOT NULL,
+  created_by       VARCHAR(64),
+  created_at       TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  note             VARCHAR(512)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dataset_name_ver ON recon_dataset (logical_name, version);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dataset_active ON recon_dataset (active_slot);
+CREATE INDEX IF NOT EXISTS idx_dataset_table ON recon_dataset (table_name);
+
+-- ============ 会话记忆（ADR-0001）：会话 + 原始轮次 ============
+-- 为什么要落库：会话要跨重启，也要让 Web 与 MCP 两个 JVM 看到同一段对话。
+-- 为什么原始轮次单独一张表：压缩只改 session.summary，绝不删 turn（N6 压缩不改审计）。
+-- visibility 三档解决「请假交接」：PRIVATE（默认，只有自己）/ SHARED（同部署可见，只有 owner 能
+-- 继续问）/ HANDOVER（交接后归新 owner）。判据见 ADR-0001 D8：默认共享的泄露是静默的。
+CREATE TABLE IF NOT EXISTS recon_chat_session (
+  id                BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  operator          VARCHAR(64)  NOT NULL,
+  previous_operator VARCHAR(64),
+  visibility        VARCHAR(16)  NOT NULL DEFAULT 'PRIVATE',
+  title             VARCHAR(200),
+  state_json        TEXT,
+  state_rev         INT          NOT NULL DEFAULT 0,
+  summary           TEXT,
+  summary_upto_seq  INT          NOT NULL DEFAULT 0,
+  turn_count        INT          NOT NULL DEFAULT 0,
+  status            VARCHAR(16)  NOT NULL DEFAULT 'OPEN',
+  created_at        TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_at           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- 列表固定是 WHERE (operator = ? OR previous_operator = ? OR visibility = 'SHARED') ORDER BY last_at DESC，
+-- 所以索引按这三个访问路径建；不建就是会话一多就全表扫。
+CREATE INDEX IF NOT EXISTS idx_chat_session_operator ON recon_chat_session (operator, last_at);
+CREATE INDEX IF NOT EXISTS idx_chat_session_previous ON recon_chat_session (previous_operator, last_at);
+CREATE INDEX IF NOT EXISTS idx_chat_session_visibility ON recon_chat_session (visibility, last_at);
+
+CREATE TABLE IF NOT EXISTS recon_chat_turn (
+  id          BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id  BIGINT       NOT NULL,
+  seq         INT          NOT NULL,
+  role        VARCHAR(16)  NOT NULL,
+  content     TEXT,
+  tool_calls  TEXT,
+  tokens      INT,
+  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- seq 在会话内唯一：顺序错乱在复盘时等于"对话不可读"，而唯一索引是唯一拦得住重复 seq 的地方
+CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_turn_seq ON recon_chat_turn (session_id, seq);
+
+-- ============ 会话草稿账本：这个会话起草过哪些规则 ============
+-- 为什么单独一张表而不是塞进 state_json：它是**事实**（发生过），不是焦点（会被覆盖）。
+-- 塞进槽位的话，压缩/覆盖一次，"我改过三版"这件事就没了 —— 而审批人恰恰要拿它做判断。
+CREATE TABLE IF NOT EXISTS recon_chat_draft (
+  id           BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id   BIGINT       NOT NULL,
+  rule_code    VARCHAR(64)  NOT NULL,
+  rule_version INT          NOT NULL,
+  -- 一句人话，给"那条按订单和状态对账的"这类指代当锚点
+  label        VARCHAR(255),
+  created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_draft ON recon_chat_draft (session_id, rule_code, rule_version);
+CREATE INDEX IF NOT EXISTS idx_chat_draft_session ON recon_chat_draft (session_id, created_at);
+
+-- ============ 长期记忆：案例与口径文档 ============
+
+-- 一条"这类差异最后怎么处理的"。与 recon_diff_kb 的分工：
+-- recon_diff_kb 是 cause_key -> 原因（结论级，键匹配）；
+-- 这张表是 具体某条差异 -> 谁、怎么处理、可信度多少（案例级，带时间衰减）。
+CREATE TABLE IF NOT EXISTS recon_case_memory (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    rule_code VARCHAR(128) NOT NULL,
+    diff_type VARCHAR(64) NOT NULL,
+    cause_key VARCHAR(512) NOT NULL,
+    resolution VARCHAR(2000) NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    confidence DECIMAL(3,3) NOT NULL,
+    operator VARCHAR(64),
+    diff_id BIGINT,
+    job_id BIGINT,
+    dataset_version VARCHAR(256),
+    hits INT NOT NULL DEFAULT 0,
+    last_hit_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_case_rule_type ON recon_case_memory (rule_code, diff_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_case_key ON recon_case_memory (cause_key);
+
+-- 口径文档切片。检索方式是"元数据过滤 + 关键词"，向量是可插拔的后续实现（见 docs/backlog.md B5）。
+CREATE TABLE IF NOT EXISTS recon_doc_chunk (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    doc_id VARCHAR(64) NOT NULL,
+    title VARCHAR(256) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    meta_json TEXT,
+    ordinal INT NOT NULL,
+    content VARCHAR(4000) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    embedding BLOB,
+    dim INT,
+    model VARCHAR(64),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_doc_docid ON recon_doc_chunk (doc_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_doc_source ON recon_doc_chunk (source, created_at);
+CREATE INDEX IF NOT EXISTS idx_doc_hash ON recon_doc_chunk (content_hash);
 
 -- ============ 演示数据：账单（我方）与结算（对方）============
 CREATE TABLE IF NOT EXISTS bill_left (

@@ -107,6 +107,7 @@ public final class RuleParser {
         validateDiffTypes(source, compare, missing, duplicate);
         validateMeasureCoverage(source, compare, left);
         validateMeasureCoverage(source, compare, right);
+        validateCompareNotKey(source, compare, left, right);
         warnIfShardMaySplitTheSameKey(source, left, right, shard);
 
         String name = optionalString(root, "name", code);
@@ -264,9 +265,39 @@ public final class RuleParser {
         return measures;
     }
 
+    /**
+     * 比对字段不许落在业务键里。
+     *
+     * <p>按 key 比 key 两侧永远相等，任务会以「SUCCESS / 0 条差异」收场——比直接报错更危险：
+     * 看上去对上了，实际上什么都没核对。这里在规则入口就拒掉，而不是等用户跑出一堆空结果。
+     */
+    private void validateCompareNotKey(String source, List<FieldRule> compare, SideSpec left, SideSpec right) {
+        for (FieldRule rule : compare) {
+            for (String key : keyColumns(left)) {
+                if (key.equalsIgnoreCase(rule.field())) {
+                    throw RuleException.at(source, "比对字段 " + rule.field() + " 已经是业务键的一部分（"
+                            + left.describe() + "）；按业务键比业务键永远没有差异，请换一个真正要核对的列");
+                }
+            }
+            for (String key : keyColumns(right)) {
+                if (key.equalsIgnoreCase(rule.field())) {
+                    throw RuleException.at(source, "比对字段 " + rule.field() + " 已经是业务键的一部分（"
+                            + right.describe() + "）；按业务键比业务键永远没有差异，请换一个真正要核对的列");
+                }
+            }
+        }
+    }
+
+    /** 一侧的业务键列：声明式维度取列列表，否则就是 keyField。 */
+    private static List<String> keyColumns(SideSpec side) {
+        if (side.dimensionColumns() != null && !side.dimensionColumns().isEmpty()) {
+            return side.dimensionColumns();
+        }
+        return side.keyField() == null ? List.of() : List.of(side.keyField());
+    }
+
     /** 聚合维度下比对字段必须由 measures 产出，否则结果集里根本没有这一列。 */
-    private void validateMeasureCoverage(String source, List<FieldRule> compare, SideSpec side) {
-        if (!side.aggregated()) {
+    private void validateMeasureCoverage(String source, List<FieldRule> compare, SideSpec side) {        if (!side.aggregated()) {
             return;
         }
         for (FieldRule rule : compare) {

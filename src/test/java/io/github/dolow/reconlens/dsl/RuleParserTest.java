@@ -234,13 +234,14 @@ class RuleParserTest {
 
     @Test
     void compositeDimensionIsConcatenatedWithTheSeparator() {
-        RuleSpec rule = parse(dimensionRule("  keyType: STRING\n  dimension: [customer_id, status]\n"));
-        assertThat(rule.left().keyExpression()).isEqualTo("CONCAT(customer_id, '|', status)");
-        assertThat(rule.left().dimensionColumns()).containsExactly("customer_id", "status");
+        // 维度里不能再放比对字段（按 key 比 key 没有差异），所以用 customer_id + order_no 验拼接
+        RuleSpec rule = parse(dimensionRule("  keyType: STRING\n  dimension: [customer_id, order_no]\n"));
+        assertThat(rule.left().keyExpression()).isEqualTo("CONCAT(customer_id, '|', order_no)");
+        assertThat(rule.left().dimensionColumns()).containsExactly("customer_id", "order_no");
 
-        RuleSpec custom = parse(dimensionRule("  keyType: STRING\n  dimension: [customer_id, status]\n"
+        RuleSpec custom = parse(dimensionRule("  keyType: STRING\n  dimension: [customer_id, order_no]\n"
                 + "  dimensionSeparator: \"/\"\n"));
-        assertThat(custom.left().keyExpression()).isEqualTo("CONCAT(customer_id, '/', status)");
+        assertThat(custom.left().keyExpression()).isEqualTo("CONCAT(customer_id, '/', order_no)");
     }
 
     @Test
@@ -277,6 +278,19 @@ class RuleParserTest {
         assertThatThrownBy(() -> parse(yaml))
                 .isInstanceOf(RuleException.class)
                 .hasMessageContaining("比对字段 status 必须出现在 measures 里");
+    }
+
+    @Test
+    void rejectsCompareFieldThatIsAlsoTheBusinessKey() {
+        // 按 key 比 key，两侧永远相等：任务会以「SUCCESS / 0 条差异」收场，
+        // 比报错更危险的是它看起来对上了，所以必须在规则入口就拒掉。
+        String yaml = VALID
+                .replace("keyField: order_no", "keyField: status")
+                .replace("orderBy: order_no", "orderBy: status");
+
+        assertThatThrownBy(() -> parse(yaml))
+                .isInstanceOf(RuleException.class)
+                .hasMessageContaining("业务键");
     }
 
     /** 把 VALID 左侧的 keyField 写法换成声明式维度写法，其余段落保持原样。 */

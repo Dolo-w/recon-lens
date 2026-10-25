@@ -167,32 +167,59 @@ public class RuleReviewController {
     private void requireApiKey(String apiKey) {
         String configured = properties.getReview().getApiKey();
         if (configured == null || configured.isBlank()) {
-            throw new ReviewForbiddenException("未配置 recon.review.api-key，审批接口已关闭"
-                    + "（审批是能改\"钱对不对\"判定口径的操作，没配密钥时一律拒绝）");
+            throw new ReviewForbiddenException("审批接口已关闭：服务端没配 recon.review.api-key",
+                    "启动时加 --recon.review.api-key=你的口令（或环境变量 RECON_REVIEW_API_KEY）再重启。"
+                            + "没配密钥时一律拒绝是刻意的 fail-closed，不是配置坏了。");
         }
         if (apiKey == null || !MessageDigest.isEqual(
                 apiKey.getBytes(StandardCharsets.UTF_8), configured.getBytes(StandardCharsets.UTF_8))) {
-            throw new ReviewForbiddenException("X-Api-Key 无效");
+            throw new ReviewForbiddenException("X-Api-Key 与服务端配的审批密钥不一致",
+                    "页面上「审批密钥」要填启动参数 --recon.review.api-key 的值，一字不差（大小写、空格都算）；"
+                            + "不知道当前值就去看启动这个实例的命令行。");
         }
     }
 
     private static void requireOperator(String operator) {
         if (operator == null || operator.isBlank()) {
-            throw new ReviewForbiddenException("必须带 X-Operator：审计链上没有操作人的审批等于没有审批");
+            throw new ReviewForbiddenException("请求没带操作人（X-Operator）",
+                    "在页面右上角「操作人」里填一个名字再点一次；用 curl 时加头 "
+                            + "-H \"X-Operator: 你的名字\"。审计链上没有操作人的审批等于没有审批。");
         }
     }
 
     /** 审批鉴权失败：403，不是 500 —— 调用方要能区分"没权限"和"服务坏了"。 */
     public static class ReviewForbiddenException extends RuntimeException {
+        private final String hint;
+
         public ReviewForbiddenException(String message) {
+            this(message, null);
+        }
+
+        public ReviewForbiddenException(String message, String hint) {
             super(message);
+            this.hint = hint;
+        }
+
+        public String hint() {
+            return hint;
         }
     }
 
     @ExceptionHandler(ReviewForbiddenException.class)
-    public ResponseEntity<Map<String, Object>> forbidden(ReviewForbiddenException e) {
-        return ResponseEntity.status(HttpStatus.FORBIDDEN)
-                .body(Map.of("error", "FORBIDDEN", "message", e.getMessage()));
+    public ResponseEntity<Map<String, Object>> forbidden(ReviewForbiddenException e,
+                                                         jakarta.servlet.http.HttpServletRequest request) {
+        // 403 只留在响应里没人看得到原因；日志里记一笔"谁、哪条路径、为什么被拒"
+        org.slf4j.LoggerFactory.getLogger(RuleReviewController.class).warn(
+                "审批鉴权失败 {} {}：{}（带密钥：{}，带操作人：{}）",
+                request.getMethod(), request.getRequestURI(), e.getMessage(),
+                request.getHeader("X-Api-Key") != null, request.getHeader("X-Operator") != null);
+        java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("error", "FORBIDDEN");
+        body.put("message", e.getMessage());
+        if (e.hint() != null) {
+            body.put("hint", e.hint());
+        }
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
     }
 
     @ExceptionHandler(RuleException.class)

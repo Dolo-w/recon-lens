@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.domain.RuleLifecycle;
 import io.github.dolow.reconlens.domain.RuleOrigin;
+import io.github.dolow.reconlens.domain.TrialState;
 import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.dsl.RuleParser;
 import io.github.dolow.reconlens.dsl.RuleRegistry;
@@ -254,8 +255,69 @@ public class RuleCatalog {
         return repository.listLatest().stream().map(RuleRepository.RuleRow::code).toList();
     }
 
+    /** 每个 code 的最新一版，不分状态（草稿/审核中也会返回），给"这条规则存在吗"用。 */
+    public List<Resolved> latestAnyState() {
+        List<Resolved> out = new ArrayList<>();
+        for (String code : repository.listCodes()) {
+            List<RuleRepository.RuleRow> rows = repository.listVersions(code);
+            if (rows.isEmpty()) {
+                continue;
+            }
+            try {
+                out.add(toResolved(rows.get(0)));
+            } catch (RuntimeException e) {
+                log.warn("规则 {} 的正文解析失败，latestAnyState 跳过", code, e);
+            }
+        }
+        return out;
+    }
+
+    /** 一条规则的最新版清单行（任一状态，不只 ACTIVE）——回答"有什么草稿/待审"用。 */
+    public record RuleSummary(String code, int version, RuleLifecycle lifecycle, String name, String description) {
+
+        public boolean active() {
+            return lifecycle == RuleLifecycle.ACTIVE;
+        }
+    }
+
+    /**
+     * 每个 code 的最新一版，不管它是不是生效版。
+     *
+     * <p>{@link #allResolved()} 只给 ACTIVE，于是"现在有啥草稿规则"只能答出 0 条或答非所问；
+     * 清单类问题要的是"这一版到哪一步了"，所以这里带 lifecycle。
+     */
+    public List<RuleSummary> summaries() {
+        List<RuleSummary> out = new ArrayList<>();
+        for (String code : repository.listCodes()) {
+            List<RuleRepository.RuleRow> rows = repository.listVersions(code);
+            if (rows.isEmpty()) {
+                continue;
+            }
+            RuleRepository.RuleRow head = rows.get(0);
+            try {
+                RuleSpec spec = toResolved(head).spec();
+                out.add(new RuleSummary(code, head.version(), head.lifecycle(), spec.name(), spec.description()));
+            } catch (RuntimeException e) {
+                // 正文解析不了不该让整张清单挂掉；这一条跳过，日志里留痕
+                log.warn("规则 {} v{} 的正文解析失败，规则清单里跳过", code, head.version(), e);
+            }
+        }
+        return out;
+    }
+
     public List<RuleRepository.RuleRow> versions(String code) {
         return repository.listVersions(code);
+    }
+
+    /**
+     * 某个版本的试算结论（没跑过就是 {@link TrialState.NotRun}）。
+     *
+     * <p>放在这里而不是让会话层直接拿 {@code RuleRepository}：对话只关心"这版能不能批"，
+     * 而"能不能批"的唯一判据是 {@link TrialState#approval()}——多绕一层到仓库去读原始列，
+     * 迟早会有人顺手在调用方写一个 {@code if (verdict == PASS)} 出来，那就成了第二套判定。
+     */
+    public java.util.Optional<TrialState> trialState(String code, int version) {
+        return repository.findTrial(code, version).map(RuleRepository.TrialRecord::state);
     }
 
     public boolean exists(String code) {

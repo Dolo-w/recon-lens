@@ -135,6 +135,16 @@ public class RuleRepository {
                 mapper());
     }
 
+    /**
+     * 规则库里出现过的所有 code（含草稿/审核中，只排除整条下线的）。
+     *
+     * <p>{@link #listLatest()} 只认 ACTIVE，所以"有什么草稿"这类问题必须走这里——否则草稿永远不出现。
+     */
+    public List<String> listCodes() {
+        return jdbc.queryForList(
+                "SELECT DISTINCT code FROM recon_rule WHERE enabled = TRUE ORDER BY code", String.class);
+    }
+
     public List<RuleRow> listVersions(String code) {
         return jdbc.query("SELECT " + COLUMNS + " FROM recon_rule WHERE code = ? ORDER BY version DESC",
                 mapper(), code);
@@ -143,6 +153,21 @@ public class RuleRepository {
     /** 下线一个规则的全部版本（规则列表里不再出现）。 */
     public int disable(String code) {
         return jdbc.update("UPDATE recon_rule SET enabled = FALSE WHERE code = ?", code);
+    }
+
+    /**
+     * 归档：把同 code 下还没生效的旧版本折叠起来（{@code SUPERSEDED}）。
+     *
+     * <p>只动 {@code DRAFT}/{@code REVIEWING}：{@code ACTIVE} 是历史生效版，{@code REJECTED}
+     * 已经有人工结论，两者都不该被"被取代"改写。归档不删行——审计要能回答"改过几版、每版差在哪"。
+     *
+     * @return 被归档的版本数
+     */
+    public int archiveSiblings(String code, int approvedVersion) {
+        return jdbc.update("UPDATE recon_rule SET lifecycle = 'SUPERSEDED', superseded_by = ?, "
+                        + "superseded_at = CURRENT_TIMESTAMP WHERE code = ? AND version <> ? "
+                        + "AND lifecycle IN ('DRAFT', 'REVIEWING')",
+                approvedVersion, code, approvedVersion);
     }
 
     /**

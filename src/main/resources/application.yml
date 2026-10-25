@@ -52,6 +52,39 @@ recon:
     timeout-seconds: 30
     # 单次批量归因最多处理的差异条数
     batch-limit: 50
+  # 看表结构（recon_describe_table / GET /api/tables/{table}）的样例值开关。
+  # 默认 false = 样例一律打码（手机、证件、邮箱、卡号、姓名、地址）。
+  # 打开等于让"看字段"接口把原文吐给任何能调它的人 —— 生产上除非有脱敏视图，否则别开。
+  schema:
+    sample-raw: false
+  # 会话（内建对话）相关。没有 key 也全部可用：模型只做"兜底理解"，词表那一层永远在。
+  chat:
+    # 摘要压缩的窗口假设（token）：只影响"什么时候开始压"，取小一点只会压得更早，不会丢数据。
+    window-tokens: 8000
+    summary:
+      # 归纳层：有 key 时给摘要补「结论/未决」两段（事实与坐标仍由截断版生成）。
+      # 关掉或没有 key 时退回纯截断，行为与 P1 一致。
+      llm: true
+    llm:
+      # 意图理解用的模型。与上面 recon.llm（归因说明）分开配：路由要快、要便宜、要稳定返回 JSON，
+      # 归因要写得像人话，两者的模型和温度都不该是同一个。
+      # 不填 api-key 就只用词表路由，行为与 P1 完全一致。
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:}
+      model: deepseek-chat
+      timeout-ms: 8000
+      # 把引擎/工具的输出改写成"先一句结论、再明细"的人话。关掉只影响读法，不影响听懂。
+      # 没有 api-key 时这一层自动空转，行为与 P1 一致。
+      summarize: true
+  agent:
+    schema:
+      # 闸门 1 的表白名单，fail-closed：没列出来的表，起草的规则一律被拒。
+      # 这里只放**演示库**里那两张账单表，目的是让「clone 下来 → 起草一条规则 → 试算」
+      # 这条链路开箱可用；生产档（application-mysql.yml）故意留空，必须由部署方显式列出。
+      # 新增业务表也可以不写在这里，改用 recon_register_table 动态注册（落到 recon_registered_table）。
+      tables:
+        - bill_left
+        - bill_right
 
 logging:
   level:

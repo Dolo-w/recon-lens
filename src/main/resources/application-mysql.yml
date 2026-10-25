@@ -40,6 +40,11 @@ recon:
     model: ${RECON_LLM_MODEL:gpt-4o-mini}
     timeout-seconds: 30
     batch-limit: 50
+  agent:
+    schema:
+      # 生产档故意留空：闸门 1 是 fail-closed 的，要放行哪些表必须由部署方显式配置
+      # （或用 recon_register_table 动态注册）。写在这里的默认值只服务 H2 演示库。
+      tables: []
 
 logging:
   level:

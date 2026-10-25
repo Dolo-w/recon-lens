@@ -21,7 +21,15 @@ public enum RuleLifecycle {
     ACTIVE,
 
     /** 驳回：留档供复盘与 few-shot，不参与运行。 */
-    REJECTED;
+    REJECTED,
+
+    /**
+     * 归档：被同 code 的新 ACTIVE 版本取代。
+     *
+     * <p>为什么不是"删除"：审计要能回答"这条规则被改过几版、每版差在哪"。
+     * 归档只是<b>折叠</b>（列表默认不显示），行还在，{@code superseded_by} 指向取代它的那一版。
+     */
+    SUPERSEDED;
 
     public static RuleLifecycle from(String raw) {
         if (raw == null || raw.isBlank()) {

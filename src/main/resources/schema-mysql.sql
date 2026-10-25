@@ -11,6 +11,11 @@ CREATE TABLE IF NOT EXISTS recon_job (
   rule_code     VARCHAR(64)  NOT NULL,
   rule_version  INT,
   rule_snapshot MEDIUMTEXT,
+  -- ADR-0002：本次读的是哪些物理表（表名 + schema_hash + 行数）。
+  -- retry/resume 只读这里钉住的表，绝不重新解析 ACTIVE —— 否则两次不同的对账会被缝成一个 job。
+  data_snapshot TEXT,
+  -- 冗余一份便于列表页展示，格式 "LEFT=SALES_BILL@v2,RIGHT=SETTLE_BILL@v1"；解析仍以 data_snapshot 为准
+  dataset_version VARCHAR(256),
   batch_id      VARCHAR(64)  NOT NULL,
   status        VARCHAR(16)  NOT NULL,
   -- PROD / TRIAL：试算与 canary 也写这张表，但绝不能进生产基线
@@ -99,6 +104,9 @@ CREATE TABLE IF NOT EXISTS recon_rule (
   -- "试算完 → 改内容 → 重新提交 → 用新 token 批准"：token 对得上，trial 结论却是旧的。
   trial_spec_sha        CHAR(64)    NULL,
   trial_report          MEDIUMTEXT  NULL,
+  -- 归档：被同 code 的新 ACTIVE 版本取代时写这里（不删行，只折叠）
+  superseded_by INT         NULL,
+  superseded_at TIMESTAMP   NULL,
   created_by  VARCHAR(64),
   created_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   -- 规则版本：同一个 code 的每一版都留档，任务表把生效版本钉住，重跑才能复现当时的语义
@@ -249,9 +257,128 @@ CREATE TABLE IF NOT EXISTS recon_registered_table (
   id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
   table_name       VARCHAR(128)  NOT NULL,
   columns_snapshot TEXT          NOT NULL,
+  -- ADR-0002 L1 指纹：列名+类型排序后的 SHA-256、以及注册时的行数。
+  -- 只用来回答「结构变了没、行数变了没」，不许据此声称「数据一致」（见 ADR-0002 N7）。
+  schema_hash      VARCHAR(64),
+  row_count        BIGINT,
   registered_by    VARCHAR(64)   NOT NULL,
   registered_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_registered_table (table_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ADR-0002：数据集身份（逻辑名 → 物理表）。我们管身份，不管内容，数据始终留在客户的表里。
+-- 一个逻辑名只能有一个 ACTIVE 版本：MySQL 8 与 H2 都没有可移植的部分唯一索引，
+-- 所以用 active_slot（ACTIVE 时 = logical_name，其余为 NULL）+ 普通唯一索引来实现。
+CREATE TABLE IF NOT EXISTS recon_dataset (
+  id               BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  logical_name     VARCHAR(128)  NOT NULL,
+  version          INT           NOT NULL,
+  table_name       VARCHAR(128)  NOT NULL,
+  schema_hash      VARCHAR(64)   NOT NULL,
+  row_count        BIGINT,
+  content_checksum VARCHAR(64),
+  status           VARCHAR(12)   NOT NULL DEFAULT 'ACTIVE',
+  active_slot      VARCHAR(128),
+  supersedes_id    BIGINT,
+  relation         VARCHAR(16)   NOT NULL,
+  source           VARCHAR(16)   NOT NULL,
+  created_by       VARCHAR(64),
+  created_at       TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  note             VARCHAR(512),
+  UNIQUE KEY uk_dataset_name_ver (logical_name, version),
+  UNIQUE KEY uk_dataset_active (active_slot),
+  KEY idx_dataset_table (table_name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ 会话记忆（ADR-0001）：会话 + 原始轮次 ============
+-- 为什么要落库：会话要跨重启，也要让 Web 与 MCP 两个 JVM 看到同一段对话。
+-- 为什么原始轮次单独一张表：压缩只改 session.summary，绝不删 turn（N6 压缩不改审计）。
+-- visibility 三档解决「请假交接」：PRIVATE（默认，只有自己）/ SHARED（同部署可见，只有 owner 能
+-- 继续问）/ HANDOVER（交接后归新 owner）。判据见 ADR-0001 D8：默认共享的泄露是静默的。
+CREATE TABLE IF NOT EXISTS recon_chat_session (
+  id                BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  operator          VARCHAR(64)  NOT NULL,
+  previous_operator VARCHAR(64),
+  visibility        VARCHAR(16)  NOT NULL DEFAULT 'PRIVATE',
+  title             VARCHAR(200),
+  state_json        TEXT,
+  state_rev         INT          NOT NULL DEFAULT 0,
+  summary           TEXT,
+  summary_upto_seq  INT          NOT NULL DEFAULT 0,
+  turn_count        INT          NOT NULL DEFAULT 0,
+  status            VARCHAR(16)  NOT NULL DEFAULT 'OPEN',
+  created_at        TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_at           TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_chat_session_operator (operator, last_at),
+  KEY idx_chat_session_previous (previous_operator, last_at),
+  KEY idx_chat_session_visibility (visibility, last_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS recon_chat_turn (
+  id          BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id  BIGINT       NOT NULL,
+  seq         INT          NOT NULL,
+  role        VARCHAR(16)  NOT NULL,
+  content     TEXT,
+  tool_calls  TEXT,
+  tokens      INT,
+  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- seq 在会话内唯一：顺序错乱在复盘时等于"对话不可读"
+  UNIQUE KEY uk_chat_turn_seq (session_id, seq)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ 会话草稿账本：这个会话起草过哪些规则 ============
+-- 为什么单独一张表而不是塞进 state_json：它是**事实**（发生过），不是焦点（会被覆盖）。
+-- 塞进槽位的话，压缩/覆盖一次，"我改过三版"这件事就没了 —— 而审批人恰恰要拿它做判断。
+CREATE TABLE IF NOT EXISTS recon_chat_draft (
+  id           BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id   BIGINT       NOT NULL,
+  rule_code    VARCHAR(64)  NOT NULL,
+  rule_version INT          NOT NULL,
+  -- 一句人话，给"那条按订单和状态对账的"这类指代当锚点
+  label        VARCHAR(255) NULL,
+  created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_chat_draft (session_id, rule_code, rule_version),
+  KEY idx_chat_draft_session (session_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ 长期记忆：案例与口径文档 ============
+
+CREATE TABLE IF NOT EXISTS recon_case_memory (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    rule_code VARCHAR(128) NOT NULL,
+    diff_type VARCHAR(64) NOT NULL,
+    cause_key VARCHAR(512) NOT NULL,
+    resolution VARCHAR(2000) NOT NULL,
+    source VARCHAR(16) NOT NULL,
+    confidence DECIMAL(3,3) NOT NULL,
+    operator VARCHAR(64),
+    diff_id BIGINT,
+    job_id BIGINT,
+    dataset_version VARCHAR(256),
+    hits INT NOT NULL DEFAULT 0,
+    last_hit_at TIMESTAMP NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_case_rule_type (rule_code, diff_type, created_at),
+    KEY idx_case_key (cause_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS recon_doc_chunk (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    doc_id VARCHAR(64) NOT NULL,
+    title VARCHAR(256) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    meta_json TEXT,
+    ordinal INT NOT NULL,
+    content VARCHAR(4000) NOT NULL,
+    content_hash VARCHAR(64) NOT NULL,
+    embedding BLOB,
+    dim INT,
+    model VARCHAR(64),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_doc_docid (doc_id, ordinal),
+    KEY idx_doc_source (source, created_at),
+    KEY idx_doc_hash (content_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ============ 演示数据表（只有 demo/联调需要；生产上就是被对账的业务表）============

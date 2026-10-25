@@ -260,7 +260,13 @@ public class RuleLifecycleService implements ApprovalRelay {
             throw new RuleException("规则 " + code + " v" + version + " 状态已被并发修改，请刷新后重试");
         }
         repository.recordReview(code, version, operator, currentSha);
+        // 这一版生效了，同 code 下还没走完的旧版本就没机会了：折叠（不删）它们。
+        // 放在同一个事务里，因为"谁取代了谁"必须和"这一版生效"是同一个事实。
+        int archived = repository.archiveSiblings(code, version);
         catalog.invalidate(code);
+        if (archived > 0) {
+            log.info("规则 {} v{} 生效，归档了 {} 个旧草稿（superseded_by=v{}）", code, version, archived, version);
+        }
         log.info("规则 {} v{} 已批准生效（操作人 {}，试算 {}，签字 {}，可批性 {}）",
                 code, version, operator, state.getClass().getSimpleName(),
                 signature == null ? "-" : "有", mode);

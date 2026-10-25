@@ -1,6 +1,7 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.domain.RuleLifecycle;
 import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.dsl.RuleSpec;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
@@ -56,14 +58,39 @@ public class RuleController {
         return catalog.allResolved().stream().map(RuleController::describe).toList();
     }
 
+    /**
+     * 看一条规则的详情。
+     *
+     * <p>版本历史默认**折叠归档版**（{@code SUPERSEDED}）：被新版本取代的旧草稿只在
+     * "这一版为什么没生效"的复盘里有用，平时堆在列表里只会让人以为规则有很多版。
+     * 要看全部加 {@code ?includeArchived=true}。
+     */
     @GetMapping("/{code}")
-    public Map<String, Object> detail(@PathVariable String code) {
-        if (!catalog.exists(code)) {
+    public Map<String, Object> detail(@PathVariable String code,
+                                      @RequestParam(defaultValue = "false") boolean includeArchived) {
+        // 存在的定义是"库里有这个编码的未下线版本"，不是"有生效版本"：
+        // 只有草稿/审核中版本的规则同样存在，报 404 会把"待审批"误说成"没这条规则"。
+        List<RuleRepository.RuleRow> versions = catalog.versions(code);
+        if (versions.stream().noneMatch(RuleRepository.RuleRow::enabled)) {
             throw new RuleNotFoundException(code);
         }
-        RuleCatalog.Resolved resolved = catalog.resolve(code);
-        Map<String, Object> view = new LinkedHashMap<>(describe(resolved));
-        view.put("versions", catalog.versions(code).stream().map(RuleController::versionView).toList());
+        Map<String, Object> view;
+        try {
+            view = new LinkedHashMap<>(describe(catalog.resolve(code)));
+        } catch (RuleException e) {
+            view = new LinkedHashMap<>();
+            view.put("code", code);
+            view.put("active", false);
+            view.put("note", "还没有生效版本（最新是 " + versions.get(0).lifecycle() + "），下面只有版本列表");
+        }
+        List<Map<String, Object>> shown = versions.stream()
+                .filter(row -> includeArchived || row.lifecycle() != RuleLifecycle.SUPERSEDED)
+                .map(RuleController::versionView)
+                .toList();
+        view.put("versions", shown);
+        view.put("archivedVersions", (int) versions.stream()
+                .filter(row -> row.lifecycle() == RuleLifecycle.SUPERSEDED)
+                .count());
         return view;
     }
 
@@ -167,6 +194,8 @@ public class RuleController {
     private static Map<String, Object> versionView(RuleRepository.RuleRow row) {
         Map<String, Object> view = new LinkedHashMap<>();
         view.put("version", row.version());
+        // lifecycle 必须给：前端要靠它区分"生效版 / 草稿 / 已归档"，否则版本列表只能按序号猜
+        view.put("lifecycle", row.lifecycle() == null ? null : row.lifecycle().name());
         view.put("enabled", row.enabled());
         view.put("createdBy", row.createdBy());
         view.put("createdAt", row.createdAt() == null ? null : row.createdAt().toString());

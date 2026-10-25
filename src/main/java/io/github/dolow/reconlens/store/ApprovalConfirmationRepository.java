@@ -101,6 +101,23 @@ public class ApprovalConfirmationRepository {
     }
 
     /** 清理过期且未使用的码：只服务运维视角，不参与审批判定。 */
+    /**
+     * 审批留痕清单（审计导出用）。
+     *
+     * <p>为什么按 ruleCode 可空：查"某一版到底谁批的"要按规则收窄；而月度审计要的是全量，
+     * 少给一条就变成"账外审批"。limit 仍然要有上界，否则一次导出能把内存吃光。
+     */
+    public List<Confirmation> list(String ruleCode, int limit) {
+        int size = limit <= 0 ? 200 : Math.min(limit, 2000);
+        if (ruleCode == null || ruleCode.isBlank()) {
+            return jdbc.query("SELECT * FROM recon_approval_confirmation ORDER BY created_at DESC LIMIT ?",
+                    (rs, rowNum) -> map(rs), size);
+        }
+        return jdbc.query("SELECT * FROM recon_approval_confirmation WHERE rule_code = ?"
+                        + " ORDER BY created_at DESC LIMIT ?",
+                (rs, rowNum) -> map(rs), ruleCode, size);
+    }
+
     public int purgeExpired() {
         return jdbc.update("DELETE FROM recon_approval_confirmation WHERE used_at IS NULL AND expires_at <= CURRENT_TIMESTAMP");
     }
