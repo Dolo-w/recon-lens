@@ -1,0 +1,43 @@
+# MySQL 专项探针规则：流式取数（useCursorFetch 开/关对比用）
+# 200000 行 × 2 侧，单字段比对，每 1 万行埋一个金额差（共 20 条差异）。
+# 这张表故意带着 k 上的索引：正常应该走索引顺序扫描，不需要 filesort。
+code: MYSQL_STREAM_RECON
+name: 大表流式取数（20 万行 × 2 侧）
+description: 用来验证 useCursorFetch=true 时内存是否与数据量无关
+
+left:
+  label: 账单
+  table: bill_big_left
+  keyType: STRING
+  dimension: [k]
+
+right:
+  label: 结算
+  table: bill_big_right
+  keyType: STRING
+  dimension: [k]
+
+shard:
+  count: 4
+  parallelism: 4
+  whereLeft: "MOD(CRC32(k), {shards}) = {index}"
+  whereRight: "MOD(CRC32(k), {shards}) = {index}"
+
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerancePercent: 0
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+
+options:
+  maxAttempts: 1

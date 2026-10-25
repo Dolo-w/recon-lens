@@ -12,5 +12,19 @@ data/
 # 压测装置的运行产物（日志、应用输出）
 tools/mysql-bench/out/
 
+# 运行日志与冒烟/验证产物：work/ 只提交脚本，其余（日志/截图/临时输出）不入库
+logs/
+work/*
+!work/*.ps1
+!work/*.mjs
+
+# 过程文档（实测报告、评审记录、交接稿、验证过程、backlog）只留本地，不入库
+docs/*-report.md
+docs/*-review*.md
+docs/e2e-*.md
+docs/agent-quickstart-verification-*.md
+docs/handoff-*.md
+docs/backlog.md
+
 # IDE 运行配置（每个人不同）
 .run/

@@ -1,0 +1,46 @@
+# MySQL 专项探针规则：分片谓词用 MOD(CRC32(...))
+#
+# 为什么单独一条：CRC32() 是 MySQL 函数，H2 上跑不了，
+# 所以 README 里推荐的「把分片桶做成 CRC32 取模」这条生产写法在 H2 上从来没被执行过。
+# 这条规则就是为了在真 MySQL 上把它跑通——分片只影响耗时，不影响结果，
+# 所以它的差异数必须和 BILL_VS_SETTLE（同样的数据、count=2）完全一致。
+code: MYSQL_CRC32_RECON
+name: 账单与结算对账（CRC32 分片）
+description: 与 BILL_VS_SETTLE 同口径，只是把分片谓词换成 MOD(CRC32(order_no), {shards}) = {index}
+
+left:
+  label: 账单
+  table: bill_left
+  keyType: STRING
+  dimension: [customer_id, order_no]
+
+right:
+  label: 结算
+  table: bill_right
+  keyType: STRING
+  dimension: [customer_id, order_no]
+
+shard:
+  count: 4
+  parallelism: 4
+  whereLeft: "MOD(CRC32(order_no), {shards}) = {index}"
+  whereRight: "MOD(CRC32(order_no), {shards}) = {index}"
+
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerancePercent: 0.0001
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+
+options:
+  maxAttempts: 2
