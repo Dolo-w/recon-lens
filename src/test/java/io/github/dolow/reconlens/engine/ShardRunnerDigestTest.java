@@ -92,7 +92,7 @@ class ShardRunnerDigestTest {
         private final List<Row> right;
 
         private StubCursors(RuleSpec rule, List<Row> left, List<Row> right) {
-            super(null, new ReconProperties());
+            super(null, new ReconProperties(), new KeyOrder(null));
             this.rule = rule;
             this.left = left;
             this.right = right;

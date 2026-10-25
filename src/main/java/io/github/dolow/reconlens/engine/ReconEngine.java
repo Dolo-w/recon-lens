@@ -11,6 +11,7 @@ import io.github.dolow.reconlens.domain.TrialPhase;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.ReconRepository;
+import io.github.dolow.reconlens.store.DatasetFingerprints;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -43,17 +44,20 @@ public class ReconEngine {
     private final ReconRepository repository;
     private final ShardRunner shardRunner;
     private final ReconProperties properties;
+    private final DatasetFingerprints fingerprints;
     private final ExecutorService submitter = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "recon-submit");
         thread.setDaemon(true);
         return thread;
     });
 
-    public ReconEngine(RuleCatalog catalog, ReconRepository repository, ShardRunner shardRunner, ReconProperties properties) {
+    public ReconEngine(RuleCatalog catalog, ReconRepository repository, ShardRunner shardRunner,
+                       ReconProperties properties, DatasetFingerprints fingerprints) {
         this.catalog = catalog;
         this.repository = repository;
         this.shardRunner = shardRunner;
         this.properties = properties;
+        this.fingerprints = fingerprints;
     }
 
     /** 同步跑完整个任务（CLI、启动演示、单测用）。 */
@@ -185,8 +189,10 @@ public class ReconEngine {
                          JobKind kind, TrialPhase phase) {
         RuleSpec rule = resolved.spec();
         int shardCount = rule.shard().count();
+        // 数据快照在"建任务"这一刻定格：之后表被重灌，历史任务仍然答得出它读的是什么（ADR-0002 D4）
+        String dataSnapshot = fingerprints.snapshotJson(rule.left(), rule.right());
         long jobId = repository.createJob(rule.code(), resolved.version(), resolved.snapshot(), batchId, remark,
-                shardCount, kind, phase);
+                shardCount, kind, phase, dataSnapshot);
         repository.createShards(jobId, shardCount);
         repository.markJobRunning(jobId);
         log.info("创建对账任务 #{} 规则={} 版本={} 批次={} 分片数={} kind={}{}", jobId, rule.code(),

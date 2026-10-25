@@ -30,6 +30,7 @@ class ReconRepositoryProdScopeTest {
               rule_code     VARCHAR(64)  NOT NULL,
               rule_version  INT,
               rule_snapshot TEXT,
+   data_snapshot TEXT,
               batch_id      VARCHAR(64)  NOT NULL,
               status        VARCHAR(16)  NOT NULL,
               kind          VARCHAR(8)   NOT NULL DEFAULT 'PROD',

@@ -74,6 +74,14 @@ public final class ShardPlanner {
 
     /** 生成取数 SQL：外层套一层是为了让自定义 SQL 与单表两种写法共用同一段分片条件。 */
     public static String selectSql(SideSpec side, String where) {
+        return selectSql(side, where, SideSpec.KEY_ALIAS);
+    }
+
+    /**
+     * @param keyOrder 排序表达式。派生维度的键列在 MySQL 的 ci 排序下与 Java 比较器不同序，
+     *                 由 {@link KeyOrder} 给出 utf16_bin 版本；H2 上就是裸列名。
+     */
+    public static String selectSql(SideSpec side, String where, String keyOrder) {
         String filter = combine(side, where);
         if (!side.derivedKey()) {
             StringBuilder sql = new StringBuilder(128);
@@ -98,7 +106,7 @@ public final class ShardPlanner {
         } else {
             sql.append(", src.* FROM (").append(inner).append(") src");
         }
-        return sql.append(" ORDER BY ").append(SideSpec.KEY_ALIAS).toString();
+        return sql.append(" ORDER BY ").append(keyOrder).toString();
     }
 
     /**

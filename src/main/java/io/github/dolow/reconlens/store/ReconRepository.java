@@ -58,15 +58,26 @@ public class ReconRepository implements DiffWriter {
      * per-job 查询天然按 jobId 隔离，要过滤的是"跨任务看趋势"的那些地方（见 {@link JobKind} 的注释）。
      */
     public long createJob(String ruleCode, Integer ruleVersion, String ruleSnapshot, String batchId, String remark, int shardCount) {
-        return createJob(ruleCode, ruleVersion, ruleSnapshot, batchId, remark, shardCount, JobKind.PROD, null);
+        return createJob(ruleCode, ruleVersion, ruleSnapshot, batchId, remark, shardCount, JobKind.PROD, null, null);
     }
 
     public long createJob(String ruleCode, Integer ruleVersion, String ruleSnapshot, String batchId, String remark,
                           int shardCount, JobKind kind, TrialPhase phase) {
-        jdbc.update("INSERT INTO recon_job (rule_code, rule_version, rule_snapshot, batch_id, status, shard_count,"
-                        + " remark, kind, phase) VALUES (?,?,?,?,?,?,?,?,?)",
-                ruleCode, ruleVersion, ruleSnapshot, batchId, JobStatus.PENDING.name(), shardCount, remark,
-                kind.name(), phase == null ? null : phase.name());
+        return createJob(ruleCode, ruleVersion, ruleSnapshot, batchId, remark, shardCount, kind, phase, null);
+    }
+
+    /**
+     * 建任务，并把"这次读的是哪一份数据"写进 {@code data_snapshot}（ADR-0002 D4）。
+     *
+     * <p>为什么快照在<b>建任务</b>时写死、而不是查询时现算：任务是一个历史事实，
+     * 数据明天被重灌后，任务仍然应该答得出它当时读的是什么。现算等于让历史查询跟着数据变。
+     */
+    public long createJob(String ruleCode, Integer ruleVersion, String ruleSnapshot, String batchId, String remark,
+                          int shardCount, JobKind kind, TrialPhase phase, String dataSnapshot) {
+        jdbc.update("INSERT INTO recon_job (rule_code, rule_version, rule_snapshot, data_snapshot, batch_id, status,"
+                        + " shard_count, remark, kind, phase) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ruleCode, ruleVersion, ruleSnapshot, dataSnapshot, batchId, JobStatus.PENDING.name(), shardCount,
+                remark, kind.name(), phase == null ? null : phase.name());
         Long id = jdbc.queryForObject("SELECT MAX(id) FROM recon_job", Long.class);
         return id == null ? -1L : id;
     }
@@ -75,6 +86,44 @@ public class ReconRepository implements DiffWriter {
     public Integer ruleVersion(long jobId) {
         List<Integer> found = jdbc.queryForList("SELECT rule_version FROM recon_job WHERE id = ?", Integer.class, jobId);
         return found.isEmpty() ? null : found.get(0);
+    }
+
+    /**
+     * 任务创建时的数据快照。老任务（加列之前建的）返回空 —— 调用方必须把"未记录"和
+     * "记录为空"分开说，不能混成一句"没有"（ADR-0002 N5）。
+     */
+    public Optional<String> dataSnapshot(long jobId) {
+        List<String> found = jdbc.queryForList("SELECT data_snapshot FROM recon_job WHERE id = ?", String.class, jobId);
+        return found.isEmpty() ? Optional.empty() : Optional.ofNullable(found.get(0));
+    }
+
+    /**
+     * 比较两个任务时要用的事实（含规则版本与数据快照）。
+     *
+     * <p>单独一个 record 而不是塞进 {@code ReconJob}：{@code ReconJob} 是"任务本身"，
+     * 被十几个地方构造；为了两个只读字段去改它的形状，等于让所有构造点陪跑。
+     */
+    /**
+     * @param datasetVersion ADR-0002 的数据版本号；老任务可能为 null（那时还没有这一列），
+     *                       所以案例检索遇到 null 时宁可多召回，也不假装"没有同源案例"
+     */
+    public record JobFacts(long id, String ruleCode, Integer ruleVersion, String status,
+                           long leftRows, long rightRows, long matchedRows, long diffRows,
+                           String dataSnapshot, String datasetVersion, java.time.Instant createdAt) {
+    }
+
+    public Optional<JobFacts> jobFacts(long jobId) {
+        List<JobFacts> rows = jdbc.query(
+                "SELECT id, rule_code, rule_version, status, left_rows, right_rows, matched_rows, diff_rows,"
+                        + " data_snapshot, dataset_version, created_at FROM recon_job WHERE id = ?",
+                (rs, i) -> new JobFacts(rs.getLong("id"), rs.getString("rule_code"),
+                        rs.getObject("rule_version") == null ? null : rs.getInt("rule_version"),
+                        rs.getString("status"), rs.getLong("left_rows"), rs.getLong("right_rows"),
+                        rs.getLong("matched_rows"), rs.getLong("diff_rows"), rs.getString("data_snapshot"),
+                        rs.getString("dataset_version"),
+                        rs.getTimestamp("created_at") == null ? null : rs.getTimestamp("created_at").toInstant()),
+                jobId);
+        return rows.stream().findFirst();
     }
 
     /**
@@ -143,6 +192,20 @@ public class ReconRepository implements DiffWriter {
     public List<ReconJob> recentProdJobs(int limit) {
         return jdbc.query("SELECT " + JOB_COLUMNS + " FROM recon_job WHERE kind = 'PROD'"
                 + " ORDER BY id DESC LIMIT ?", jobMapper(), limit);
+    }
+
+    /**
+     * 跨规则最近一次生产任务。
+     *
+     * <p>给会话用：用户说「看差异」「跑完了吗」但没给任务号时，默认取最近一次成功/部分成功的生产任务。
+     * 只认 {@code kind='PROD'} —— 试算任务是裁剪过的样本，拿来当"最近一次对账"会误导。
+     */
+    public Optional<Long> latestProdJobId() {
+        List<Long> ids = jdbc.queryForList(
+                "SELECT id FROM recon_job WHERE kind = 'PROD'"
+                        + " AND status IN ('SUCCESS','PARTIAL_FAILED') ORDER BY id DESC LIMIT 1",
+                Long.class);
+        return ids.stream().findFirst();
     }
 
     /** 最近一次生产任务（T5-c 的基线分母、T3/T4 的基线差异集都从这里取）。 */

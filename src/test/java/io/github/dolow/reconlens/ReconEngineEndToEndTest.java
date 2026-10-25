@@ -126,4 +126,18 @@ class ReconEngineEndToEndTest {
         assertThat(finished.status()).isEqualTo(JobStatus.FAILED);
         assertThat(finished.errorMsg()).hasSize(1000).startsWith("分片0: ");
     }
+    @Test
+    void 建任务那一刻就把数据指纹写死_不是查询时现算() {
+        ReconJob job = engine.run("BILL_VS_SETTLE", "it-snapshot", "快照");
+
+        String snapshot = repository.dataSnapshot(job.id()).orElseThrow(
+                () -> new AssertionError("新建的任务必须带数据快照，否则算不出两次结果为何不同"));
+        assertThat(snapshot).contains("bill_left").contains("bill_right").contains("schemaHash");
+
+        assertThat(repository.jobFacts(job.id())).hasValueSatisfying(f -> {
+            assertThat(f.dataSnapshot()).isEqualTo(snapshot);
+            assertThat(f.ruleCode()).isEqualTo("BILL_VS_SETTLE");
+            assertThat(f.status()).isEqualTo("SUCCESS");
+        });
+    }
 }

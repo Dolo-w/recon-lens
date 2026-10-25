@@ -114,4 +114,14 @@ class ShardPlannerTest {
         return new SideSpec("账单", "bill_left", null, SideSpec.KEY_ALIAS, FieldType.STRING, SideSpec.KEY_ALIAS,
                 expression, java.util.List.of(expression), "|", measures, null);
     }
+
+    @Test
+    void 派生维度的排序表达式可以被替换_用于让MySQL的排序与Java比较器同序() {
+        SideSpec side = new SideSpec("账单", "bill_left", null, null, FieldType.STRING, null,
+                "customer_id, order_no", List.of("customer_id", "order_no"), "|", java.util.Map.of(), null);
+        String plain = ShardPlanner.selectSql(side, null, SideSpec.KEY_ALIAS);
+        String ordered = ShardPlanner.selectSql(side, null, "CONVERT(__biz_key USING utf16) COLLATE utf16_bin");
+        assertThat(plain).endsWith("ORDER BY __biz_key");
+        assertThat(ordered).endsWith("ORDER BY CONVERT(__biz_key USING utf16) COLLATE utf16_bin");
+    }
 }
