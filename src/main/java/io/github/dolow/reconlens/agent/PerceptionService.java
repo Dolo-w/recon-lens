@@ -134,6 +134,7 @@ public class PerceptionService {
      * 只会给每个周期留一条看起来像崩溃的堆栈；调用方拿到的应当是"这轮没扫成"。
      */
     public PerceptionReport scan() {
+        long startedAt = System.nanoTime();
         Instant now = clock.instant();
         int window = Math.max(2, properties.getPerception().getWindowJobs());
         List<ReconJob> jobs = repository.recentProdJobs(window * 20);
@@ -170,7 +171,7 @@ public class PerceptionService {
         trends.sort(Comparator.comparing(RuleTrend::ruleCode));
 
         PerceptionReport report = new PerceptionReport(now, window, trends, findings, suppressed);
-        persist(report);
+        persist(report, startedAt);
         return report;
     }
 
@@ -275,7 +276,8 @@ public class PerceptionService {
      * <p>M5 不推送，所以"巡检跑过没有、看到了什么"只能从库里查 —— 落库失败不改变巡检结论，
      * 因此这里吞掉异常并 warn：把观测写坏，不该连累观测本身。
      */
-    private void persist(PerceptionReport report) {
+    private void persist(PerceptionReport report, long startedAt) {
+        int costMs = (int) Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
         try {
             long runId = runs.startRun("定时巡检（最近 " + report.windowJobs() + " 次生产任务）", TRIGGER, "scheduler");
             String payload;
@@ -286,7 +288,8 @@ public class PerceptionService {
             }
             runs.recordStep(runId, runs.nextSeq(runId), "OBSERVE", "perception_scan",
                     null, payload, null, false,
-                    report.clean() ? "OK" : "ANOMALY", null);
+                    report.clean() ? "OK" : "ANOMALY", costMs,
+                    io.github.dolow.reconlens.llm.Tokens.estimate(payload));
             runs.finishRun(runId, AgentRunRepository.RunStatus.SUCCESS, null, null, null, null);
             log.info(report.describe());
         } catch (RuntimeException e) {

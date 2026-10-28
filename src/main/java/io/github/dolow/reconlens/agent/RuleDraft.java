@@ -34,8 +34,20 @@ public record RuleDraft(String code,
      *
      * @param status     {@code PASS} / {@code INVALID_JSON} / {@code INVALID_RULE} / {@code SAFETY_VIOLATION} / {@code LLM_UNAVAILABLE}
      * @param violations 闸门 1 的违规列表（{@code SAFETY_VIOLATION} 那一轮非空）；其它轮为空
+     * @param tokens     这一轮模型往返的真实 token 用量（拿不到时为 0，调用方退化成估算）
+     * @param costMs     这一轮的墙钟耗时（模型往返 + 解析 + 闸门 1）；0 = 调用方自己计时
      */
-    public record Round(int index, String status, List<String> violations, String detail) {
+    public record Round(int index, String status, List<String> violations, String detail, int tokens, int costMs) {
+
+        /** 还不知道真实用量的调用点用这个（0 = 让下游退回字符数估算）。 */
+        public Round(int index, String status, List<String> violations, String detail) {
+            this(index, status, violations, detail, 0, 0);
+        }
+
+        /** 知道 token、但耗时由调用方自己算的调用点。 */
+        public Round(int index, String status, List<String> violations, String detail, int tokens) {
+            this(index, status, violations, detail, tokens, 0);
+        }
 
         public static Round pass(int index) {
             return new Round(index, "PASS", List.of(), null);

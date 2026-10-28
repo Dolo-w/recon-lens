@@ -29,6 +29,14 @@ public record SafetyViolation(ViolationCode code, String location, String messag
         /** 两侧分片口径确定不一致：同一个业务键会被切到不同分片。 */
         SHARD_SPLIT_KEY,
 
+        /**
+         * 分片数超过上限。
+         *
+         * <p>分片是<b>重跑单位</b>，不是"越大越快"：{@code shard.count: 100000} 会开出一千个任务行、
+         * 一千个线程池任务，而差异表里每条差异还要带 shard 号。这不是性能问题，是把重跑粒度做废了。
+         */
+        SHARD_COUNT,
+
         /** 使用了目标库不存在的函数（如 MySQL 没有 HASH()）。试算阶段才报错的，闸门 1 就该拦下。 */
         NON_PORTABLE_FUNCTION,
 
@@ -48,7 +56,16 @@ public record SafetyViolation(ViolationCode code, String location, String messag
         SEVERITY_DOWNGRADED,
 
         /** 比对字段集合被缩小（且没有人工豁免）。 */
-        FIELD_REMOVED
+        FIELD_REMOVED,
+
+        /**
+         * 人为注入的违规：只由 {@code recon.agent.safety.force-draft-violation=true} 产生。
+         *
+         * <p>为什么需要它：闸门 1 拒绝之后的链路（回炉 re-plan → 只做归因 → PARTIAL）在真模型下
+         * <b>打不出来</b> —— 模型被拒绝一次后几乎总能自我纠正，实测三条触发路都被它修好了。
+         * 没有这条注入，"被拒之后会怎样"就只能靠单测断言，不能在生产形态的服务上验一遍。
+         */
+        TEST_FORCED
     }
 
     @Override

@@ -11,6 +11,7 @@ import io.github.dolow.reconlens.domain.TrialPhase;
 import io.github.dolow.reconlens.domain.TrialState;
 import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleException;
+import io.github.dolow.reconlens.dsl.RuleGateRejectedException;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.dsl.SideSpec;
 import io.github.dolow.reconlens.engine.ReconEngine;
@@ -100,10 +101,23 @@ public class ShadowTrialService {
     public record TrialResult(String code, int version, TrialState state, TrialReport report, String digest) {
     }
 
+    /** 把 agent 内的违规渲染成可跨包传递的视图（异常在 dsl 包，见那边的类注释）。 */
+    private static List<Map<String, Object>> views(List<SafetyViolation> violations) {
+        return violations.stream().map(v -> {
+            Map<String, Object> view = new LinkedHashMap<>();
+            view.put("code", v.code().name());
+            view.put("location", v.location());
+            view.put("message", v.message());
+            view.put("suggestion", v.suggestion());
+            return view;
+        }).toList();
+    }
+
     /**
      * 对某一版规则跑影子试算，并把结论落回 {@code recon_rule.trial_*}。
      *
-     * @throws RuleException 闸门 1 拒绝（违规列表在异常消息里）—— 它<b>不是</b>试算结论，
+     * @throws RuleException 闸门 1 拒绝（违规在 {@link RuleGateRejectedException#violationViews()}
+     *                       里，消息只放前 3 条）—— 它<b>不是</b>试算结论，
      *                       而是"根本没资格进入试算"，所以不落 {@code trial_verdict}
      */
     public TrialResult trial(String code, int version) {
@@ -114,7 +128,9 @@ public class ShadowTrialService {
 
         List<SafetyViolation> violations = safetyValidator.validate(candidate, baseline);
         if (!violations.isEmpty()) {
-            throw new RuleException("闸门 1 拒绝 " + code + " v" + version + "，未进入试算：" + violations);
+            // 在这里就转成"视图"：异常要穿过 rule/web 两层冒到 HTTP 处理器，而 SafetyViolation
+            // 在 agent 包里，带出去等于让 web 依赖 agent（AgentBoundaryTest 明令禁止）。
+            throw new RuleGateRejectedException(code, version, views(violations));
         }
 
         ReconProperties.Trial cfg = properties.getTrial();

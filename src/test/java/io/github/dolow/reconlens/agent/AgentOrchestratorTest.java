@@ -41,6 +41,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -98,7 +99,7 @@ class AgentOrchestratorTest {
     @BeforeEach
     void reset() {
         jdbc.execute("CREATE TABLE IF NOT EXISTS recon_agent_run (id BIGINT AUTO_INCREMENT PRIMARY KEY,"
-                + " goal TEXT NOT NULL, trigger_type VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL,"
+                + " goal TEXT NOT NULL, goal_json TEXT, trigger_type VARCHAR(16) NOT NULL, status VARCHAR(16) NOT NULL,"
                 + " plan_json TEXT, plan_truncated BOOLEAN NOT NULL DEFAULT FALSE, rule_code VARCHAR(64),"
                 + " job_id BIGINT, draft_version INT, llm_calls INT NOT NULL DEFAULT 0,"
                 + " llm_tokens INT NOT NULL DEFAULT 0, error_msg VARCHAR(1000), created_by VARCHAR(64),"
@@ -106,7 +107,7 @@ class AgentOrchestratorTest {
         jdbc.execute("CREATE TABLE IF NOT EXISTS recon_agent_step (id BIGINT AUTO_INCREMENT PRIMARY KEY,"
                 + " run_id BIGINT NOT NULL, seq INT NOT NULL, phase VARCHAR(16) NOT NULL,"
                 + " action VARCHAR(64) NOT NULL, input_json TEXT, payload TEXT, digest CHAR(64),"
-                + " truncated BOOLEAN NOT NULL DEFAULT FALSE, status VARCHAR(16) NOT NULL, cost_ms INT,"
+                + " truncated BOOLEAN NOT NULL DEFAULT FALSE, status VARCHAR(16) NOT NULL, cost_ms INT, tokens_est INT,"
                 + " created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)");
         jdbc.execute("CREATE UNIQUE INDEX IF NOT EXISTS uk_agent_step ON recon_agent_step (run_id, seq)");
         jdbc.update("DELETE FROM recon_agent_step");
@@ -235,6 +236,82 @@ class AgentOrchestratorTest {
         assertThat(result.message()).doesNotContain("已批准").doesNotContain("已生效");
     }
 
+    /**
+     * M18/M19：草稿被闸门列了具体违规 → 允许再规划一次做诊断，诊断入轨迹，结果是 PARTIAL。
+     *
+     * <p>为什么不是 FAILED：草稿在、违规在、诊断在——有可复用的产物，只是没走到能用。
+     * 为什么不是 SUCCESS：一次对账都没跑，也没有草稿被保存。
+     */
+    @Test
+    void blockedDraftIsDiagnosedOnASecondPlanningPassAndKeepsTheRunPartial() {
+        properties.setMaxLlmRounds(1);
+        try {
+            when(catalog.allResolved()).thenReturn(List.of());
+            when(catalog.exists(anyString())).thenReturn(false);
+            // 分片数 9999 超上限 256：唯一一条违规，且与业务无关，便于断言
+            llm.script.add(ruleJsonWithUnknownTable());
+
+            AgentOrchestrator.AgentRunResult result = orchestrator()
+                    .run(AgentGoal.of("按订单号对账金额", "BILL_BAD", null), "tester");
+
+            assertThat(result.status()).as("message: %s", result.message())
+                    .isEqualTo(AgentRunRepository.RunStatus.PARTIAL);
+            assertThat(result.message()).contains("诊断已记入轨迹");
+            assertThat(result.draftVersion()).as("草稿没保存，不许报 PARTIAL 的产物复用").isNull();
+            assertThat(result.jobId()).isNull();
+            assertThat(result.violations()).isNotEmpty();
+
+            AgentRunRepository.AgentRun run = runs.findRun(result.runId()).orElseThrow();
+            assertThat(run.status()).isEqualTo("PARTIAL");
+
+            // 五个阶段：第一次规划失败 → 第二次规划（诊断）→ 收口
+            assertThat(runs.listSteps(result.runId()))
+                    .extracting(AgentRunRepository.AgentStep::phase)
+                    .containsExactly("OBSERVE", "PLAN", "ACT", "PLAN", "ACT");
+            assertThat(runs.listSteps(result.runId()))
+                    .extracting(AgentRunRepository.AgentStep::action)
+                    .containsSubsequence("replan-1", "diagnose-blocked");
+
+            AgentRunRepository.AgentStep diagnosis = runs.listSteps(result.runId()).get(4);
+            assertThat(diagnosis.status()).isEqualTo("DIAGNOSED");
+            assertThat(diagnosis.payload())
+                    .contains("\"violations\"")
+                    .contains("bill_ghost");
+        } finally {
+            properties.setMaxLlmRounds(3);
+        }
+    }
+
+    /**
+     * M19 的另一半：草稿存下来了、试算被拒 → 产物可复用，仍是 PARTIAL，且不许自动审批。
+     */
+    @Test
+    void rejectedTrialKeepsTheDraftAndTheRunPartial() {
+        when(catalog.allResolved()).thenReturn(List.of());
+        when(catalog.exists(anyString())).thenReturn(false);
+        when(catalog.defineDraft(any(), anyString(), anyString(), eq(RuleOrigin.AGENT), any(), anyString()))
+                .thenReturn(new RuleCatalog.Resolved(rule("BILL_AGENT"), 1, "{}"));
+        when(trials.trial("BILL_AGENT", 1))
+                .thenThrow(new io.github.dolow.reconlens.dsl.RuleException("试算被拒：样本太少"));
+        llm.script.add(ruleJson());
+
+        AgentOrchestrator.AgentRunResult result = orchestrator()
+                .run(AgentGoal.of("按订单号逐笔比对账单和结算的金额", "BILL_AGENT", null), "tester");
+
+        assertThat(result.status()).as("message: %s", result.message())
+                .isEqualTo(AgentRunRepository.RunStatus.PARTIAL);
+        assertThat(result.draftVersion()).as("草稿保住了，batch 6 的意义就在这里").isEqualTo(1);
+        assertThat(result.message()).contains("草稿已落库").contains("试算被闸门 1 拒绝");
+        assertThat(result.message()).doesNotContain("已批准").doesNotContain("已生效");
+
+        AgentRunRepository.AgentRun run = runs.findRun(result.runId()).orElseThrow();
+        assertThat(run.status()).isEqualTo("PARTIAL");
+        assertThat(run.draftVersion()).isEqualTo(1);
+        assertThat(runs.listSteps(result.runId()))
+                .extracting(AgentRunRepository.AgentStep::action)
+                .contains("save-draft");
+    }
+
     /** token 预算耗尽 → BLOCKED（不是 FAILED，也不是把半成品草稿当成功）。 */
     @Test
     void tokenBudgetExhaustionEndsAsBlocked() {
@@ -279,7 +356,71 @@ class AgentOrchestratorTest {
                 new RuleSafetyValidator(schema, new ShardSplitAnalyzer(), new BigDecimal("2.0")),
                 new ObjectMapper());
         return new AgentOrchestrator(runs, catalog, engine, trials, drafter, explain, properties,
-                new ObjectMapper());
+                new ObjectMapper(), new io.github.dolow.reconlens.store.RuleRepository(jdbc));
+    }
+
+    // ---------------------------------------------------------------- 恢复（M20）
+
+    @Test
+    void resumePointFollowsTheLastActionThatLeftAnArtifact() {
+        assertThat(AgentOrchestrator.resumePoint(List.of())).isEqualTo(AgentOrchestrator.ResumePoint.SCRATCH);
+        assertThat(AgentOrchestrator.resumePoint(List.of(step(1, "PLAN", "draft_rule"), step(2, "ACT", "draft-round-1"))))
+                .isEqualTo(AgentOrchestrator.ResumePoint.SCRATCH);
+        assertThat(AgentOrchestrator.resumePoint(List.of(step(1, "ACT", "save-draft"))))
+                .isEqualTo(AgentOrchestrator.ResumePoint.DRAFT_SAVED);
+        assertThat(AgentOrchestrator.resumePoint(List.of(step(1, "ACT", "save-draft"), step(2, "ACT", "shadow-trial"))))
+                .isEqualTo(AgentOrchestrator.ResumePoint.TRIAL_DONE);
+        assertThat(AgentOrchestrator.resumePoint(List.of(step(1, "ACT", "run-reconciliation"))))
+                .isEqualTo(AgentOrchestrator.ResumePoint.JOB_DONE);
+    }
+
+    @Test
+    void resumeRefusesARunThatAlreadyReachedAVerdict() {
+        long runId = runs.startRun("跑一下 BILL_VS_SETTLE", "API", "tester");
+        runs.finishRun(runId, AgentRunRepository.RunStatus.BLOCKED, null, null, null, "预算耗尽");
+
+        assertThatThrownBy(() -> orchestrator().resume(runId, "tester"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("已经结束");
+    }
+
+    /** 草稿已在库：只补试算 + 沉淀，不再问模型一次。 */
+    @Test
+    void resumeFromSavedDraftOnlyRepeatsTheTrial() {
+        long runId = runs.startRun("给 DRAFT_ONLY 起草一条规则", "API", "tester");
+        jdbc.update("UPDATE recon_agent_run SET rule_code = ?, draft_version = ? WHERE id = ?", "DRAFT_ONLY", 1, runId);
+        step(runId, 1, "PLAN", "draft_rule");
+        step(runId, 2, "ACT", "draft-round-1");
+        step(runId, 3, "ACT", "save-draft");
+        when(trials.trial("DRAFT_ONLY", 1)).thenReturn(inconclusiveTrial("DRAFT_ONLY", 1));
+
+        AgentOrchestrator.AgentRunResult result = orchestrator().resume(runId, "tester");
+
+        assertThat(result.status()).isEqualTo(AgentRunRepository.RunStatus.PARTIAL);
+        assertThat(result.draftVersion()).isEqualTo(1);
+        assertThat(result.message()).contains("试算没通过");
+        verify(trials).trial("DRAFT_ONLY", 1);
+        // 轨迹里留了一条 RESUME 步：恢复本身也是"被审计的行为"
+        assertThat(runs.listSteps(runId)).anySatisfy(s -> {
+            assertThat(s.phase()).isEqualTo("RESUME");
+            assertThat(s.action()).isEqualTo("from-draft_saved");
+        });
+    }
+
+    private static AgentRunRepository.AgentStep step(int seq, String phase, String action) {
+        return new AgentRunRepository.AgentStep(seq, 0L, seq, phase, action, null, null, null, false,
+                "OK", 0, 0, Instant.EPOCH);
+    }
+
+    private void step(long runId, int seq, String phase, String action) {
+        jdbc.update("INSERT INTO recon_agent_step (run_id, seq, phase, action, status, cost_ms, tokens_est)"
+                + " VALUES (?, ?, ?, ?, 'OK', 0, 0)", runId, seq, phase, action);
+    }
+
+    private static ShadowTrialService.TrialResult inconclusiveTrial(String code, int version) {
+        TrialState state = new TrialState.Trialed(TrialVerdict.INCONCLUSIVE, Coverage.SAMPLE_PARTIAL,
+                List.of(CoverageReason.SAMPLE_TOO_SMALL));
+        return new ShadowTrialService.TrialResult(code, version, state, null, "digest");
     }
 
     private static ReconJob job(long id, JobStatus status, long diffs) {
@@ -323,6 +464,11 @@ class AgentOrchestratorTest {
                    "duplicate":{"diffType":"DUPLICATE_KEY","severity":"MEDIUM"}
                  }}
                 """;
+    }
+
+    /** 唯一一处违规换成 `left.table`：便于断言诊断里带的是具体对象，而不是笼统的“不合规”。 */
+    private static String ruleJsonWithUnknownTable() {
+        return ruleJson().replace("\"table\":\"bill_left\"", "\"table\":\"bill_ghost\"");
     }
 
     private static final class ScriptedClient implements LlmChatClient {

@@ -201,17 +201,31 @@ public class RuleCatalog {
     public Resolved resolve(String code) {
         // 先读守卫行（索引上的单行读），缓存命中也要过这一关。
         RuleRepository.RuleGuard guard = repository.findGuard(code)
-                .orElseThrow(() -> new RuleException("未找到规则 " + code + "，可用规则: " + codes()));
+                .orElseThrow(() -> notRunnable(code));
         verifyGuard(code, guard.version(), guard.specJson(), guard.reviewedSpecSha());
         Resolved cached = latestCache.get(code);
         if (cached != null && cached.version() != null && cached.version() == guard.version()) {
             return cached;
         }
         RuleRepository.RuleRow row = repository.findLatest(code)
-                .orElseThrow(() -> new RuleException("未找到规则 " + code + "，可用规则: " + codes()));
+                .orElseThrow(() -> notRunnable(code));
         Resolved resolved = toResolved(row);
         latestCache.put(code, resolved);
         return resolved;
+    }
+
+    /**
+     * 规则跑不了时的错误：把"存在但没生效"与"根本没有"分开说。
+     *
+     * <p>只说「未找到规则」会把人引向错误的方向 —— 他刚在同一个会话里看到"已落库为草稿"，
+     * 回头执行却被告知规则不存在，于是会去重写一遍。所以这里多查一次任意状态的最新版：
+     * 有就报"存在 vN（DRAFT），但没有可运行的生效版本，先试算再审批"。
+     */
+    private RuleException notRunnable(String code) {
+        return repository.findLatestAnyState(code)
+                .map(row -> new RuleException("规则 " + code + " 存在（v" + row.version() + "，状态 " + row.lifecycle()
+                        + "），但没有可以运行的生效版本：先跑试算，再走人工审批生效"))
+                .orElseGet(() -> new RuleException("未找到规则 " + code + "，可用规则: " + codes()));
     }
 
     /** version 为 null 时取最新生效版本。 */

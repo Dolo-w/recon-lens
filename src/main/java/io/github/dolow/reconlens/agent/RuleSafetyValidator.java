@@ -65,16 +65,36 @@ public class RuleSafetyValidator {
     private final ShardSplitAnalyzer shardAnalyzer;
     private final BigDecimal toleranceMultiplier;
     private final BigDecimal maxTolerancePercent;
+    private final int maxShardCount;
+    /** 测试开关：每条候选规则都追加一条 {@code TEST_FORCED} 违规（默认 false，见 AgentProperties.Safety）。 */
+    private final boolean forceDraftViolation;
 
     /** 不传绝对上限时用这个值：与 {@code AgentProperties.Safety} 的默认值保持一致。 */
     static final BigDecimal DEFAULT_MAX_TOLERANCE_PERCENT = new BigDecimal("5.0");
 
+    /** 不传分片上界时用这个值：与 {@code AgentProperties.Safety#maxShardCount} 的默认值保持一致。 */
+    static final int DEFAULT_MAX_SHARD_COUNT = 256;
+
     public RuleSafetyValidator(SchemaCatalog schema, ShardSplitAnalyzer shardAnalyzer, BigDecimal toleranceMultiplier) {
-        this(schema, shardAnalyzer, toleranceMultiplier, DEFAULT_MAX_TOLERANCE_PERCENT);
+        this(schema, shardAnalyzer, toleranceMultiplier, DEFAULT_MAX_TOLERANCE_PERCENT, DEFAULT_MAX_SHARD_COUNT);
     }
 
     public RuleSafetyValidator(SchemaCatalog schema, ShardSplitAnalyzer shardAnalyzer, BigDecimal toleranceMultiplier,
                                BigDecimal maxTolerancePercent) {
+        this(schema, shardAnalyzer, toleranceMultiplier, maxTolerancePercent, DEFAULT_MAX_SHARD_COUNT);
+    }
+
+    public RuleSafetyValidator(SchemaCatalog schema, ShardSplitAnalyzer shardAnalyzer, BigDecimal toleranceMultiplier,
+                               BigDecimal maxTolerancePercent, int maxShardCount) {
+        this(schema, shardAnalyzer, toleranceMultiplier, maxTolerancePercent, maxShardCount, false);
+    }
+
+    /**
+     * @param forceDraftViolation 只给测试/演示用：每条候选规则额外追加一条 {@code TEST_FORCED} 违规，
+     *                            用来在真实服务上验证"被闸门 1 拒绝之后"的 re-plan 链路
+     */
+    public RuleSafetyValidator(SchemaCatalog schema, ShardSplitAnalyzer shardAnalyzer, BigDecimal toleranceMultiplier,
+                               BigDecimal maxTolerancePercent, int maxShardCount, boolean forceDraftViolation) {
         this.schema = schema;
         this.shardAnalyzer = shardAnalyzer == null ? new ShardSplitAnalyzer() : shardAnalyzer;
         if (toleranceMultiplier == null || toleranceMultiplier.compareTo(BigDecimal.ONE) < 0) {
@@ -83,8 +103,17 @@ public class RuleSafetyValidator {
         if (maxTolerancePercent == null || maxTolerancePercent.compareTo(BigDecimal.ZERO) <= 0) {
             throw new IllegalArgumentException("容差绝对上限必须 > 0");
         }
+        if (maxShardCount < 1) {
+            throw new IllegalArgumentException("分片数上限必须 ≥ 1");
+        }
         this.toleranceMultiplier = toleranceMultiplier;
         this.maxTolerancePercent = maxTolerancePercent;
+        this.maxShardCount = maxShardCount;
+        this.forceDraftViolation = forceDraftViolation;
+        if (forceDraftViolation) {
+            log.warn("闸门 1 的测试开关已打开（recon.agent.safety.force-draft-violation=true）："
+                    + "任何草稿都会被判违规 —— 只用于验证 re-plan 链路，不要在生产开");
+        }
     }
 
     /**
@@ -121,6 +150,13 @@ public class RuleSafetyValidator {
      */
     public List<SafetyViolation> validate(RuleSpec candidate, RuleSpec baseline, Exemptions exemptions) {
         List<SafetyViolation> violations = new ArrayList<>();
+        if (forceDraftViolation) {
+            // 测试注入：下面照样跑完所有真实校验，这样"被拒之后"的 payload 里既有真实结论也有人为的这条
+            violations.add(new SafetyViolation(SafetyViolation.ViolationCode.TEST_FORCED, "test.forced",
+                    "测试开关 recon.agent.safety.force-draft-violation=true：这条违规是人为塞的，"
+                            + "用来验证被拒之后的 re-plan 链路",
+                    "关掉开关（默认 false）后重跑即可通过"));
+        }
         checkSide("left", candidate.left(), candidate, violations);
         checkSide("right", candidate.right(), candidate, violations);
         checkShard(candidate, violations);
@@ -220,6 +256,13 @@ public class RuleSafetyValidator {
     }
 
     private void checkShard(RuleSpec rule, List<SafetyViolation> out) {
+        int count = rule.shard().count();
+        if (count > maxShardCount) {
+            out.add(new SafetyViolation(SafetyViolation.ViolationCode.SHARD_COUNT, "shard.count",
+                    "分片数 " + count + " 超过上限 " + maxShardCount,
+                    "分片是重跑单位：一个分片失败只重跑它，切到 " + count + " 片时一次失败要重跑 " + count
+                            + " 个分片。先降到 " + maxShardCount + " 以内；真要更细，先把重跑成本算清楚"));
+        }
         ShardSplitAnalyzer.Result result = shardAnalyzer.analyze(rule.shard());
         if (result.verdict() == ShardSplitAnalyzer.Verdict.DIFFERENT) {
             out.add(new SafetyViolation(SafetyViolation.ViolationCode.SHARD_SPLIT_KEY, "shard.whereLeft/whereRight",

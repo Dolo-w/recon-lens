@@ -83,9 +83,12 @@ class RuleLifecycleServiceTest {
         String code = "LIFECYCLE_FLOW_TEST";
         int version = draft(code, "第一版", "0.01", null);
 
+        // 消息要说"存在但没生效"，而不是"未找到"：人刚看到草稿落库，回头执行却被告知
+        // 规则不存在，会去查一个根本不存在的错（RuleCatalog#notRunnable）。
         assertThatThrownBy(() -> catalog.resolve(code))
                 .isInstanceOf(RuleException.class)
-                .hasMessageContaining("未找到规则 " + code);
+                .hasMessageContaining("存在（v" + version + "，状态 DRAFT）")
+                .hasMessageContaining("没有可以运行的生效版本");
 
         service.submit(code, version, "alice");
         String token = service.issueToken(code, version);

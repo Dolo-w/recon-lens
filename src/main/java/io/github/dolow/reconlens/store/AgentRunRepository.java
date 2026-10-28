@@ -35,7 +35,7 @@ public class AgentRunRepository {
 
     /** 会话状态。BLOCKED 与 FAILED 的区别：前者是"按规则不该继续"（预算/闸门），后者是"出错了"。 */
     public enum RunStatus {
-        RUNNING, SUCCESS, BLOCKED, FAILED
+        RUNNING, SUCCESS, PARTIAL, BLOCKED, FAILED
     }
 
     private final JdbcTemplate jdbc;
@@ -52,20 +52,30 @@ public class AgentRunRepository {
 
     public record AgentStep(long id, long runId, int seq, String phase, String action, String inputJson,
                             String payload, String digest, boolean truncated, String status,
-                            Integer costMs, Instant createdAt) {
+                            Integer costMs, Integer tokensEst, Instant createdAt) {
     }
 
     public long startRun(String goal, String triggerType, String createdBy) {
+        return startRun(goal, null, triggerType, createdBy);
+    }
+
+    /**
+     * @param goalJson 结构化目标（{@code AgentGoal} 的 JSON）；可为 null（旧入口）。
+     *                 恢复长任务时要靠它还原 intent —— 只有 {@code goal} 文本会把
+     *                 "只起草"和"真的跑一次对账"混成一件事。
+     */
+    public long startRun(String goal, String goalJson, String triggerType, String createdBy) {
         KeyHolder keys = new GeneratedKeyHolder();
         jdbc.update(connection -> {
             PreparedStatement ps = connection.prepareStatement(
-                    "INSERT INTO recon_agent_run (goal, trigger_type, status, llm_calls, llm_tokens, created_by, created_at)"
-                            + " VALUES (?,?,?,0,0,?,CURRENT_TIMESTAMP)",
+                    "INSERT INTO recon_agent_run (goal, goal_json, trigger_type, status, llm_calls, llm_tokens, created_by, created_at)"
+                            + " VALUES (?,?,?,?,0,0,?,CURRENT_TIMESTAMP)",
                     Statement.RETURN_GENERATED_KEYS);
             ps.setString(1, goal);
-            ps.setString(2, triggerType);
-            ps.setString(3, RunStatus.RUNNING.name());
-            ps.setString(4, createdBy);
+            ps.setString(2, goalJson);
+            ps.setString(3, triggerType);
+            ps.setString(4, RunStatus.RUNNING.name());
+            ps.setString(5, createdBy);
             return ps;
         }, keys);
         Number key = generatedId(keys);
@@ -102,13 +112,48 @@ public class AgentRunRepository {
     /**
      * 记一步。{@code seq} 由调用方按会话内递增给出，{@code uk_agent_step (run_id, seq)} 兜底：
      * 顺序错乱在复盘时等于"轨迹不可读"，而唯一索引是唯一能拦住重复 seq 的地方。
+     *
+     * <p>{@code costMs} 是这一步的墙钟耗时（早就有了，列名 {@code cost_ms}，别被名字骗了——
+     * 它量的是时间不是钱）；{@code tokensEst} 是这一步上下文的估算 token（口径见
+     * {@link io.github.dolow.reconlens.llm.Tokens}，是估算不是账单上的数）。
      */
     public void recordStep(long runId, int seq, String phase, String action, String inputJson,
-                           String payload, String digest, boolean truncated, String status, Integer costMs) {
+                           String payload, String digest, boolean truncated, String status, Integer costMs,
+                           Integer tokensEst) {
         jdbc.update("INSERT INTO recon_agent_step"
-                        + " (run_id, seq, phase, action, input_json, payload, digest, truncated, status, cost_ms, created_at)"
-                        + " VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-                runId, seq, phase, action, inputJson, payload, digest, truncated, status, costMs);
+                        + " (run_id, seq, phase, action, input_json, payload, digest, truncated, status, cost_ms,"
+                        + " tokens_est, created_at)"
+                        + " VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+                runId, seq, phase, action, inputJson, payload, digest, truncated, status, costMs, tokensEst);
+    }
+
+    /**
+     * 启动巡检用：进程上次退出时还没收尾的会话。
+     *
+     * <p>只取 {@code RUNNING}。{@code FAILED} 刻意不取 —— 那是"巡检已经标过、等人决定要不要救"的状态，
+     * 自动重试会把「一直失败的会话」变成每次重启都撞一次墙。
+     */
+    public List<Long> unfinishedRunIds() {
+        return jdbc.query("SELECT id FROM recon_agent_run WHERE status = 'RUNNING' ORDER BY id",
+                (rs, rowNum) -> rs.getLong("id"));
+    }
+
+    /**
+     * 启动恢复用：进程启动<b>之前</b>创建、至今仍 {@code RUNNING} 的会话。
+     *
+     * <p>为什么要时间下限：端口在 {@code ApplicationReadyEvent} 之前就已经在监听，
+     * 一条刚由本进程受理的会话完全可能是<b>此刻正在跑</b>的。不加这层过滤，
+     * 启动恢复会跟它自己刚发起的运行并行跑同一个会话，任务与试算都会重复。
+     *
+     * <p>跨进程的残余风险：Web 与 MCP 两个进程共用一个库时，另一个进程"此刻正在跑"的会话，
+     * 仍可能被判成遗留。当前部署边界是单实例（见 {@code docs/architecture.md}），
+     * 真要上多实例，这里得换成带租约的认领。
+     *
+     * @param before 只取在该时刻之前创建的会话（通常是本进程启动时刻）
+     */
+    public List<Long> unfinishedRunIds(Instant before) {
+        return jdbc.query("SELECT id FROM recon_agent_run WHERE status = 'RUNNING' AND created_at < ? ORDER BY id",
+                (rs, rowNum) -> rs.getLong("id"), Timestamp.from(before));
     }
 
     public int nextSeq(long runId) {
@@ -147,27 +192,21 @@ public class AgentRunRepository {
     }
 
     /**
-     * 把库里残留的"排队中/进行中"会话标成 FAILED（进程刚启动时调用）。
-     *
-     * <p>异步任务没有心跳：重启后这些行既不会前进也不会有人收尾，留在 RUNNING 上
-     * 会让运维以为"还在跑"。改成 FAILED 并把原因写清楚，至少状态是诚实的。
-     *
-     * @return 被标记的行数
+     * <p><b>这里曾经有个"把残留会话标成 FAILED"的方法，已删除</b>：它把已经落库的草稿、
+     * 已经跑完的试算一起判成没发生过 —— 而那正是恢复要保住的东西。现在"收尾"由
+     * {@code AgentRunRecovery} 接着做（见 {@link #unfinishedRunIds(java.time.Instant)}），
+     * 库层面不再提供"强制失败"的入口。
      */
+
     /**
-     * 把"很久以前开始、至今仍 RUNNING"的会话标成失败。
-     *
-     * <p>必须带上时间下限：Web 与 MCP 两个进程共用一个库时，MCP 进程此刻正在跑的试算，
-     * 会被另一个进程启动时的清理误判成"上一次进程的遗留"。实测过：定义规则触发的试算明明成功、
-     * 结论已经写进 {@code recon_rule.trial_*}，run 行却被另一个进程标成了 FAILED。
-     *
-     * @param olderThan 只清理在 {@code now - olderThan} 之前创建的行
+     * 读结构化目标。单独一个方法而不是塞进 {@link AgentRun}：恢复是低频操作，
+     * 为了它给每一条审计查询都多带一列 JSON 不划算。
      */
-    public int failUnfinished(String reason, Duration olderThan) {
-        Timestamp cutoff = Timestamp.from(Instant.now().minus(olderThan));
-        return jdbc.update("UPDATE recon_agent_run SET status = ?, error_msg = ?, finished_at = CURRENT_TIMESTAMP"
-                        + " WHERE status = ? AND created_at < ?",
-                RunStatus.FAILED.name(), truncate(reason, 1000), RunStatus.RUNNING.name(), cutoff);
+    public Optional<String> goalJson(long runId) {
+        List<String> rows = jdbc.query("SELECT goal_json FROM recon_agent_run WHERE id = ?",
+                (rs, rowNum) -> rs.getString("goal_json"), runId);
+        // 列可空，旧记录全是 NULL：先滤掉再 findFirst —— 直接把 null 放进 Optional 会 NPE。
+        return rows.stream().filter(java.util.Objects::nonNull).findFirst();
     }
 
     public Optional<AgentRun> findRun(long id) {
@@ -192,8 +231,7 @@ public class AgentRunRepository {
         return rows.stream().findFirst();
     }
 
-    public List<AgentStep> listSteps(long runId) {
-        return jdbc.query("SELECT * FROM recon_agent_step WHERE run_id = ? ORDER BY seq",
+    public List<AgentStep> listSteps(long runId) {        return jdbc.query("SELECT * FROM recon_agent_step WHERE run_id = ? ORDER BY seq",
                 (rs, rowNum) -> new AgentStep(
                         rs.getLong("id"),
                         rs.getLong("run_id"),
@@ -206,6 +244,7 @@ public class AgentRunRepository {
                         rs.getBoolean("truncated"),
                         rs.getString("status"),
                         (Integer) rs.getObject("cost_ms"),
+                        (Integer) rs.getObject("tokens_est"),
                         toInstant(rs.getTimestamp("created_at"))),
                 runId);
     }

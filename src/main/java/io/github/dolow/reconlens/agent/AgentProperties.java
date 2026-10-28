@@ -296,6 +296,46 @@ public class AgentProperties {
             }
             this.maxTolerancePercent = maxTolerancePercent;
         }
+
+        /**
+         * 单条规则最多允许多少分片。
+         *
+         * <p>默认 256：分片是<b>重跑单位</b>（一个分片失败只重跑它），代价是每个分片一个任务行 + 一次
+         * 线程池任务。{@code shard.count: 100000} 不报错、只是把"重跑一个失败分片"变成"重跑一万个"。
+         * 这是数量上界，不是性能调优项——真要切那么细，先想清楚失败重跑的成本。
+         */
+        private int maxShardCount = 256;
+
+        public int getMaxShardCount() {
+            return maxShardCount;
+        }
+
+        public void setMaxShardCount(int maxShardCount) {
+            if (maxShardCount < 1 || maxShardCount > 4096) {
+                throw new IllegalArgumentException("recon.agent.safety.max-shard-count 必须在 1~4096 之间"
+                        + "（下限 1 是「不分片」，上限是「再大就不是重跑单位而是压力测试」）");
+            }
+            this.maxShardCount = maxShardCount;
+        }
+
+        /**
+         * <b>只在测试/演示用</b>：强制给每条候选规则追加一条 {@code TEST_FORCED} 违规。
+         *
+         * <p>用途是验证"闸门 1 拒绝之后"的整条链路（回炉 re-plan → 只做归因 → 落 PARTIAL）。
+         * 真模型被拒绝一次后几乎总能自我纠正，实测三条触发路都被它修好了，所以这条分支在生产上
+         * 没有自然证据；只有人为关掉"模型会改对"这个变量，才能把它跑一遍。
+         *
+         * <p>开着它时<b>任何草稿都过不了闸门 1</b>，等于关掉了起草功能 —— 默认 false，打开会打 WARN。
+         */
+        private boolean forceDraftViolation = false;
+
+        public boolean isForceDraftViolation() {
+            return forceDraftViolation;
+        }
+
+        public void setForceDraftViolation(boolean forceDraftViolation) {
+            this.forceDraftViolation = forceDraftViolation;
+        }
     }
 
     /**

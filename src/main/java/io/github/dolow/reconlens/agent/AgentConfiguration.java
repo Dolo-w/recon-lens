@@ -94,7 +94,9 @@ public class AgentConfiguration {
                                                    AgentProperties properties) {
         return new RuleSafetyValidator(schemaCatalog, shardSplitAnalyzer,
                 properties.getSafety().getToleranceMultiplier(),
-                properties.getSafety().getMaxTolerancePercent());
+                properties.getSafety().getMaxTolerancePercent(),
+                properties.getSafety().getMaxShardCount(),
+                properties.getSafety().isForceDraftViolation());
     }
 
     // ---------------- 闸门 2：影子试算 ----------------
@@ -199,9 +201,25 @@ public class AgentConfiguration {
                                                RuleDrafter ruleDrafter,
                                                ExplainService explainService,
                                                AgentProperties agentProperties,
-                                               ObjectMapper objectMapper) {
+                                               ObjectMapper objectMapper,
+                                               io.github.dolow.reconlens.store.RuleRepository ruleRepository) {
         return new AgentOrchestrator(agentRunRepository, ruleCatalog, reconEngine, shadowTrialService,
-                ruleDrafter, explainService, agentProperties, objectMapper);
+                ruleDrafter, explainService, agentProperties, objectMapper, ruleRepository);
+    }
+
+    /**
+     * 把恢复能力装成引擎侧的窄接口，供 web 的 {@code POST /api/agent/runs/{id}/resume} 使用。
+     *
+     * <p>为什么不直接让控制器注入 {@code AgentOrchestrator}：{@code AgentBoundaryTest} 断言
+     * 「agent 之外只有 mcp.AgentMcpTools 可以依赖 agent」，web 碰一下那条规则就破了。
+     */
+    @Bean
+    public io.github.dolow.reconlens.rule.RunResumer runResumer(AgentOrchestrator orchestrator) {
+        return (runId, operator) -> {
+            AgentOrchestrator.AgentRunResult result = orchestrator.resume(runId, operator);
+            return new io.github.dolow.reconlens.rule.RunResumer.Outcome(
+                    result.status().name(), result.ruleCode(), result.draftVersion(), result.jobId(), result.message());
+        };
     }
 
     /**

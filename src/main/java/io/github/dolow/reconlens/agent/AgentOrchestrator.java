@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.RuleOrigin;
 import io.github.dolow.reconlens.domain.TrialState;
+import io.github.dolow.reconlens.domain.TrialVerdict;
 import io.github.dolow.reconlens.dsl.RuleException;
+import io.github.dolow.reconlens.dsl.RuleGateRejectedException;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.engine.Errors;
 import io.github.dolow.reconlens.engine.ReconEngine;
@@ -13,6 +15,7 @@ import io.github.dolow.reconlens.llm.PromptGuard;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.rule.SpecHasher;
 import io.github.dolow.reconlens.store.AgentRunRepository;
+import io.github.dolow.reconlens.store.RuleRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -47,14 +50,23 @@ public class AgentOrchestrator {
     private static final Logger log = LoggerFactory.getLogger(AgentOrchestrator.class);
 
     /**
-     * 单步 payload 的上限。超了截断并置 {@code truncated}：
-     * 轨迹的用途是"能看懂发生了什么"，不是"完整存档" —— 后者应该走对象存储，
-     * 塞进 TEXT 列的结果是某天写库失败（1406）。
+     * 单步 payload 的上限（token，不是字符 —— 与 TurnBudget 同一把尺子）。
+     *
+     * <p>超了截断并置 {@code truncated}：轨迹的用途是"能看懂发生了什么"，
+     * 不是"完整存档" —— 后者应该走对象存储，塞进 TEXT 列的结果是某天写库失败（1406）。
      */
-    private static final int MAX_STEP_PAYLOAD = 6000;
+    private static final int MAX_STEP_PAYLOAD = 2000;
 
     /** LEARN 阶段一次最多补多少条归因。会话不是批处理，补几条看趋势就够了。 */
     private static final int LEARN_DIFF_LIMIT = 20;
+
+    /**
+     * 一次会话最多换几次路径。
+     *
+     * <p>不设上限的 re-plan 会变成"换个说法再撞一次墙"：预算、墙钟、用户耐心都在同一个方向消耗。
+     * 两次的依据是当前只有一条真正的备选路径（起草受阻 → 只做诊断），第 3 次没有新东西可试。
+     */
+    private static final int MAX_REPLANS = 2;
 
     private final AgentRunRepository runs;
     private final RuleCatalog catalog;
@@ -64,10 +76,13 @@ public class AgentOrchestrator {
     private final ExplainService explain;
     private final AgentProperties properties;
     private final ObjectMapper json;
+    /** 恢复时读回"已经落库的试算态"用；不参与规划，只参与从哪接着做的判断。 */
+    private final RuleRepository rules;
 
     public AgentOrchestrator(AgentRunRepository runs, RuleCatalog catalog, ReconEngine engine,
                              ShadowTrialService trialService, RuleDrafter drafter,
-                             ExplainService explain, AgentProperties properties, ObjectMapper json) {
+                             ExplainService explain, AgentProperties properties, ObjectMapper json,
+                             RuleRepository rules) {
         this.runs = runs;
         this.catalog = catalog;
         this.engine = engine;
@@ -76,6 +91,7 @@ public class AgentOrchestrator {
         this.explain = explain;
         this.properties = properties;
         this.json = json;
+        this.rules = rules;
     }
 
     /** 一次会话的产出。{@code status} 用的是落库值，便于调用方直接对照 {@code recon_agent_run}。 */
@@ -111,7 +127,15 @@ public class AgentOrchestrator {
     }
 
     private enum Path {
-        EXISTING_RULE, DRAFT_RULE
+        EXISTING_RULE, DRAFT_RULE,
+        /**
+         * 兜底路径：不再尝试产出规则，只把"为什么没成"钉进轨迹，交人接手。
+         *
+         * <p>它<b>只能由 re-plan 产生</b>，{@link #plan} 永远不会选它 —— 否则"问一句需求"
+         * 会被直接翻译成"什么都不做"。存在的意义是让失败有产物：违规列表与受阻原因
+         * 比一个空手 {@code BLOCKED} 有用，下一个人不必从头再探一遍。
+         */
+        EXPLAIN_ONLY
     }
 
     private record Plan(Path path, String ruleCode, String reason) {
@@ -127,10 +151,16 @@ public class AgentOrchestrator {
     }
 
     private record ActResult(Long jobId, RuleDraft draft, ShadowTrialService.TrialResult trial,
-                             String ruleCode, Integer draftVersion, String blockedReason) {
+                             String ruleCode, Integer draftVersion, String blockedReason,
+                             String diagnosis) {
 
         static ActResult blocked(String reason, RuleDraft draft, String ruleCode, Integer draftVersion) {
-            return new ActResult(null, draft, null, ruleCode, draftVersion, reason);
+            return new ActResult(null, draft, null, ruleCode, draftVersion, reason, null);
+        }
+
+        /** 走完兜底路径的产物：一句诊断 + 已落库的草稿（如果有）。 */
+        static ActResult diagnosed(String diagnosis, RuleDraft draft, String ruleCode, Integer draftVersion) {
+            return new ActResult(null, draft, null, ruleCode, draftVersion, null, diagnosis);
         }
     }
 
@@ -144,7 +174,8 @@ public class AgentOrchestrator {
      */
     public AgentRunResult run(AgentGoal goal, String operator) {
         String who = operator == null || operator.isBlank() ? "agent" : operator;
-        long runId = runs.startRun(goal.describe(), goal.trigger().name(), who);
+        // 结构化目标一起落库：恢复时靠它还原 intent（"只起草"和"真的跑一次对账"是两条路）
+        long runId = runs.startRun(goal.describe(), toJson(goal), goal.trigger().name(), who);
         return execute(runId, goal, who);
     }
 
@@ -156,9 +187,17 @@ public class AgentOrchestrator {
      * @param operator 发起人（落草稿的 {@code created_by}）
      */
     public AgentRunResult execute(long runId, AgentGoal goal, String operator) {
+        return execute(runId, goal, operator, 0);
+    }
+
+    /**
+     * @param startSeq 从第几步接着写。恢复时用上一个会话的步号续上 ——
+     *                 {@code uk_agent_step (run_id, seq)} 不允许重号，从 0 重开会让第二步就写失败。
+     */
+    private AgentRunResult execute(long runId, AgentGoal goal, String operator, int startSeq) {
         String who = operator == null || operator.isBlank() ? "agent" : operator;
         AgentBudget budget = AgentBudget.of(properties);
-        int[] seq = {0};
+        int[] seq = {startSeq};
         String ruleCode = goal.ruleCode();
         Integer draftVersion = null;
         RuleDraft draft = null;
@@ -173,40 +212,54 @@ public class AgentOrchestrator {
             t = System.nanoTime();
             Plan plan = plan(goal, observation);
             String planJson = toJson(plan.asMap());
-            runs.updatePlan(runId, PromptGuard.scrub(planJson, MAX_STEP_PAYLOAD),
-                    planJson.length() > MAX_STEP_PAYLOAD);
+            runs.updatePlan(runId, PromptGuard.scrub(PromptGuard.truncateTokens(planJson, MAX_STEP_PAYLOAD), 0),
+                    io.github.dolow.reconlens.llm.Tokens.estimate(planJson) > MAX_STEP_PAYLOAD);
             recordStep(runId, ++seq[0], "PLAN", plan.path().name().toLowerCase(),
                     observation.summary(), planJson, "OK", t);
 
-            // ③ 行动
+            // ③ 行动（受阻就换路径：次数有上限，换路径这件事本身也要落轨迹）
             ActResult act = act(plan, goal, budget, runId, seq, who, observation);
+            for (int replans = 0; act.blockedReason() != null && replans < MAX_REPLANS && diagnosable(act);
+                 replans++) {
+                Plan next = new Plan(Path.EXPLAIN_ONLY, act.ruleCode(),
+                        "上一路径（" + plan.path().name().toLowerCase() + "）受阻：" + act.blockedReason()
+                                + "；改为把原因钉进轨迹，交人接手");
+                long tr = System.nanoTime();
+                recordStep(runId, ++seq[0], "PLAN", "replan-" + (replans + 1), act.blockedReason(),
+                        toJson(next.asMap()), "OK", tr);
+                plan = next;
+                act = actDiagnose(next, act, runId, seq);
+            }
             draft = act.draft();
             if (act.ruleCode() != null) {
                 ruleCode = act.ruleCode();
             }
             draftVersion = act.draftVersion();
             if (act.blockedReason() != null) {
-                runs.finishRun(runId, AgentRunRepository.RunStatus.BLOCKED, ruleCode, null, draftVersion,
-                        act.blockedReason());
-                return new AgentRunResult(runId, AgentRunRepository.RunStatus.BLOCKED, ruleCode, draftVersion,
+                // 草稿已落库就是"做了一半"：落 PARTIAL 而不是 BLOCKED ——
+                // 产物还在规则库里（v 号可复用），假装整件事没发生会让下一个人重做一遍。
+                AgentRunRepository.RunStatus status = draftVersion != null
+                        ? AgentRunRepository.RunStatus.PARTIAL
+                        : AgentRunRepository.RunStatus.BLOCKED;
+                runs.finishRun(runId, status, ruleCode, null, draftVersion, act.blockedReason());
+                return new AgentRunResult(runId, status, ruleCode, draftVersion,
                         null, act.blockedReason(), draft, null,
                         draft == null ? List.of() : draft.lastViolations());
             }
+            if (act.diagnosis() != null) {
+                // 兜底路径：目标没达成，但轨迹里留下了可复用的结论（为什么没成、卡在哪条违规）
+                runs.finishRun(runId, AgentRunRepository.RunStatus.PARTIAL, ruleCode, null, draftVersion,
+                        act.diagnosis());
+                return new AgentRunResult(runId, AgentRunRepository.RunStatus.PARTIAL, ruleCode, draftVersion,
+                        null, act.diagnosis(), draft, null,
+                        draft == null ? List.of() : draft.lastViolations());
+            }
 
-            // ④ 沉淀
-            learn(runId, act.jobId(), seq);
-
-            String message = act.jobId() != null
-                    ? "已按现有规则跑完对账，任务 #" + act.jobId() + "（差异明细用 recon_list_diffs 看）"
-                    : draft != null && draft.drafted()
-                    ? "草稿 " + ruleCode + " v" + draftVersion + " 已落库并完成影子试算（"
-                    + trialSummary(act.trial()) + "）；审批不由 Agent 执行，"
-                    + "请人工走 POST /api/rules/" + ruleCode + "/" + draftVersion + "/approve"
-                    : "已完成";
-            runs.finishRun(runId, AgentRunRepository.RunStatus.SUCCESS, ruleCode, act.jobId(),
-                    draftVersion, null);
-            return new AgentRunResult(runId, AgentRunRepository.RunStatus.SUCCESS, ruleCode, draftVersion,
-                    act.jobId(), message, draft, act.trial(), List.of());
+            // ④ 沉淀（与恢复共用同一段：恢复时"行动"的结论可能来自库里的旧产物）
+            return conclude(runId, act.jobId(),
+                    act.trial() == null ? null : trialPassed(act.trial().state()),
+                    act.trial() == null ? null : trialSummary(act.trial()),
+                    draft, ruleCode, draftVersion, seq);
         } catch (AgentBudget.ExceededException e) {
             // 预算耗尽 = 按规则不该继续，不是故障：落 BLOCKED，让运维看的是"这次被预算拦了"
             log.warn("Agent 会话 #{} 预算耗尽：{}", runId, e.getMessage());
@@ -221,6 +274,207 @@ public class AgentOrchestrator {
             return new AgentRunResult(runId, AgentRunRepository.RunStatus.FAILED, ruleCode, draftVersion,
                     null, "会话执行失败：" + Errors.describe(e), draft, null, List.of());
         }
+    }
+
+    // ------------------------------------------------------------------
+
+    /**
+     * ④ 沉淀 + 定状态。抽出来是为了让 {@link #resume} 复用同一段：
+     * 恢复时"行动"的结论可能不是刚算出来的，而是库里已有的草稿/试算/任务。
+     *
+     * @param trialPassed 试算是否通过；{@code null} = 这次没有试算（判不了"做了一半"）
+     * @param trialText   试算结论的一句话（人读；{@code null} = 没试算）
+     */
+    private AgentRunResult conclude(long runId, Long jobId, Boolean trialPassed, String trialText,
+                                    RuleDraft draft, String ruleCode, Integer draftVersion, int[] seq) {
+        learn(runId, jobId, seq);
+
+        // 草稿落了库、试算却没通过：这是"做了一半"，不是成功。
+        // 实测撞到的具体场景：H2 不认 CRC32 → 每条分片 FAILED → INCONCLUSIVE，而 run 却报 SUCCESS，
+        // 下游（人、脚本、审批）会以为"已经验过了"。
+        boolean draftedButNotPassed = draftVersion != null && Boolean.FALSE.equals(trialPassed);
+        if (draftedButNotPassed) {
+            String reason = "草稿已落库（v" + draftVersion + "），但试算没通过："
+                    + (trialText == null ? "未知" : trialText)
+                    + "；产物留在规则库里，等人工判断 —— 这不等于这条规则可用";
+            runs.finishRun(runId, AgentRunRepository.RunStatus.PARTIAL, ruleCode, null, draftVersion, reason);
+            return new AgentRunResult(runId, AgentRunRepository.RunStatus.PARTIAL, ruleCode, draftVersion,
+                    null, reason, draft, null, List.of());
+        }
+
+        String message = jobId != null
+                ? "已按现有规则跑完对账，任务 #" + jobId + "（差异明细用 recon_list_diffs 看）"
+                : draftVersion != null
+                ? "草稿 " + ruleCode + " v" + draftVersion + " 已落库并完成影子试算（"
+                + (trialText == null ? "未试算" : trialText) + "）；审批不由 Agent 执行，"
+                + "请人工走 POST /api/rules/" + ruleCode + "/" + draftVersion + "/approve"
+                : "已完成";
+        runs.finishRun(runId, AgentRunRepository.RunStatus.SUCCESS, ruleCode, jobId, draftVersion, null);
+        return new AgentRunResult(runId, AgentRunRepository.RunStatus.SUCCESS, ruleCode, draftVersion,
+                jobId, message, draft, null, List.of());
+    }
+
+    /** 恢复点：从最后一个**持久化产物**接着做，而不是从头再猜一遍。 */
+    public enum ResumePoint {
+        /** 没有可复用产物（感知/规划/起草中途崩的）：从头跑，沿用同一个 runId 与步号。 */
+        SCRATCH,
+        /** 草稿已落库：只补试算 + 沉淀。 */
+        DRAFT_SAVED,
+        /** 试算已落库：只补沉淀（不再重跑试算，那会多一条任务）。 */
+        TRIAL_DONE,
+        /** 对账任务已建：只补沉淀（归因）。 */
+        JOB_DONE
+    }
+
+    /**
+     * 恢复一次中断的会话。
+     *
+     * <p>只认两种起点：{@code RUNNING}（进程被杀了，启动巡检会自动接管）和 {@code FAILED}
+     * （执行中真出了异常，救不救由人决定）。{@code SUCCESS / PARTIAL / BLOCKED} 不恢复 ——
+     * 那三种都是有结论的终点，重开会把结论搅掉。
+     *
+     * <p>判断"从哪接着做"只看轨迹里最后一个 ACT：{@code save-draft} → 补试算；
+     * {@code shadow-trial} → 补沉淀；{@code run-reconciliation} → 补归因；其余 → 从头重跑。
+     */
+    public AgentRunResult resume(long runId, String operator) {
+        String who = operator == null || operator.isBlank() ? "agent" : operator;
+        AgentRunRepository.AgentRun run = runs.findRun(runId)
+                .orElseThrow(() -> new IllegalArgumentException("没有这个会话：#" + runId));
+        AgentRunRepository.RunStatus status = AgentRunRepository.RunStatus.valueOf(run.status());
+        if (status != AgentRunRepository.RunStatus.RUNNING && status != AgentRunRepository.RunStatus.FAILED) {
+            throw new IllegalStateException("会话 #" + runId + " 已经结束（" + run.status()
+                    + "）：只有 RUNNING（进程中断）或 FAILED（被启动巡检标记）的会话能恢复；"
+                    + "出了结论的会话重跑会把结论搅乱");
+        }
+        AgentGoal goal = goalOf(run);
+        ResumePoint point = resumePoint(runs.listSteps(runId));
+        int[] seq = {runs.nextSeq(runId) - 1};
+        recordStep(runId, ++seq[0], "RESUME", "from-" + point.name().toLowerCase(java.util.Locale.ROOT),
+                goal.describe(), pointExplain(run, point), "OK", System.nanoTime());
+        log.info("恢复会话 #{}：从 {} 接着做", runId, point);
+        try {
+            return switch (point) {
+                case SCRATCH -> execute(runId, goal, who, seq[0]);
+                case DRAFT_SAVED -> resumeDraft(runId, run, seq);
+                case TRIAL_DONE -> {
+                    RuleRepository.TrialRecord record = trialRecordOf(run.ruleCode(), run.draftVersion());
+                    yield conclude(runId, null, record != null && "PASS".equals(record.verdict()),
+                            describeTrialRecord(record), null, run.ruleCode(), run.draftVersion(), seq);
+                }
+                case JOB_DONE -> conclude(runId, run.jobId(), null, null, null, run.ruleCode(), null, seq);
+            };
+        } catch (RuntimeException e) {
+            log.error("恢复会话 #{} 失败：{}", runId, Errors.describe(e));
+            runs.finishRun(runId, AgentRunRepository.RunStatus.FAILED, run.ruleCode(), null,
+                    run.draftVersion(), "恢复失败：" + Errors.describe(e));
+            return new AgentRunResult(runId, AgentRunRepository.RunStatus.FAILED, run.ruleCode(),
+                    run.draftVersion(), null, "恢复失败：" + Errors.describe(e), null, null, List.of());
+        }
+    }
+
+    /** 草稿已在库里：只补试算，然后走公共的沉淀段。 */
+    private AgentRunResult resumeDraft(long runId, AgentRunRepository.AgentRun run, int[] seq) {
+        long t = System.nanoTime();
+        ShadowTrialService.TrialResult trial;
+        try {
+            trial = trialService.trial(run.ruleCode(), run.draftVersion());
+        } catch (RuleException e) {
+            recordStep(runId, ++seq[0], "ACT", "shadow-trial", "恢复：试算 " + run.ruleCode(),
+                    gateRejectedPayload(e), "BLOCKED", t);
+            String reason = "草稿已落库（v" + run.draftVersion() + "），但恢复时试算被闸门 1 拒绝："
+                    + Errors.describe(e);
+            runs.finishRun(runId, AgentRunRepository.RunStatus.PARTIAL, run.ruleCode(), null,
+                    run.draftVersion(), reason);
+            return new AgentRunResult(runId, AgentRunRepository.RunStatus.PARTIAL, run.ruleCode(),
+                    run.draftVersion(), null, reason, null, null, List.of());
+        }
+        recordStep(runId, ++seq[0], "ACT", "shadow-trial",
+                "恢复：试算 " + run.ruleCode() + " v" + run.draftVersion(),
+                trialPayload(trial), trialStatus(trial.state()), t);
+        return conclude(runId, null, trialPassed(trial.state()), trialSummary(trial),
+                null, run.ruleCode(), run.draftVersion(), seq);
+    }
+
+    /**
+     * 轨迹里最后一个 ACT 决定还能复用什么。
+     *
+     * <p>只看 ACT 不看 PLAN：PLAN 只是"打算怎么做"，崩在规划阶段等于什么都没做；
+     * 而 {@code draft-round-N} 虽然跑过模型，但那一轮的产物没有落库，重跑是唯一选择。
+     */
+    static ResumePoint resumePoint(List<AgentRunRepository.AgentStep> steps) {
+        for (int i = steps.size() - 1; i >= 0; i--) {
+            AgentRunRepository.AgentStep step = steps.get(i);
+            if (!"ACT".equals(step.phase()) || step.action() == null) {
+                continue;
+            }
+            String action = step.action();
+            if (action.startsWith("shadow-trial")) {
+                return ResumePoint.TRIAL_DONE;
+            }
+            if (action.startsWith("save-draft")) {
+                return ResumePoint.DRAFT_SAVED;
+            }
+            if (action.startsWith("run-reconciliation")) {
+                return ResumePoint.JOB_DONE;
+            }
+            return ResumePoint.SCRATCH;
+        }
+        return ResumePoint.SCRATCH;
+    }
+
+    private String pointExplain(AgentRunRepository.AgentRun run, ResumePoint point) {
+        return switch (point) {
+            case SCRATCH -> "没有可复用的产物（上次停在感知/规划/起草），从头重跑；沿用同一个会话号与步号";
+            case DRAFT_SAVED -> "草稿 " + run.ruleCode() + " v" + run.draftVersion() + " 已在库里，接着补试算与沉淀";
+            case TRIAL_DONE -> "试算已在库里（" + run.ruleCode() + " v" + run.draftVersion()
+                    + "），不再重跑试算，接着补沉淀";
+            case JOB_DONE -> "对账任务 #" + run.jobId() + " 已建，接着补归因";
+        };
+    }
+
+    /** 读回已经落库的试算记录；没有就 {@code null}（= 从没试算过）。 */
+    private RuleRepository.TrialRecord trialRecordOf(String ruleCode, Integer version) {
+        if (ruleCode == null || version == null) {
+            return null;
+        }
+        return rules.findTrial(ruleCode, version).orElse(null);
+    }
+
+    /** 一行试算结论：{@code PASS / INCONCLUSIVE / SAMPLE_PARTIAL / …}。 */
+    private static String describeTrialRecord(RuleRepository.TrialRecord record) {
+        if (record == null || record.verdict() == null || record.verdict().isBlank()) {
+            return "未试算";
+        }
+        StringBuilder sb = new StringBuilder(record.verdict());
+        if (record.coverage() != null && !record.coverage().isBlank()) {
+            sb.append(" / ").append(record.coverage());
+        }
+        if (record.coverageReason() != null && !record.coverageReason().isBlank()) {
+            sb.append(" / ").append(record.coverageReason());
+        }
+        return sb.toString();
+    }
+
+    /** 试算态 → 是否通过（"跳过"和"没跑"都不算通过）。 */
+    private static Boolean trialPassed(TrialState state) {
+        return state instanceof TrialState.Trialed trialed ? trialed.verdict() == TrialVerdict.PASS : Boolean.FALSE;
+    }
+
+    /**
+     * 还原目标。优先读 {@code goal_json}；旧记录没有这一列时退回文本重建，
+     * 且只给 {@code intent=DRAFT_RULE} —— 万一原来那条是想跑对账的，恢复后也只是"少跑一次"，
+     * 而不是"多跑一次生产对账"。
+     */
+    private AgentGoal goalOf(AgentRunRepository.AgentRun run) {
+        String json = runs.goalJson(run.id()).orElse(null);
+        if (json != null && !json.isBlank()) {
+            try {
+                return this.json.readValue(json, AgentGoal.class);
+            } catch (Exception e) {
+                log.warn("会话 #{} 的 goal_json 解析失败，按文本重建：{}", run.id(), Errors.describe(e));
+            }
+        }
+        return AgentGoal.of(run.goal(), run.ruleCode(), null);
     }
 
     // ------------------------------------------------------------------
@@ -274,7 +528,40 @@ public class AgentOrchestrator {
         if (plan.path() == Path.EXISTING_RULE) {
             return actExisting(plan, goal, runId, seq);
         }
+        if (plan.path() == Path.EXPLAIN_ONLY) {
+            // 走到这里说明有人把兜底路径塞进了首选：宁可报错，也不要让它悄悄变成"什么都不做"
+            throw new IllegalStateException("EXPLAIN_ONLY 只能由 re-plan 产生，不能作为首选路径");
+        }
         return actDraft(plan, goal, budget, runId, seq, operator, observation);
+    }
+
+    /**
+     * 兜底路径：把"为什么没成"钉进轨迹，返回 PARTIAL 的产物。
+     *
+     * <p>不调用模型、不落草稿、不改规则库 —— 这一段只做一件事：把失败变成可交接的证据。
+     */
+    private ActResult actDiagnose(Plan plan, ActResult failed, long runId, int[] seq) {
+        long t = System.nanoTime();
+        Map<String, Object> root = new LinkedHashMap<>();
+        root.put("failedReason", failed.blockedReason());
+        root.put("ruleCode", plan.ruleCode());
+        root.put("violations", failed.draft() == null ? List.of() : failed.draft().lastViolations());
+        root.put("note", "Agent 没有别的路径可走；草稿若已落库，版本号在 draft_version 上，可直接人工接手");
+        recordStep(runId, ++seq[0], "ACT", "diagnose-blocked", plan.reason(), toJson(root), "DIAGNOSED", t);
+        String diagnosis = "没做成：" + failed.blockedReason()
+                + (failed.draftVersion() == null ? "" : "；已落库草稿 v" + failed.draftVersion() + " 可直接接手")
+                + "（诊断已记入轨迹）";
+        return ActResult.diagnosed(diagnosis, failed.draft(), plan.ruleCode(), failed.draftVersion());
+    }
+
+    /**
+     * 有没有东西可诊断：必须是「起草真跑过、闸门真说了不」。
+     *
+     * <p>没有违规就没有信息量 —— 把"大模型未启用"这类配置问题再写一遍只是换个措辞，
+     * 还会把一次干净的 BLOCKED 变成 PARTIAL，让运维以为"做了点什么"。
+     */
+    private static boolean diagnosable(ActResult failed) {
+        return failed.draft() != null && !failed.draft().lastViolations().isEmpty();
     }
 
     /** 确定性路径：直接跑对账，一个 token 都不花。 */
@@ -290,7 +577,7 @@ public class AgentOrchestrator {
                 + "｜匹配 " + job.matchedRows() + "｜差异 " + job.diffRows();
         recordStep(runId, ++seq[0], "ACT", "run-reconciliation", plan.reason(), payload,
                 job.status().name(), t);
-        return new ActResult(job.id(), null, null, resolved.spec().code(), null, null);
+        return new ActResult(job.id(), null, null, resolved.spec().code(), null, null, null);
     }
 
     private ActResult actDraft(Plan plan, AgentGoal goal, AgentBudget budget, long runId, int[] seq,
@@ -304,8 +591,12 @@ public class AgentOrchestrator {
         for (RuleDraft.Round round : draft.rounds()) {
             String payload = round.detail() != null ? round.detail()
                     : round.violations().isEmpty() ? "通过" : String.join("\n", round.violations());
+            // 这一轮的真实 token（模型响应 usage）与耗时（起草器自己按轮计时）优先；
+            // 拿不到就按 payload 估算 / 用外部计时器
             recordStep(runId, ++seq[0], "ACT", "draft-round-" + round.index(), plan.reason(), payload,
-                    round.status(), t);
+                    round.status(), t,
+                    round.tokens() > 0 ? round.tokens() : null,
+                    round.costMs() > 0 ? Integer.valueOf(round.costMs()) : null);
             t = System.nanoTime();
         }
         if (!draft.drafted()) {
@@ -338,13 +629,28 @@ public class AgentOrchestrator {
             trial = trialService.trial(saved.spec().code(), saved.version());
         } catch (RuleException e) {
             // 起草时已过闸门 1，这里再被拒只可能是基线在这一瞬间变了 —— 记为 BLOCKED，等人工确认
-            recordStep(runId, ++seq[0], "ACT", "shadow-trial", "试算", Errors.describe(e), "BLOCKED", t);
-            return ActResult.blocked("草稿落库后试算被闸门 1 拒绝：" + Errors.describe(e),
-                    draft, saved.spec().code(), saved.version());
+            recordStep(runId, ++seq[0], "ACT", "shadow-trial", "试算", gateRejectedPayload(e), "BLOCKED", t);
+            // 草稿已经在规则库里（v 号可复用）：说清「产物在哪、卡在哪」，下一个人不用重做
+            return ActResult.blocked("草稿已落库（v" + saved.version() + "），但试算被闸门 1 拒绝："
+                    + Errors.describe(e), draft, saved.spec().code(), saved.version());
         }
         recordStep(runId, ++seq[0], "ACT", "shadow-trial", "试算 " + saved.spec().code() + " v" + saved.version(),
                 trialPayload(trial), trialStatus(trial.state()), t);
-        return new ActResult(null, draft, trial, saved.spec().code(), saved.version(), null);
+        return new ActResult(null, draft, trial, saved.spec().code(), saved.version(), null, null);
+    }
+
+    /**
+     * 试算被闸门 1 拒绝时落进轨迹的 payload：结构化违规优先。
+     * 只留一句话时，下一个人（或下一次 re-plan）只能靠正则从中文里抠字段。
+     */
+    private String gateRejectedPayload(RuleException e) {
+        if (!(e instanceof RuleGateRejectedException rejected)) {
+            return Errors.describe(e);
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("reason", Errors.describe(e));
+        payload.put("violations", rejected.violationViews());
+        return toJson(payload);
     }
 
     /**
@@ -352,12 +658,17 @@ public class AgentOrchestrator {
      * <b>只用于人读的消息，不进 {@code status} 列</b> —— 那一列是 VARCHAR(16)。
      */
     private static String trialSummary(ShadowTrialService.TrialResult trial) {
-        if (trial == null) {
+        return trial == null ? "未试算" : trialSummary(trial.state());
+    }
+
+    /** 同上，但手上只有试算态（恢复时是从 {@code recon_rule} 读回来的）。 */
+    private static String trialSummary(TrialState state) {
+        if (state == null) {
             return "未试算";
         }
-        return trial.state() instanceof TrialState.Trialed trialed
+        return state instanceof TrialState.Trialed trialed
                 ? TrialVerdictResolver.describe(trialed)
-                : trial.state().getClass().getSimpleName();
+                : state.getClass().getSimpleName();
     }
 
     /** 步骤标签：{@code PASS} / {@code INCONCLUSIVE} / {@code Skipped} —— 短到能进 VARCHAR(16)。 */
@@ -400,12 +711,42 @@ public class AgentOrchestrator {
 
     private void recordStep(long runId, int seq, String phase, String action, String input,
                             String payload, String status, long startedNanos) {
-        int costMs = (int) Duration.ofNanos(System.nanoTime() - startedNanos).toMillis();
-        String scrubbed = PromptGuard.scrub(payload, MAX_STEP_PAYLOAD);
+        recordStep(runId, seq, phase, action, input, payload, status, startedNanos, null, null);
+    }
+
+    /**
+     * @param tokensOverride 这一步的真实 token 用量（模型响应里的 {@code usage.total_tokens}）；
+     *                       {@code null} = 按落库 payload 估算
+     */
+    private void recordStep(long runId, int seq, String phase, String action, String input,
+                            String payload, String status, long startedNanos, Integer tokensOverride) {
+        recordStep(runId, seq, phase, action, input, payload, status, startedNanos, tokensOverride, null);
+    }
+
+    /**
+     * 全部参数的版本。
+     *
+     * @param tokensOverride 这一步的真实 token 用量；{@code null} = 按落库 payload 估算
+     * @param costMsOverride 这一步的真实墙钟耗时；{@code null} = 用 {@code startedNanos} 自己算。
+     *                       起草的每一轮都在 {@code draft()} 内部跑完，外部计时器只能量到整段，
+     *                       所以轮次的耗时必须由起草器自己报（见 {@code RuleDraft.Round#costMs()}）。
+     */
+    private void recordStep(long runId, int seq, String phase, String action, String input,
+                            String payload, String status, long startedNanos,
+                            Integer tokensOverride, Integer costMsOverride) {
+        int costMs = costMsOverride != null
+                ? costMsOverride
+                : (int) Duration.ofNanos(System.nanoTime() - startedNanos).toMillis();
+        String scrubbed = PromptGuard.scrub(PromptGuard.truncateTokens(payload, MAX_STEP_PAYLOAD), 0);
         boolean truncated = payload != null && scrubbed.length() < payload.length();
         String digest = payload == null ? null : SpecHasher.sha256(payload);
+        // token 记在落表那一份（scrubbed）上：复盘时能看到的就是它，拿原文估会和实际写进库的内容对不上账。
+        // 有真实用量就用真实的 —— 估算口径是字符数，会比真实 token 大一个量级（实测 5018ms 的一轮记成 2）。
+        int tokensEst = tokensOverride != null
+                ? tokensOverride
+                : scrubbed == null ? 0 : io.github.dolow.reconlens.llm.Tokens.estimate(scrubbed);
         runs.recordStep(runId, seq, phase, action, PromptGuard.scrub(input, 500), scrubbed, digest,
-                truncated, statusLabel(status), costMs);
+                truncated, statusLabel(status), costMs, tokensEst);
     }
 
     /**

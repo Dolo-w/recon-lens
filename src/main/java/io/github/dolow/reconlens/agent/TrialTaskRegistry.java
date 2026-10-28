@@ -37,9 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       内存表只回答"现在跑到哪一步了"，查不到就落库查 —— 而不是假装没有这个任务。</li>
  * </ol>
  *
- * <p><b>进程重启会丢什么</b>：丢"排队中/进行中"的会话状态。启动时
- * {@link #run(ApplicationArguments)} 会把库里残留的 QUEUED/RUNNING 会话标成 FAILED 并写明原因 ——
- * 否则运维看到一行永远 RUNNING 的记录，分不清"还在跑"和"进程半路死了"。
+ * <p><b>进程重启会丢什么</b>：丢"排队中/进行中"的会话状态，但<b>不丢已经落库的产物</b>。启动时
+ * {@link #run(ApplicationArguments)} 只清点库里残留的 QUEUED/RUNNING 会话并留痕，
+ * 真正"接着做"由 {@code AgentRunRecovery} 按轨迹判断（草稿/试算/任务都在库里）。
  * 试算本身有租约回收，样本表不会漏。
  */
 public class TrialTaskRegistry implements ApplicationRunner {
@@ -50,7 +50,7 @@ public class TrialTaskRegistry implements ApplicationRunner {
     static final int DEFAULT_STALE_RUN_MINUTES = 10;
 
     public enum Status {
-        QUEUED, RUNNING, SUCCESS, BLOCKED, FAILED;
+        QUEUED, RUNNING, SUCCESS, PARTIAL, BLOCKED, FAILED;
 
         public boolean inFlight() {
             return this == QUEUED || this == RUNNING;
@@ -110,25 +110,23 @@ public class TrialTaskRegistry implements ApplicationRunner {
     }
 
     /**
-     * 启动时把库里残留的排队/运行中会话标成失败。
+     * 启动时清点库里残留的排队/运行中会话，<b>交给启动恢复接着做</b>。
      *
-     * <p>内存任务表是空的：这些会话这次进程不会再执行，但它们也不会自己消失。
-     * 留着 RUNNING 会让人误判成"还在跑"，所以宁可标记成 FAILED 并写清原因。
+     * <p>为什么不再标 FAILED：上一版的做法是"标成失败、写清原因"，代价是
+     * 已经落库的草稿、已经跑完的试算全被当成没发生过。这些产物是有价值的，
+     * 而从最后一个产物接着做（{@code AgentRunRecovery}）比假装它们没存在过更诚实。
      *
-     * <p>只清理"开始超过 {@code recon.agent.stale-run-minutes}（默认 10）分钟"的行：
-     * Web 与 MCP 是两个进程共用一个库，看见刚创建的 RUNNING 行时，它很可能正在另一个进程里跑。
+     * <p>这里只负责清点与留痕；真正要不要救、从哪一步救，由恢复侧按轨迹判断。
+     * 清点失败同样不阻止启动 —— 它只是让状态更可观测，不是主流程。
      */
     @Override
     public void run(ApplicationArguments args) {
         try {
-            int marked = runs.failUnfinished(
-                    "进程重启时该会话仍在排队/运行中，已标记为失败；需要的话重新提交（recon_draft_rule 或 recon_define_rule）",
-                    Duration.ofMinutes(staleRunMinutes));
-            if (marked > 0) {
-                log.warn("启动清理：{} 条排队/运行中的 Agent 会话被标记为失败（上一次进程没有收尾）", marked);
+            List<Long> leftover = runs.unfinishedRunIds();
+            if (!leftover.isEmpty()) {
+                log.warn("启动清理：{} 条排队/运行中的 Agent 会话交给启动恢复（{}）", leftover.size(), leftover);
             }
         } catch (RuntimeException e) {
-            // 清理失败不该阻止应用启动：它只是让状态更诚实，不是主流程
             log.warn("启动清理残留会话失败（不影响启动）：{}", e.toString());
         }
     }
@@ -234,6 +232,7 @@ public class TrialTaskRegistry implements ApplicationRunner {
             AgentOrchestrator.AgentRunResult result = orchestrator.execute(runId, goal, who);
             Status status = switch (result.status()) {
                 case SUCCESS -> Status.SUCCESS;
+                case PARTIAL -> Status.PARTIAL;
                 case BLOCKED -> Status.BLOCKED;
                 case FAILED, RUNNING -> Status.FAILED;
             };
@@ -277,3 +276,5 @@ public class TrialTaskRegistry implements ApplicationRunner {
         return code + "#" + version;
     }
 }
+
+

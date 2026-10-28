@@ -78,24 +78,28 @@ class TrialTaskRegistryTest {
     }
 
     @Test
-    @DisplayName("启动时把上一次进程遗留的 RUNNING 会话标成失败")
-    void startupMarksLeftoverRunningRunsAsFailed() {
-        when(runs.failUnfinished(contains("进程重启"), any())).thenReturn(2);
+    @DisplayName("启动时只清点遗留的 RUNNING 会话，不再把它们标成失败")
+    void startupCountsLeftoverRunningRunsWithoutFailingThem() {
+        when(runs.unfinishedRunIds()).thenReturn(java.util.List.of(7L, 8L));
 
         registry.run(null);
 
-        verify(runs).failUnfinished(contains("进程重启"), any());
+        // 遗留会话现在交给 AgentRunRecovery（从最后一个产物接着做），这里只清点、不改状态：
+        // 库层面已经没有"把残留会话标成 FAILED"的入口了，所以这个测试能断言的就是"只读了一次"
+        verify(runs).unfinishedRunIds();
     }
 
     @Test
-    @DisplayName("清理失败不阻止启动")
-    void cleanupFailureDoesNotStopTheApplication() {
-        when(runs.failUnfinished(anyString(), any())).thenThrow(new IllegalStateException("库连不上"));
+    @DisplayName("清点失败不阻止启动")
+    void countFailureDoesNotStopTheApplication() {
+        when(runs.unfinishedRunIds()).thenThrow(new IllegalStateException("库连不上"));
 
         registry.run(null);
 
         // 不抛异常就算通过；这里再确认一次它确实尝试过
-        verify(runs, timeout(TimeUnit.SECONDS.toMillis(1)).times(1)).failUnfinished(anyString(), any());
+        verify(runs, timeout(TimeUnit.SECONDS.toMillis(1)).times(1)).unfinishedRunIds();
         verify(orchestrator, never()).run(any(), anyString());
     }
 }
+
+

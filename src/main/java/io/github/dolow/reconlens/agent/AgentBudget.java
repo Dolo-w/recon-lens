@@ -102,16 +102,28 @@ public final class AgentBudget {
     }
 
     /**
-     * 记一次 LLM 往返的开销。
+     * 记一次 LLM 往返的开销（只有估算口径）。
      *
-     * <p>按"提示 + 回复"的总字符数计：提示是我们要付的输入费，回复是输出费，两边都算。
+     * <p>见 {@link #spendLlm(String, String, int)}：真实用量拿得到时走那个重载。
      */
     public void spendLlm(String prompt, String reply) {
+        spendLlm(prompt, reply, 0);
+    }
+
+    /**
+     * 记一次 LLM 往返的开销，<b>优先用真实用量</b>。
+     *
+     * @param actualTokens 响应里的 {@code usage.total_tokens}；拿不到传 0
+     *
+     * <p>为什么两种口径都留：真实用量不是每次都有（流式响应、网关裁剪、非 OpenAI 协议都可能没有），
+     * 没有时退回"提示 + 回复"的字符数 —— 那是 token 的<b>上界</b>，拿它当账本会让预算比实际早耗尽。
+     */
+    public void spendLlm(String prompt, String reply, int actualTokens) {
         rounds++;
-        tokens += estimateTokens(prompt) + estimateTokens(reply);
+        tokens += actualTokens > 0 ? actualTokens : estimateTokens(prompt) + estimateTokens(reply);
         if (tokens > maxTokens) {
             throw new ExceededException(ExceededException.Dimension.TOKENS,
-                    "已用约 " + tokens + "，上限 " + maxTokens + "（估算口径：字符数即 token 上界）");
+                    "已用 " + tokens + "（" + (actualTokens > 0 ? "实测" : "估算") + "），上限 " + maxTokens);
         }
         requireTime();
     }

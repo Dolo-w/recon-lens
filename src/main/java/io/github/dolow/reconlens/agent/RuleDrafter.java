@@ -107,6 +107,9 @@ public class RuleDrafter {
     private final RuleSafetyValidator validator;
     private final RuleParser parser = new RuleParser();
     private final ObjectMapper json;
+    /** 起草这条路的熔断账本：模型连续吐不出合法规则时，别让每一轮都重试满 3 次。 */
+    private final io.github.dolow.reconlens.llm.LlmCircuitBreaker breaker =
+            new io.github.dolow.reconlens.llm.LlmCircuitBreaker("规则起草");
 
     public RuleDrafter(LlmChatClient client, SchemaCatalog schema, RuleCatalog catalog,
                        RuleSafetyValidator validator, ObjectMapper json) {
@@ -130,6 +133,10 @@ public class RuleDrafter {
             return RuleDraft.rejected("大模型未启用或未配置（recon.llm.enabled / api-key），"
                     + "本次只能转人工起草", List.of());
         }
+        if (!breaker.allow()) {
+            return RuleDraft.rejected("模型起草刚连续失败，熔断 " + (breaker.remainingMs() / 1000)
+                    + " 秒（" + breaker.state() + "），本次转人工起草", List.of());
+        }
         RuleSpec baseline = baseline(preferredCode);
         String basePrompt = buildPrompt(request, preferredCode, baseline);
 
@@ -145,18 +152,25 @@ public class RuleDrafter {
                 throw e;        // token / 墙钟用尽 = 必须停下
             }
 
+            long roundStarted = System.nanoTime();
             String user = feedback.isEmpty() ? basePrompt : basePrompt + "\n\n" + feedback;
             Optional<String> reply = client.complete(SYSTEM_PROMPT, user);
+            // 真实用量：客户端从响应 usage 里读到多少就记多少；读不到才退回字符数估算
+            int used = reply.isPresent() ? client.lastTokens() : 0;
             if (reply.isEmpty()) {
-                rounds.add(new RuleDraft.Round(rounds.size() + 1, "LLM_UNAVAILABLE", List.of(), null));
+                breaker.onFailure();
+                rounds.add(new RuleDraft.Round(rounds.size() + 1, "LLM_UNAVAILABLE", List.of(), null,
+                        0, elapsedMs(roundStarted)));
                 break;
             }
-            budget.spendLlm(user, reply.get());
+            breaker.onSuccess();
+            budget.spendLlm(user, reply.get(), used);
 
             int index = rounds.size() + 1;
             Parsed parsed = parse(reply.get(), preferredCode);
             if (parsed.error() != null) {
-                rounds.add(new RuleDraft.Round(index, "INVALID_JSON", List.of(), parsed.error()));
+                rounds.add(new RuleDraft.Round(index, "INVALID_JSON", List.of(), parsed.error(), used,
+                        elapsedMs(roundStarted)));
                 feedback = new StringBuilder(feedbackBlock("上次输出不是合法 JSON：" + parsed.error()));
                 continue;
             }
@@ -166,7 +180,8 @@ public class RuleDrafter {
                 spec = parser.parseMap(parsed.rule(), "Agent 起草的规则");
             } catch (RuleException | IllegalArgumentException e) {
                 String detail = PromptGuard.scrub(e.getMessage(), 800);
-                rounds.add(new RuleDraft.Round(index, "INVALID_RULE", List.of(), detail));
+                rounds.add(new RuleDraft.Round(index, "INVALID_RULE", List.of(), detail, used,
+                        elapsedMs(roundStarted)));
                 feedback = new StringBuilder(feedbackBlock("上次输出的规则体结构不合法：" + detail));
                 continue;
             }
@@ -179,13 +194,14 @@ public class RuleDrafter {
                         .map(SafetyViolation::toString)
                         .limit(MAX_FEEDBACK_VIOLATIONS)
                         .toList();
-                rounds.add(new RuleDraft.Round(index, "SAFETY_VIOLATION", messages, null));
+                rounds.add(new RuleDraft.Round(index, "SAFETY_VIOLATION", messages, null, used,
+                        elapsedMs(roundStarted)));
                 feedback = new StringBuilder(feedbackBlock("上次输出被闸门 1 拒绝：\n" + String.join("\n", messages)));
                 log.info("规则起草第 {} 轮未通过闸门 1，{} 条违规，回灌继续", index, violations.size());
                 continue;
             }
 
-            rounds.add(RuleDraft.Round.pass(index));
+            rounds.add(new RuleDraft.Round(index, "PASS", List.of(), null, used, elapsedMs(roundStarted)));
             log.info("规则起草成功：{}，第 {} 轮通过闸门 1", spec.code(), index);
             return new RuleDraft(spec.code(), spec, parsed.rule(), parsed.reasoning(),
                     parsed.assumptions(), rounds, null);
@@ -201,16 +217,16 @@ public class RuleDrafter {
 
     private String buildPrompt(String request, String preferredCode, RuleSpec baseline) {
         StringBuilder sb = new StringBuilder(4096);
-        sb.append(PromptGuard.dataBlock("business-request", request, 4000)).append("\n\n");
-        sb.append(PromptGuard.dataBlock("available-schema", schemaDigest(), 4000)).append('\n');
+        sb.append(PromptGuard.dataBlockTokens("business-request", request, 1200)).append("\n\n");
+        sb.append(PromptGuard.dataBlockTokens("available-schema", schemaDigest(), 1200)).append('\n');
         if (baseline != null) {
             sb.append("\n这是要修改的现有规则，请在其基础上改，不要无关重写：\n")
-                    .append(PromptGuard.dataBlock("baseline-rule", ruleJson(baseline), 4000)).append('\n');
+                    .append(PromptGuard.dataBlockTokens("baseline-rule", ruleJson(baseline), 1200)).append('\n');
         }
         String fewShot = fewShotDigest(preferredCode);
         if (!fewShot.isEmpty()) {
             sb.append("\n以下是规则库里已生效的规则，仅供格式参考：\n")
-                    .append(PromptGuard.dataBlock("existing-rules", fewShot, 4000)).append('\n');
+                    .append(PromptGuard.dataBlockTokens("existing-rules", fewShot, 600)).append('\n');
         }
         sb.append("\n请输出规则 JSON");
         if (preferredCode != null && !preferredCode.isBlank()) {
@@ -349,6 +365,17 @@ public class RuleDrafter {
 
     private static String string(Object value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    /**
+     * 一轮的墙钟耗时（模型往返 + 解析 + 闸门 1）。
+     *
+     * <p>由起草器自己按轮计时，不让调用方用量整段的计时器代替：{@code draft()} 一次调用里可能跑 3 轮，
+     * 外部计时器只能量到总和，第二轮往后会被记成 0（实测见过）。
+     */
+    private static int elapsedMs(long startedNanos) {
+        long ms = (System.nanoTime() - startedNanos) / 1_000_000L;
+        return ms > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) ms;
     }
 
     private static List<String> stringList(Object value) {

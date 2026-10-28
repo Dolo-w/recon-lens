@@ -24,6 +24,7 @@ class AgentRunRepositoryTest {
             CREATE TABLE IF NOT EXISTS recon_agent_run (
               id             BIGINT AUTO_INCREMENT PRIMARY KEY,
               goal           TEXT         NOT NULL,
+              goal_json      TEXT         NULL,
               trigger_type   VARCHAR(16)  NOT NULL,
               status         VARCHAR(16)  NOT NULL,
               plan_json      TEXT         NULL,
@@ -53,6 +54,7 @@ class AgentRunRepositoryTest {
               truncated  BOOLEAN     NOT NULL DEFAULT FALSE,
               status     VARCHAR(16) NOT NULL,
               cost_ms    INT         NULL,
+              tokens_est INT         NULL,
               created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """;
@@ -87,9 +89,9 @@ class AgentRunRepositoryTest {
     @Test
     void runLinksToStepsAndToTheDraftItProduced() {
         long runId = repository.startRun("月度账单对账", "NL_QUESTION", "tester");
-        repository.recordStep(runId, 1, "OBSERVE", "list-rules", null, "3 条规则可用", "sha-a", false, "OK", 5);
-        repository.recordStep(runId, 2, "PLAN", "draft-rule", null, "选了 LLM 起草", "sha-b", false, "OK", 900);
-        repository.recordStep(runId, 3, "ACT", "shadow-trial", null, "PASS SAMPLE_PARTIAL", "sha-c", false, "OK", 1200);
+        repository.recordStep(runId, 1, "OBSERVE", "list-rules", null, "3 条规则可用", "sha-a", false, "OK", 5, 12);
+        repository.recordStep(runId, 2, "PLAN", "draft-rule", null, "选了 LLM 起草", "sha-b", false, "OK", 900, null);
+        repository.recordStep(runId, 3, "ACT", "shadow-trial", null, "PASS SAMPLE_PARTIAL", "sha-c", false, "OK", 1200, null);
         repository.bumpLlm(runId, 2, 3200);
         repository.updatePlan(runId, "{\"path\":\"DRAFT_RULE\"}", false);
         repository.finishRun(runId, AgentRunRepository.RunStatus.SUCCESS, "BILL_MONTHLY", 42L, 7, null);
@@ -109,13 +111,16 @@ class AgentRunRepositoryTest {
         assertThat(steps).extracting(AgentRunRepository.AgentStep::phase)
                 .containsExactly("OBSERVE", "PLAN", "ACT");
         assertThat(steps.get(2).digest()).isEqualTo("sha-c");
+        // M15：耗时与估算 token 两列都要能落表、能读回（接口层再各自给出）
+        assertThat(steps.get(0).costMs()).isEqualTo(5);
+        assertThat(steps.get(0).tokensEst()).as("token 估算").isEqualTo(12);
     }
 
     /** payload 可以截断、digest 不行 —— 这就是"一列拆两列"的实际用法。 */
     @Test
     void truncatedPayloadAndFullDigestCoexist() {
         long runId = repository.startRun("g", "API", "t");
-        repository.recordStep(runId, 1, "PLAN", "draft-rule", null, "截断后的内容…", "0123456789abcdef", true, "OK", 1);
+        repository.recordStep(runId, 1, "PLAN", "draft-rule", null, "截断后的内容…", "0123456789abcdef", true, "OK", 1, null);
 
         AgentRunRepository.AgentStep step = repository.listSteps(runId).get(0);
         assertThat(step.truncated()).isTrue();
@@ -126,9 +131,9 @@ class AgentRunRepositoryTest {
     @Test
     void duplicateSeqIsRejectedByTheDatabase() {
         long runId = repository.startRun("g", "API", "t");
-        repository.recordStep(runId, 1, "OBSERVE", "a", null, "x", null, false, "OK", 1);
+        repository.recordStep(runId, 1, "OBSERVE", "a", null, "x", null, false, "OK", 1, null);
 
-        assertThatThrownBy(() -> repository.recordStep(runId, 1, "PLAN", "b", null, "y", null, false, "OK", 1))
+        assertThatThrownBy(() -> repository.recordStep(runId, 1, "PLAN", "b", null, "y", null, false, "OK", 1, null))
                 .isInstanceOf(DuplicateKeyException.class);
     }
 
@@ -136,7 +141,7 @@ class AgentRunRepositoryTest {
     void nextSeqContinuesAfterTheLastStep() {
         long runId = repository.startRun("g", "API", "t");
         assertThat(repository.nextSeq(runId)).isEqualTo(1);
-        repository.recordStep(runId, 1, "OBSERVE", "a", null, "x", null, false, "OK", 1);
+        repository.recordStep(runId, 1, "OBSERVE", "a", null, "x", null, false, "OK", 1, null);
         assertThat(repository.nextSeq(runId)).isEqualTo(2);
     }
 
