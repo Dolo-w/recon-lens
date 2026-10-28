@@ -61,6 +61,13 @@ public final class LlmChatClient {
         return "OpenAI 兼容：" + baseUrl + " / " + model;
     }
 
+    /**
+     * 让模型给一份 JSON（规划结果）。
+     *
+     * <p>{@code max_tokens} 是 400 的时候实测被截断过一次：模型选工具时会把参数原样带回来
+     * （{@code "businessDescription": "按订单、资源对账"}），400 装不下就成了半截 JSON，
+     * 解析失败 → 三次之后熔断，接下来几轮全落回词表。宁可按 900 给，它不会真写满。
+     */
     public Optional<String> completeJson(String system, String user) {
         if (!configured()) {
             return Optional.empty();
@@ -71,7 +78,7 @@ public final class LlmChatClient {
                         Map.of("role", "system", "content", system),
                         Map.of("role", "user", "content", user)),
                 "temperature", 0,
-                "max_tokens", 400,
+                "max_tokens", 900,
                 "response_format", Map.of("type", "json_object"),
                 "stream", false);
         return send(body);

@@ -74,6 +74,29 @@ class CompositePlannerTest {
         return new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()), new LlmPlanner(client, json));
     }
 
+    /** 带工具清单的规划器：模型可以点工具，才有"工具计划"这件事可测。 */
+    private CompositePlanner plannerWithTools(String... names) {
+        LlmChatClient client = new LlmChatClient(baseUrl(), "sk-test", "deepseek-chat", 2000, json);
+        java.util.List<io.github.dolow.reconlens.tool.ToolSpec> specs = java.util.Arrays.stream(names)
+                .map(name -> new io.github.dolow.reconlens.tool.ToolSpec(name, name + " 的说明",
+                        "{\"type\":\"object\",\"properties\":{}}", null,
+                        args -> io.github.dolow.reconlens.tool.ToolOutcome.text("ok")))
+                .toList();
+        io.github.dolow.reconlens.tool.ToolRegistry registry = new io.github.dolow.reconlens.tool.ToolRegistry() {
+            @Override
+            public java.util.List<io.github.dolow.reconlens.tool.ToolSpec> specs() {
+                return specs;
+            }
+
+            @Override
+            public java.util.Optional<io.github.dolow.reconlens.tool.ToolSpec> find(String name) {
+                return specs.stream().filter(spec -> spec.name().equals(name)).findFirst();
+            }
+        };
+        return new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
+                new LlmPlanner(client, json, false, new ToolCallPlanner(registry, json)));
+    }
+
     @Test
     @DisplayName("短问句 + 词表确定命中：走快路径，不额外问模型")
     void 词表命中不打网络() {
@@ -89,6 +112,17 @@ class CompositePlannerTest {
         ChatPlan plan = planner().plan("帮我把所有的规则都列出来看看", ChatSlots.EMPTY).orElseThrow();
         assertThat(calls.get()).isEqualTo(1);
         assertThat(plan.source()).isEqualTo(ChatPlan.Source.LLM);
+    }
+
+    @Test
+    @DisplayName("短但不是命令（问关系/问原因）：不走快路径，交给模型解释")
+    void 短问句不走快路径() {
+        nextBody.set(ok("{\"action\":\"reply\",\"text\":\"bill_left 和 bill_right 是一对左右账单表，"
+                + "BILL_VS_SETTLE 按订单号把它们对起来。\"}"));
+        ChatPlan plan = planner().plan("这几张表什么关系", ChatSlots.EMPTY).orElseThrow();
+        assertThat(calls.get()).isEqualTo(1);
+        assertThat(plan.source()).isEqualTo(ChatPlan.Source.LLM);
+        assertThat(plan.isReply()).isTrue();
     }
 
     @Test
@@ -186,6 +220,35 @@ class CompositePlannerTest {
         assertThat(plan.hasOptions()).isTrue();
         assertThat(plan.options()).contains("RUN");
         assertThat(plan.reason()).contains("没找到");
+    }
+
+    @Test
+    @DisplayName("模型直接点工具：参数对不上库也照调，由工具自己报错")
+    void 工具计划不被事实冲突拦下() {
+        nextBody.set(ok("{\"action\":\"tool\",\"name\":\"recon_list_diffs\","
+                + "\"args\":{\"jobId\":999},\"confidence\":0.9}"));
+        io.github.dolow.reconlens.chat.ContextFacts facts = new io.github.dolow.reconlens.chat.ContextFacts(
+                "facts", java.util.Set.of("BILL_VS_SETTLE"), java.util.Set.of(12L), java.util.Set.of());
+
+        ChatPlan plan = plannerWithTools("recon_list_diffs")
+                .plan("看下任务 999 的差异", ChatSlots.EMPTY, facts, List.of()).orElseThrow();
+
+        // 拦在这里的代价是"用户得再把 999 说一遍"，而工具本来就会回一句"没有这个任务"
+        assertThat(plan.isToolCall()).isTrue();
+        assertThat(plan.toolName()).isEqualTo("recon_list_diffs");
+        assertThat(plan.toolArgs()).containsEntry("jobId", "999");
+    }
+
+    @Test
+    @DisplayName("工具映射到 HELP（如 recon_diagnose）不算模型没听懂，不被词表顶掉")
+    void 工具计划不被词表确定命中顶掉() {
+        nextBody.set(ok("{\"action\":\"tool\",\"name\":\"recon_diagnose\",\"args\":{},\"confidence\":0.9}"));
+
+        ChatPlan plan = plannerWithTools("recon_diagnose")
+                .plan("跑一下 BILL_VS_SETTLE", ChatSlots.EMPTY).orElseThrow();
+
+        assertThat(plan.isToolCall()).isTrue();
+        assertThat(plan.toolName()).isEqualTo("recon_diagnose");
     }
 
     @Test
