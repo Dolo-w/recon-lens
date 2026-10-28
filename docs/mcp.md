@@ -9,6 +9,19 @@ MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模
 recon-lens 暴露 12 个工具（启用 Agent 后 18 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
 `ModelBuilder`），所以两条路的结果必然一致，不存在两套逻辑。
 
+## 多轮 Agent 请走 `/mcp`，不要用 stdio
+
+两条通道的工具面完全一样，差别在**会话状态活在哪**：
+
+| 通道 | 会话/任务登记 | 能不能多轮 |
+| --- | --- | --- |
+| stdio（`--spring.profiles.active=mcp`） | 进程内存（`TrialTaskRegistry` / `ImportTaskRegistry`） | **单轮**：每次 `tools/call` 可能落在另一个进程，`recon_draft_rule` 起的 `runId` 下一次查不到 |
+| streamable HTTP（`--recon.mcp.http.enabled=true`，挂 `/mcp`） | 同一个进程，和 REST 共用 | 可以：起草 → 轮询 `recon_trial_status` → 交人审批 |
+
+`/mcp` 是 `McpHttpConfiguration` 用 `ServletRegistrationBean` 挂上去的（不是普通 `@RequestMapping`），
+握手用 `initialize`（`protocolVersion=2025-06-18`，从响应头取 `Mcp-Session-Id`）→ `notifications/initialized` → `tools/call`。
+stdio 仍然适合"只调一次工具"的宿主（Claude Desktop/Cursor 的一次性工具调用），但**不要指望它在多轮里记住任务**。
+
 ## 启动
 
 ```bash
@@ -281,3 +294,27 @@ if (mcpProfileActive(args)) {
   改规则走 `recon_define_rule`，落草稿 → 影子试算 → `recon_submit_approval` 审批通过才生效；
   （REST 的 `POST /api/rules` 是运维 legacy 通路，默认关闭，见 `recon.rules.legacy-define-enabled`）
   历史任务重跑用各自钉住的 `rule_snapshot`，不会被后来的规则改动改掉语义
+
+## 附：从脚本调审计接口（两个 header 都要）
+
+`GET /api/audit/runs/{id}`（以及 `/api/audit/runs/{id}.csv`、`/api/audit/summary`）不是 MCP 工具，
+但"跑完一次 Agent 会话去核对轨迹"是最常见的运维动作，实测有三个容易踩的点：
+
+```bash
+curl -s "http://127.0.0.1:8080/api/audit/runs/3" \
+  -H "X-Operator: ops-zhang" \
+  -H "X-Api-Key: $RECON_SECURITY_API_KEY"
+```
+
+| 现象 | 原因 |
+|---|---|
+| `400 请求头 X-Operator 缺失或为空` | 操作人必填：审计记录必须能追到"谁看的" |
+| `403 该接口需要 X-Api-Key（值取 recon.security.api-key）：导出审计记录` | 配置了 `recon.security.api-key` 之后，<b>导出审计记录属于敏感操作</b>，要带数据面密钥 |
+| 只带 `X-Api-Key` 不带 `X-Operator` | 先报 400 —— 两个校验是分开的，缺哪个报哪个 |
+
+响应形状：`{ "operator": "...", "run": { "status": "...", "ruleCode": "...", "draftVersion": 1,
+"llmCalls": 3, "errorMsg": null }, "steps": [ { "seq": 1, "phase": "OBSERVE", "action": "...",
+"costMs": 12, "tokensEst": 0, "status": "OK", "truncated": false } ] }`。
+
+`costMs` 是墙钟毫秒（含 IO），`tokensEst` 是模型往返的 token：能拿到 `usage.total_tokens` 时是实测，
+拿不到时是按落库 payload 的字符数估算（估算值通常偏大一个量级，看趋势可以，别拿它算钱）。

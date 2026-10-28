@@ -11,8 +11,7 @@ import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.rule.ApprovalRelay;
 import io.github.dolow.reconlens.store.AgentRunRepository;
 import io.github.dolow.reconlens.store.RuleRepository;
-import io.modelcontextprotocol.json.McpJsonMapper;
-import io.modelcontextprotocol.server.McpServerFeatures;
+import io.github.dolow.reconlens.tool.ToolSpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -25,9 +24,10 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Agent 能力的 MCP 工具：起草（{@code recon_draft_rule}）、试算查询（{@code recon_trial_status}）、
- * 动态注册表（{@code recon_register_table}）、文件导入（{@code recon_import_file}）、代办审批
- * （{@code recon_submit_approval}）共 5 个 —— 工具总数 9 → 14。
+ * Agent 能力的工具：起草（{@code recon_draft_rule}）、试算查询（{@code recon_trial_status}）、
+ * 动态注册表（{@code recon_register_table}）、文件导入（{@code recon_import_file}）、
+ * 导入进度（{@code recon_import_status}）、代办审批（{@code recon_submit_approval}）共 6 个
+ * —— 工具总数 12 → 18。
  *
  * <p><b>为什么单独一个类而不是塞进 {@code ReconMcpTools}</b>：{@code ReconMcpTools} 是常驻的
  * （Agent 关掉时对账照样要能跑），而这些工具依赖 {@code recon.agent.enabled=true} 才存在的 Bean。
@@ -72,10 +72,10 @@ public class AgentMcpTools {
         this.properties = properties;
     }
 
-    /** 供 {@code McpServerRunner} 合并用：Agent 关闭时它一个工具也不贡献。 */
-    public List<McpServerFeatures.SyncToolSpecification> specifications(McpJsonMapper jsonMapper) {
-        List<McpServerFeatures.SyncToolSpecification> specs = new ArrayList<>();
-        specs.add(McpToolFactory.tool(jsonMapper, "recon_draft_rule",
+    /** 供 {@code tool.ToolCatalog} 合并用：Agent 关闭时它一个工具也不贡献。 */
+    public List<ToolSpec> specs() {
+        List<ToolSpec> specs = new ArrayList<>();
+        specs.add(McpToolFactory.tool("recon_draft_rule",
                 "把一句业务需求起草成一条对账规则：立即返回会话号，起草 + 闸门 1 校验 + 影子试算在后台进行，"
                         + "用 recon_trial_status 轮询结果。这条工具【不会】让规则生效 —— 生效需要用户明确同意后"
                         + "由 recon_submit_approval 完成审批。\n"
@@ -104,7 +104,7 @@ public class AgentMcpTools {
                         McpToolFactory.text(args, "ruleCode", false),
                         McpToolFactory.text(args, "operator", false))));
 
-        specs.add(McpToolFactory.tool(jsonMapper, "recon_trial_status",
+        specs.add(McpToolFactory.tool("recon_trial_status",
                 "查询 Agent 会话 / 草稿的试算进度与结论（逐项检查、覆盖等级、降级理由、可批性）。"
                         + "传 runId，或传 ruleCode + version。结论出来之后，生效仍需要人工审批。",
                 """
@@ -136,7 +136,7 @@ public class AgentMcpTools {
                         McpToolFactory.text(args, "ruleCode", false),
                         McpToolFactory.optionalInteger(args, "version"))));
 
-        specs.add(McpToolFactory.tool(jsonMapper, "recon_register_table",
+        specs.add(McpToolFactory.tool("recon_register_table",
                 "把一张业务表注册进闸门 1 白名单（给数据结构不同的接入方用，不改配置、不重启）。"
                         + "两段式：action=preview 只读表结构与行数（不改任何状态），把结果展示给人；"
                         + "人确认后 action=confirm 才真正注册并立即生效，之后 recon_draft_rule 就能用这张表。",
@@ -161,7 +161,7 @@ public class AgentMcpTools {
                         McpToolFactory.text(args, "action", false),
                         McpToolFactory.text(args, "operator", false))));
 
-        specs.add(McpToolFactory.tool(jsonMapper, "recon_import_file",
+        specs.add(McpToolFactory.tool("recon_import_file",
                 "把导入目录里的 CSV/Excel 文件导入成一张数据库表并注册进闸门 1 白名单"
                         + "（给只有原始数据文件、没有库表的接入方用）。文件必须放在服务端导入目录"
                         + "（recon.agent.file-import.dir，默认 ./data/import）内，只接受该目录内的相对路径。"
@@ -200,7 +200,7 @@ public class AgentMcpTools {
                         McpToolFactory.text(args, "sheet", false),
                         flag(args, "async"))));
 
-        specs.add(McpToolFactory.tool(jsonMapper, "recon_import_status",
+        specs.add(McpToolFactory.tool("recon_import_status",
                 "查询 recon_import_file(action=confirm, async=true) 的后台导入进度。"
                         + "状态：QUEUED / RUNNING / SUCCESS（rows 为导入行数）/ FAILED（error 为原因）。"
                         + "任务表在内存里，进程重启后旧任务号查不到 —— 那时直接查库确认表是否建成。",
@@ -222,7 +222,7 @@ public class AgentMcpTools {
                 """,
                 args -> importStatus(McpToolFactory.integer(args, "taskId", 0L, true))));
 
-        specs.add(McpToolFactory.tool(jsonMapper, "recon_submit_approval",
+        specs.add(McpToolFactory.tool("recon_submit_approval",
                 "把一条已通过试算的规则草稿推过审批闸门 —— **只转发用户的决定，不自己审批**。\n"
                         + "【必须】先向用户展示试算结论（verdict/coverage/可批性）并请用户确认；"
                         + "用户确认后，用户会在 REST 上领取一串一次性确认码（confirmationCode，5 分钟过期、只能用一次），"
@@ -416,8 +416,7 @@ public class AgentMcpTools {
         McpToolFactory.put(structured, "status", TrialTaskRegistry.Status.QUEUED.name());
         McpToolFactory.put(structured, "ruleCode", ruleCode);
         String message = "已创建 Agent 会话 #" + runId + "，起草与影子试算在后台进行"
-                + "（一次试算约 1 分钟，期间不要重复提交同一份需求）。\n"
-                + "下一步：recon_trial_status runId=" + runId + " 轮询进度。\n"
+                + "（一次试算约 1 分钟，期间不要重复提交同一份需求）；进度用 recon_trial_status 查。\n"
                 + "注意：通过试算 ≠ 生效。试算结论出来后，先把 verdict/coverage/可批性讲给用户听；"
                 + "用户明确表态\"通过\"或\"拒绝\"后，请用户去 REST 领取一次性确认码"
                 + "（POST /api/rule-reviews/" + ruleCode + "/版本/confirmation），"
@@ -536,7 +535,8 @@ public class AgentMcpTools {
         }
 
         String completionMessage = task != null ? task.message() : null;
-        if (task != null && (task.status() == TrialTaskRegistry.Status.BLOCKED
+        if (task != null && (task.status() == TrialTaskRegistry.Status.PARTIAL
+                || task.status() == TrialTaskRegistry.Status.BLOCKED
                 || task.status() == TrialTaskRegistry.Status.FAILED)) {
             String message = completionMessage == null ? "会话未产出草稿" : completionMessage;
             McpToolFactory.put(structured, "message", message);

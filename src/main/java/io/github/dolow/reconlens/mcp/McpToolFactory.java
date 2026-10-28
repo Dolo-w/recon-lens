@@ -1,29 +1,25 @@
 package io.github.dolow.reconlens.mcp;
 
-import io.github.dolow.reconlens.engine.Errors;
-import io.modelcontextprotocol.json.McpJsonMapper;
-import io.modelcontextprotocol.server.McpServerFeatures;
-import io.modelcontextprotocol.spec.McpSchema;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import io.github.dolow.reconlens.tool.ToolOutcome;
+import io.github.dolow.reconlens.tool.ToolSpec;
 
 import java.util.Map;
 import java.util.function.Function;
 
 /**
- * MCP 工具的装配零件：把"注册一个工具"从 {@code McpServerRunner} 里抽出来，好让 Agent 工具也能复用。
+ * 造一条工具定义的零件：{@code ((name, 描述, in/out schema, 实现) → ToolSpec)}。
  *
- * <p>抽出来的直接原因是 {@code AgentMcpTools}：它只在 {@code recon.agent.enabled=true} 时存在，
- * 而 {@code McpServerRunner} 是常驻的。两个类都要造工具，装配代码不能各写一份 ——
- * 一旦分开写，{@code structuredContent} 的格式化、错误包装、参数解析很快就会出现两套行为，
- * 而"两处算同一个值"正是这个项目一直在防的事。
+ * <p><b>只产出 {@link ToolSpec}，不再产出 MCP 的 {@code SyncToolSpecification}</b>。
+ * 以前它两头都造：基础工具走 {@code ToolRegistry}，Agent 工具走这里直接翻成 MCP 对象，
+ * 于是同一个工具在「控制台的 {@code /api/tools}」和「宿主的 {@code tools/list}」里成了两份，
+ * 数量对不上（12 对 18），谁都能在一边加一个而另一边不知道。
+ * 现在翻译只发生在 {@link McpSpecifications} 一处，这里只负责把参数解析出来。
  *
- * <p><b>错误一律变成 {@code isError=true} 的文本</b>：MCP 客户端里抛异常等于把工具调用变成协议错误，
- * 模型只能看到"failed"；而带上 {@link Errors#describe} 的文本能让它自己换个参数重试。
+ * <p><b>错误一律变成 {@code isError=true} 的文本</b>（在 {@code McpSpecifications} 里统一处理）：
+ * MCP 客户端里抛异常等于把工具调用变成协议错误，模型只能看到 "failed"；
+ * 而带上 {@code Errors#describe} 的文本能让它自己换个参数重试。
  */
 public final class McpToolFactory {
-
-    private static final Logger log = LoggerFactory.getLogger(McpToolFactory.class);
 
     private McpToolFactory() {
     }
@@ -45,47 +41,17 @@ public final class McpToolFactory {
         }
     }
 
-    public static McpServerFeatures.SyncToolSpecification tool(McpJsonMapper jsonMapper, String name,
-                                                               String description, String inputSchema,
-                                                               Function<Map<String, Object>, ToolResult> body) {
-        return tool(jsonMapper, name, description, inputSchema, null, body);
+    public static ToolSpec tool(String name, String description, String inputSchema,
+                                Function<Map<String, Object>, ToolResult> body) {
+        return tool(name, description, inputSchema, null, body);
     }
 
-    public static McpServerFeatures.SyncToolSpecification tool(McpJsonMapper jsonMapper, String name,
-                                                               String description, String inputSchema,
-                                                               String outputSchema,
-                                                               Function<Map<String, Object>, ToolResult> body) {
-        McpSchema.Tool.Builder builder = McpSchema.Tool.builder()
-                .name(name)
-                .description(description)
-                .inputSchema(jsonMapper, inputSchema);
-        if (outputSchema != null && !outputSchema.isBlank()) {
-            builder.outputSchema(jsonMapper, outputSchema);
-        }
-        McpSchema.Tool tool = builder.build();
-
-        return McpServerFeatures.SyncToolSpecification.builder()
-                .tool(tool)
-                .callHandler((exchange, request) -> {
-                    Map<String, Object> args = request.arguments() == null ? Map.of() : request.arguments();
-                    try {
-                        ToolResult result = body.apply(args);
-                        McpSchema.CallToolResult.Builder out = McpSchema.CallToolResult.builder()
-                                .addTextContent(result.text())
-                                .isError(false);
-                        if (result.structured() != null && !result.structured().isEmpty()) {
-                            out.structuredContent(result.structured());
-                        }
-                        return out.build();
-                    } catch (Exception e) {
-                        log.warn("MCP 工具 {} 调用失败：{}", name, Errors.describe(e));
-                        return McpSchema.CallToolResult.builder()
-                                .addTextContent("调用失败：" + Errors.describe(e))
-                                .isError(true)
-                                .build();
-                    }
-                })
-                .build();
+    public static ToolSpec tool(String name, String description, String inputSchema, String outputSchema,
+                                Function<Map<String, Object>, ToolResult> body) {
+        return new ToolSpec(name, description, inputSchema, outputSchema, args -> {
+            ToolResult result = body.apply(args == null ? Map.of() : args);
+            return ToolOutcome.of(result.text(), result.structured());
+        });
     }
 
     public static String text(Map<String, Object> args, String key, boolean required) {

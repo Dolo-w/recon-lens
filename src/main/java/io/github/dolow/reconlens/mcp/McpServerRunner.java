@@ -36,12 +36,11 @@ import java.util.concurrent.CountDownLatch;
  * 项目里没有 System.out 调用，剩下的就是 Spring 启动横幅与日志，分别由
  * {@code application-mcp.yml}（banner-mode=off）和 {@code logback-spring.xml}（日志走 stderr）解决。
  *
- * <p><b>工具数是条件性的</b>：8 个基础工具永远在；{@code recon_diagnose} 不挂开关
- * （它读的是已有任务数据，与"有没有 Agent"无关），所以 Agent 关闭时是 <b>9</b> 个；
- * {@code recon.agent.enabled=true} 时再加 6 个（{@code recon_draft_rule} / {@code recon_trial_status} /
- * {@code recon_register_table} / {@code recon_import_file} / {@code recon_import_status} /
- * {@code recon_submit_approval}）→ <b>15</b>。
- * 依赖用 {@code List<AgentMcpTools>} 注入：Agent 关闭时是空列表，而不是一个会 NPE 的 null。
+ * <p><b>工具数是条件性的</b>：12 个基础工具永远在；{@code recon.agent.enabled=true} 时再加 6 个
+ * （{@code recon_draft_rule} / {@code recon_trial_status} / {@code recon_register_table} /
+ * {@code recon_import_file} / {@code recon_import_status} / {@code recon_submit_approval}）→ <b>18</b>。
+ * 合并发生在 {@code tool.ToolCatalog}（{@code @Primary} 的唯一目录），这里只负责把它翻译成
+ * {@code tools/list} —— <b>不再自己拼一份</b>，否则控制台与宿主又会各说各的数量。
  */
 @Component
 @ConditionalOnProperty(prefix = "recon.mcp", name = "enabled", havingValue = "true")
@@ -51,17 +50,14 @@ public class McpServerRunner implements ApplicationRunner {
 
     private final ReconMcpTools tools;
     private final ToolRegistry registry;
-    private final List<AgentMcpTools> agentTools;
 
     /**
-     * @param agentTools 0 或 1 个。用 {@code List} 而不是 {@code ObjectProvider}：
-     *                   Spring 对空集合的注入是天然安全的，而测试里也不必去 mock 一个
-     *                   带 default 方法的 provider（那样拿到的是 null 而不是空流）
+     * @param registry 唯一的工具目录（{@code tool.ToolCatalog}）：基础工具与 Agent 工具已经合并好，
+     *                 这里<b>不再</b>额外注入 {@code AgentMcpTools} —— 那样就等于又开了一条注册路径。
      */
-    public McpServerRunner(ReconMcpTools tools, ToolRegistry registry, List<AgentMcpTools> agentTools) {
+    public McpServerRunner(ReconMcpTools tools, ToolRegistry registry) {
         this.tools = tools;
         this.registry = registry;
-        this.agentTools = agentTools == null ? List.of() : List.copyOf(agentTools);
     }
 
     @Override
@@ -126,9 +122,9 @@ public class McpServerRunner implements ApplicationRunner {
         watchdog.start();
     }
 
-    /** 基础工具 + （Agent 开启时）Agent 工具。顺序即 {@code tools/list} 的顺序。 */
+    /** 目录里有什么就给什么：顺序即 {@code tools/list} 的顺序。 */
     List<McpServerFeatures.SyncToolSpecification> specifications(McpJsonMapper jsonMapper) {
-        return McpSpecifications.build(jsonMapper, registry, agentTools);
+        return McpSpecifications.build(jsonMapper, registry);
     }
 
     /** 包一层 System.in，读到 EOF 就放行主线程退出；不额外消费任何字节。 */

@@ -72,6 +72,36 @@ class McpToolCatalogTest {
                         "recon_import_status", "recon_submit_approval");
     }
 
+    /**
+     * 目录与宿主必须给同一份：控制台 {@code /api/tools} 数的是 {@code ToolCatalog}，
+     * 宿主 {@code tools/list} 数的是 {@link McpSpecifications} 的产物；两者相等才算"一份目录"。
+     *
+     * <p>2026-10-26 之前这条不成立（控制台 12、宿主 18），而且没有任何测试会说它不成立 ——
+     * 两个数字各自"对"，模型却照着宿主那一份去调不存在的工具。
+     */
+    @Test
+    void catalogAndHostSeeTheSameTools() {
+        AgentMcpTools agent = agent(mock(TrialTaskRegistry.class), mock(AgentRunRepository.class),
+                mock(RuleRepository.class),
+                mock(io.github.dolow.reconlens.agent.TableRegistrar.class),
+                mock(io.github.dolow.reconlens.agent.FileImporter.class));
+
+        // Agent 关：只有基础工具，且必须与 ToolNames.BASE 一字不差
+        assertThat(catalog(List.of()).names())
+                .containsExactlyElementsOf(io.github.dolow.reconlens.tool.ToolNames.BASE);
+
+        // Agent 开：基础 + 清单里的 6 个，顺序即 tools/list 的顺序
+        io.github.dolow.reconlens.tool.ToolCatalog withAgent = catalog(List.of(agent));
+        assertThat(withAgent.names()).containsExactlyElementsOf(
+                java.util.stream.Stream.concat(
+                        io.github.dolow.reconlens.tool.ToolNames.BASE.stream(),
+                        io.github.dolow.reconlens.tool.ToolNames.AGENT.stream()).toList());
+
+        // 宿主看到的就是目录里的，不多不少
+        List<String> hostSees = McpServerRunner.toolNames(McpSpecifications.build(jsonMapper, withAgent));
+        assertThat(hostSees).containsExactlyElementsOf(withAgent.names()).hasSize(18);
+    }
+
     /** structuredContent 必须与声明了 outputSchema 的工具配套：有 schema 没内容，客户端会判定结果不合规。 */
     @Test
     void toolsThatDeclareAnOutputSchemaReturnStructuredContent() {
@@ -318,9 +348,29 @@ class McpToolCatalogTest {
         return (Map<String, Object>) structured.get("checks");
     }
 
+    /** 测试用的"基础工具目录"：{@code ReconMcpTools} 是 mock，Schema 是真的，断言只关心名字与数量。 */
+    private io.github.dolow.reconlens.tool.ReconToolRegistry baseRegistry() {
+        return new io.github.dolow.reconlens.tool.ReconToolRegistry(tools,
+                mock(org.springframework.beans.factory.ObjectProvider.class),
+                mock(io.github.dolow.reconlens.rule.RuleCatalog.class),
+                mock(org.springframework.beans.factory.ObjectProvider.class),
+                new io.github.dolow.reconlens.store.TableInspector(
+                        new org.springframework.jdbc.core.JdbcTemplate(
+                                new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:mcp_catalog")),
+                        mock(org.springframework.beans.factory.ObjectProvider.class)),
+                mock(io.github.dolow.reconlens.store.ReconRepository.class));
+    }
+
+    private io.github.dolow.reconlens.tool.ToolCatalog catalog(List<AgentMcpTools> agents) {
+        return new io.github.dolow.reconlens.tool.ToolCatalog(baseRegistry(), agents);
+    }
+
     private McpServerRunner runnerWithoutAgent() {
-        return new McpServerRunner(tools,
-                new io.github.dolow.reconlens.tool.ReconToolRegistry(tools, org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), org.mockito.Mockito.mock(io.github.dolow.reconlens.rule.RuleCatalog.class), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), new io.github.dolow.reconlens.store.TableInspector(new org.springframework.jdbc.core.JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:mcp_catalog")), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class)), org.mockito.Mockito.mock(io.github.dolow.reconlens.store.ReconRepository.class)), List.of());
+        return new McpServerRunner(tools, catalog(List.of()));
+    }
+
+    private McpServerRunner runnerWithAgent(AgentMcpTools agent) {
+        return new McpServerRunner(tools, catalog(List.of(agent)));
     }
 
     /** 5 参便捷构造：审批依赖用默认值（api-key 未配置 = fail-closed）。 */
@@ -340,11 +390,6 @@ class McpToolCatalogTest {
                                        io.github.dolow.reconlens.rule.RuleLifecycleService lifecycle,
                                        io.github.dolow.reconlens.config.ReconProperties properties) {
         return new AgentMcpTools(registry, runs, rules, registrar, importer, importTasks, lifecycle, properties);
-    }
-
-    private McpServerRunner runnerWithAgent(AgentMcpTools agent) {
-        return new McpServerRunner(tools,
-                new io.github.dolow.reconlens.tool.ReconToolRegistry(tools, org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), org.mockito.Mockito.mock(io.github.dolow.reconlens.rule.RuleCatalog.class), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class), new io.github.dolow.reconlens.store.TableInspector(new org.springframework.jdbc.core.JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:mcp_catalog")), org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class)), org.mockito.Mockito.mock(io.github.dolow.reconlens.store.ReconRepository.class)), List.of(agent));
     }
 
     private McpServerFeatures.SyncToolSpecification spec(String name) {

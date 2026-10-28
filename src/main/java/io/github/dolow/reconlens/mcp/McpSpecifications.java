@@ -1,52 +1,85 @@
 package io.github.dolow.reconlens.mcp;
 
+import io.github.dolow.reconlens.engine.Errors;
 import io.github.dolow.reconlens.tool.ToolOutcome;
 import io.github.dolow.reconlens.tool.ToolRegistry;
 import io.github.dolow.reconlens.tool.ToolSpec;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
- * 把 {@link ToolRegistry} 翻译成 MCP 的 {@code tools/list}。
+ * 把 {@link ToolRegistry} 翻译成 MCP 的 {@code tools/list}——<b>全项目唯一的翻译点</b>。
  *
  * <p>抽出来是因为 P3 多了一条传输通道（streamable HTTP）：stdio 与 HTTP 两个 server
  * 实例必须给出<b>同一份</b>工具表。如果各自装配一遍，迟早出现"stdio 有 15 个、HTTP 有 14 个"，
  * 而这类不一致在客户端看来只是"那个工具不存在"，极难排查。
+ *
+ * <p>2026-10-26 之后它还兼一条职责：Agent 专属工具也走这里。<b>目录只有一个</b>
+ * （{@code tool.ToolCatalog}），{@code /api/tools}、会话路由、stdio 宿主、HTTP 宿主都读它，
+ * 不再有"基础工具注一遍、Agent 工具另注一遍"的可能。
  */
 public final class McpSpecifications {
+
+    private static final Logger log = LoggerFactory.getLogger(McpSpecifications.class);
 
     private McpSpecifications() {
     }
 
-    /**
-     * @param agentTools 0 或 1 个（Agent 关闭时注入空列表）
-     */
+    /** 目录里有什么，{@code tools/list} 就给什么，顺序都不变。 */
     public static List<McpServerFeatures.SyncToolSpecification> build(
-            McpJsonMapper jsonMapper, ToolRegistry registry, List<AgentMcpTools> agentTools) {
-        List<McpServerFeatures.SyncToolSpecification> specs = new ArrayList<>(base(jsonMapper, registry));
-        if (agentTools != null) {
-            agentTools.forEach(agent -> specs.addAll(agent.specifications(jsonMapper)));
+            McpJsonMapper jsonMapper, ToolRegistry registry) {
+        List<McpServerFeatures.SyncToolSpecification> specs = new ArrayList<>();
+        for (ToolSpec spec : registry.specs()) {
+            specs.add(toMcp(jsonMapper, spec));
         }
         return specs;
     }
 
-    public static List<McpServerFeatures.SyncToolSpecification> base(
-            McpJsonMapper jsonMapper, ToolRegistry registry) {
-        List<McpServerFeatures.SyncToolSpecification> specs = new ArrayList<>();
-        for (ToolSpec spec : registry.specs()) {
-            specs.add(McpToolFactory.tool(jsonMapper, spec.name(), spec.description(),
-                    spec.inputSchema(), spec.outputSchema(),
-                    a -> {
-                        ToolOutcome outcome = spec.invoke(a);
-                        return outcome.structured() == null
-                                ? McpToolFactory.ToolResult.text(outcome.text())
-                                : McpToolFactory.ToolResult.of(outcome.text(), outcome.structured());
-                    }));
+    /**
+     * 一个 {@link ToolSpec} → 一条 MCP 工具。
+     *
+     * <p>三件事必须在这里做，且只能在这里做一次：{@code outputSchema} 与 {@code structuredContent} 成对出现、
+     * 失败转成 {@code isError=true} 的文本、参数原样传下去（解析是工具自己的事）。
+     */
+    static McpServerFeatures.SyncToolSpecification toMcp(McpJsonMapper jsonMapper, ToolSpec spec) {
+        McpSchema.Tool.Builder builder = McpSchema.Tool.builder()
+                .name(spec.name())
+                .description(spec.description())
+                .inputSchema(jsonMapper, spec.inputSchema());
+        if (spec.outputSchema() != null && !spec.outputSchema().isBlank()) {
+            builder.outputSchema(jsonMapper, spec.outputSchema());
         }
-        return specs;
+        McpSchema.Tool tool = builder.build();
+
+        return McpServerFeatures.SyncToolSpecification.builder()
+                .tool(tool)
+                .callHandler((exchange, request) -> {
+                    Map<String, Object> args = request.arguments() == null ? Map.of() : request.arguments();
+                    try {
+                        ToolOutcome outcome = spec.invoke(args);
+                        McpSchema.CallToolResult.Builder out = McpSchema.CallToolResult.builder()
+                                .addTextContent(outcome.text())
+                                .isError(false);
+                        if (outcome.structured() != null && !outcome.structured().isEmpty()) {
+                            out.structuredContent(outcome.structured());
+                        }
+                        return out.build();
+                    } catch (Exception e) {
+                        log.warn("MCP 工具 {} 调用失败：{}", spec.name(), Errors.describe(e));
+                        return McpSchema.CallToolResult.builder()
+                                .addTextContent("调用失败：" + Errors.describe(e))
+                                .isError(true)
+                                .build();
+                    }
+                })
+                .build();
     }
 
     /** 给 {@code instructions} 用：两个通道必须说同一段话。 */

@@ -159,10 +159,8 @@ public class ReconMcpTools {
                     .append("草稿不生效，recon_run 现在还用不了它；对账维度：左 ").append(leftDesc)
                     .append("，右 ").append(rightDesc).append("，比对字段 ").append(compares).append("。\n");
             switch (trialState) {
-                case "queued" -> sb.append("影子试算已排队（会话 #").append(runId).append("，单次约 1 分钟）。\n")
-                        .append("下一步：recon_trial_status(ruleCode=").append(code)
-                        .append(", version=").append(version).append(") 或 runId=").append(runId)
-                        .append(" 轮询结论，不要重复提交。\n");
+                case "queued" -> sb.append("影子试算已排队（会话 #").append(runId).append("，单次约 1 分钟）；")
+                        .append("结论用 recon_trial_status 查（ruleCode/version 或 runId 都能定位），不要重复提交。\n");
                 case "agent-disabled" -> sb.append("影子试算未跑：Agent 能力未启用（recon.agent.enabled=false），")
                         .append("请启用后重新提交，或由人在 REST 上跑试算。\n");
                 case "done" -> sb.append("影子试算已完成：可批性 ").append(trialDetail).append("。\n");
@@ -265,8 +263,7 @@ public class ReconMcpTools {
         String note = blankToNull(remark) == null ? "由 MCP 工具发起" : remark;
         ReconJob job = engine.run(resolved, batch, note);
         String rule = resolved.spec().code() + "（" + (resolved.version() == null ? "内联规则" : "v" + resolved.version()) + "）";
-        String text = "规则 " + rule + "\n" + jobSummary(job.id())
-                + "\n下一步：recon_list_diffs 看差异明细，recon_explain_job 生成归因。";
+        String text = "规则 " + rule + "\n" + jobSummary(job.id());
 
         Map<String, Object> view = new LinkedHashMap<>();
         McpToolFactory.put(view, "ruleCode", resolved.spec().code());
@@ -437,8 +434,14 @@ public class ReconMcpTools {
                     .append("，").append(table.rows()).append(" 行，构建耗时 ").append(table.buildMillis()).append(" ms\n");
         }
         sb.append("已注册规则 ").append(build.modelRuleCode()).append("（v").append(build.modelRuleVersion())
-                .append("），现在调 recon_run 传这个 code 就是对模型表做对账，差异口径与原规则一致；")
-                .append("源数据变化后要重新构建（再次调 recon_build_model）模型表才是新的。");
+                .append("，状态 ").append(build.modelRuleLifecycle()).append("）");
+        if ("ACTIVE".equals(build.modelRuleLifecycle())) {
+            sb.append("，现在调 recon_run 传这个 code 就是对模型表做对账，差异口径与原规则一致；");
+        } else {
+            sb.append("，草稿：还要走试算 + 人工审批，审批之前 recon_run 会拒绝执行 —— "
+                    + "这条闸门不该被脚本绕过，要跑请先让人批；");
+        }
+        sb.append("源数据变化后要重新构建（再次调 recon_build_model）模型表才是新的。");
         return sb.toString();
     }
 

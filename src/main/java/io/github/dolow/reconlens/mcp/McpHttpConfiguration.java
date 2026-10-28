@@ -60,10 +60,9 @@ public class McpHttpConfiguration {
 
     @Bean(destroyMethod = "closeGracefully")
     public McpSyncServer mcpHttpServer(HttpServletStreamableServerTransportProvider transport,
-                                       ToolRegistry registry,
-                                       List<AgentMcpTools> agentTools) {
+                                       ToolRegistry registry) {
         List<McpServerFeatures.SyncToolSpecification> specs =
-                McpSpecifications.build(new JacksonMcpJsonMapper(new ObjectMapper()), registry, agentTools);
+                McpSpecifications.build(new JacksonMcpJsonMapper(new ObjectMapper()), registry);
         McpSyncServer server = McpServer.sync(transport)
                 .serverInfo(McpSpecifications.SERVER_NAME, McpSpecifications.SERVER_VERSION)
                 .instructions(McpSpecifications.instructions())

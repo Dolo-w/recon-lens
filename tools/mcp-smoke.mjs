@@ -67,7 +67,7 @@ async function call(name, args) {
   const reply = await send('tools/call', { name, arguments: args });
   const text = (reply.result.content || []).map((part) => part.text || '').join('\n').trim();
   console.log(`\n=== ${name}(${JSON.stringify(args)}) isError=${reply.result.isError} ===\n${text}`);
-  return { text, isError: reply.result.isError === true };
+  return { text, isError: reply.result.isError === true, structured: reply.result.structuredContent || {} };
 }
 
 let failures = 0;
@@ -123,14 +123,16 @@ try {
   const one = await call('recon_explain_diff', { diffId });
   check(!one.isError && one.text.includes('归因'), 'recon_explain_diff 能解释单条差异');
 
-  // 预处理物化：建模型表 → 用生成的 <CODE>__MODEL 规则再跑一次，差异必须逐条一致
+  // 预处理物化：建模型表 → 生成的 <CODE>__MODEL 规则按契约落草稿，没试算没审批就跑不了。
+  // 这条断言以前是"建完直接跑、差异分类必须和原规则一致"，它默认了 build_model 直写 ACTIVE ——
+  // 那等于让一条机器生成的规则免审生效。现在验的是相反的东西：闸门还在。
   const built = await call('recon_build_model', { ruleCode: 'BILL_VS_SETTLE', shards: 4, operator: 'mcp-smoke' });
   check(!built.isError && built.text.includes('已注册规则 BILL_VS_SETTLE__MODEL'), 'recon_build_model 建表并注册了模型规则');
+  check(built.text.includes('状态 DRAFT'),
+    '模型规则落草稿而不是直接生效（正文里带状态）：' + built.text.slice(0, 80));
   const modelled = await call('recon_run', { ruleCode: 'BILL_VS_SETTLE__MODEL', batchId: 'mcp-smoke-model', remark: '读模型表' });
-  const classification = (text) => (text.match(/差异分类：(.*)/) || [])[1] ?? '';
-  check(classification(modelled.text) !== '' && classification(modelled.text) === classification(run.text),
-    '读模型表跑出来的差异分类与原始规则一致：' + classification(modelled.text));
-  check(modelled.text.includes('扫描 左=20 右=21'), '读模型表时两侧行数不变（左=20 右=21）');
+  check(modelled.isError && modelled.text.includes('没有可以运行的生效版本'),
+    '未经试算与审批的模型规则拒绝执行：' + modelled.text.slice(0, 140));
 
   const badRule = await call('recon_run', { ruleCode: 'NOT_A_RULE' });
   check(badRule.isError && badRule.text.includes('未找到规则'), '未知规则被包成 isError 而不是断开连接');
