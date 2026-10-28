@@ -4,6 +4,127 @@
 
 ## [未发布]
 
+### 修复（2026-10-28 晚：真实会话暴露的两处起草缺陷）
+
+- **起草回执不再被裁在半句话**：`ChatNarrator.confirm` 给模型的额度 160 → 600
+  （`CONFIRM_TOKENS`；`deepseek-flash` 先推理再说话，160 根本不够），并加两道兜底——
+  `looksComplete`（末字符必须是句末标点或收尾引号，否则退回模板）、`ruleCodeIn`（摘要里有规则编码、
+  回执里却没有 → 退回模板）。`decorate` 的总结同样按 `looksComplete` 兜住。
+  现场原来输出「我理解你要起草规则 ORD_CUST_CONSU」，现在整句带编码
+- **模型替用户"认列名"之前先问一句**：`DraftIntake.Hints#untraceable` 只核对**这一轮新填**的 key/compare 列——
+  用户原话里既没有列名、也没有能翻到它的别名（`ROOTS`：订单→order、金额→amount、客户→customer、
+  更新时间→updated…）时，先问「「updated_at」表里是有的，但你刚才那句话里没有能对上它的说法。我准备就按它写；
+  是的话回「是」，不对就说列名……或者回「去掉」」。猜的列留在槽位里等点头（回「是」直接往下走，
+  回「去掉」用 `withoutColumns` 摘掉、别的参数不动）。"字段翻不成列名"那一问补上"不回就先不写进规则"，
+  不再静默丢维度
+- **"对应哪一列"的答案要算数 / 带骨架的回执不被改写**：`pendingArgs` 多记一个 `hinted`
+  （上一轮没认出来的那个词），下一句里点到列名（整句出现，或分词后能翻）就并进维度再往下走——
+  实测「就用 updated_at 吧」原来被无视，现在 `dimension: [order_no, customer_id, updated_at]`。
+  `narrate` 见到正文里有 ` ```yaml ` 一律原样返回：总结层曾给回执添过用户没说过的
+  「以 updated_at 为准」，而骨架是要落库的正式文本
+- 回归：**878 tests / 0 failures**（`ChatNarratorTest` +2、`DraftIntakeTest` +2、`ChatRuntimeToolTest` +1）；
+  证据与复现见 [report-p2-toolcall.md §5.3](docs/report-p2-toolcall.md)
+- **已知没修**：legacy 下模型有时不调工具、只回话（同一句三次里一次），起草参数收集压根不启动——
+  属编排与模型的边界，记在 [open-questions.md §三·11](docs/open-questions.md)
+
+### 新增（2026-10-28：自由循环 `recon.chat.mode=loop`，试验开关，默认仍是 legacy）
+
+- **不再先判意图：模型拿着手册自己决定下一步**。`ChatMode{LEGACY,LOOP}` + `recon.chat.mode` 开关
+  （`loop`/`free`/`agent` 都算 LOOP）。loop 下规划器直接是 `LlmPlanner`，不套 `CompositePlanner`——
+  没有词表快路径、没有意图闸门，每轮由模型在「调工具 / 说话 / 结束」里选
+- **项目手册常驻**：`resources/chat/handbook.md`（约 1.3k token）——系统有什么、怎么做事、YAML 骨架、
+  口语→列映射、三条硬约束（不许编列名 / 业务键不能拿来比 / 写动作必须有人点）。由 `ChatHandbook` 装载，
+  读不到只 warn，不挡启动
+- **多跳循环**：`ChatRuntime#loopTurn` 做一步 → 真实结果进 transcript → 再问模型（`ChatPlanner#continueLoop`），
+  `recon.chat.loop.max-hops` 刹车（默认 5）。中间步骤只回灌给模型，用户只看到模型最后的判断；
+  模型查完没总结时再补一句"把结论告诉用户"，跳数用尽则退回最后一步原始输出
+- **写动作在循环里也停在回执**：撞上写工具就把回执交给用户，不走"已拦下"的防线路径。
+  唯一的例外是**薄起草**：`businessDescription` 短于 40 字时不给用户回执，先把"这条没执行"退给模型，
+  让它自己去查列、问用户——实测里模型带着「按订单、资源对账」这种半句话就来点 `recon_draft_rule`
+- **对话记忆改成双向**：loop 模式的历史取"用户+助手"（助手侧截 120 字），否则模型看不到自己上一轮
+  问过什么、查过什么，会把同一张表重查、同一个问题重问
+- 文档：[report-loop-mode.md](docs/report-loop-mode.md)（同一份八句剧本的 legacy/loop 对照 +
+  被收集器劫持的现场）、`tech-by-stage.md` §11、`deep-dive-p2.md` ①⓪、`plan-roadmap.md` §九
+- 回归：`./mvnw -o test` → **873 tests / 0 failures**；新增 `ChatRuntimeLoopTest`（4 例：多跳回灌、
+  写动作停下、跳数刹车、薄起草退给模型）、`ChatHandbookTest`（1 例）
+- 实测脚本：`work/p2-real.ps1 -Mode loop`（18098，库 `work/p2-loop`）、`work/p2-loop-probe.ps1`（八句剧本）
+
+### 变更（2026-10-28：P2 改为模型直选工具）
+
+- **模型不再只能选 15 个意图之一，可以直接点名工具**：`ChatPlan` 增加 `toolName` / `toolArgs` / `reply` 三个分量，
+  模型输出三选一 —— `{"action":"tool","name":…,"args":{…}}` / `{"action":"reply","text":…}` / `{"action":"done"}`。
+  新增 `chat/plan/ToolCallPlanner`（把 `ToolCatalog.specs()` 拼成提示词里的工具段、解析三选一；**未知工具拒收**，
+  解析失败退回老路径，不抛）。`ChatRuntime#dispatchTool` 直接 `registry.find(name).invoke(args)`，
+  不再"意图 → 工具名"翻译两次。意图枚举保留给遥测与 P1 兼容路径
+- **预算分两档 + 会话账本**：`TurnBudget.Phase {UNDERSTANDING, ACTING}` —— 理解档 facts 2000 / history 4000 / 合计 12000，
+  执行档沿用 6100；历史超限**整轮丢弃**而不是砍半（半句话不是需求），并新增 `TurnLedger` 按会话累计 `tokensUsed`
+  （过 100k 才收紧）。实测 8 轮各 ~420 字：`tokensUsed` 847→14896，落库原话 8/8 逐字一致、「…[预算截断]」0 处
+- **写动作一律先回执，且按暂存参数执行**：工具点名 `recon_run` 时把 `tool`+`toolArgs` 存进槽位，用户回「确认」后
+  `handleConfirm` 用**原来那组参数**执行（不重新从槽位猜）。`dispatch(..., confirmed)` 是这道防线的唯一开关——
+  第一版没有它，「确认」之后又被要了一次「确认」
+- **写动作的判据合并成一条**（同日追加）：`writeAction(plan)` —— 工具形态看 `ToolNames.WRITES`，意图形态看
+  `writeReady(call)`（`RUN/BUILD_MODEL` 要规则编码、`RETRY` 要任务号、`DEFINE_RULE` 要正文），**参数齐了就一律回执**。
+  删掉 `needsWriteConfirm` 里「用户原话点名了规则/任务就不问」的豁免——正是它让同一句话在
+  `action=tool` 与 `action=RUN` 两种形态下一边问一边不问。表单入口显式 `confirmed=true`（不经自然语言，等价于已确认）
+- **词表降级为「短命令快路径 + 熔断兜底」**：模型可用时不再要求词表先命中。问句（`吗/呢/？` 结尾或含
+  「什么/怎么/为什么/关系/如何…」）**不走**快路径——实测「这几张表什么关系」曾被答成表清单；
+  注意判据里不能有「哪」，否则「有哪些规则」会被误判
+- **守卫话术逐字送达**：`IntentReview.question(...)` 判定的反问回复改走 `narrate(..., verbatim=true)`，不过总结层。
+  上一轮实测这段话被改写成了"好的，我来帮你跑一下"，把"我没有动手"说成了"我要动手"
+- **起草不再是「点一下就执行」**（同日追加，用户真界面撞出来的）：`recon_draft_rule` 被模型选中时**先接回**
+  `defineRule → draftStep` 的参数收集（问表/业务键/比对字段，列名不存在就问"去掉还是对应哪一列"），
+  收集期间由收集器接管这一轮（只读工具让路，写工具照旧回执）；骨架生成后才问"确认执行吗"。
+  `DraftIntake` 新增 `withoutHint()`（问过的字段不再重复问）与 `withSides()`（只差右侧表时单说的一张表归右）
+- **回执不出现内部工具名**：`describeTool` 改成中文动作话术表（"起草一条对账规则"/"跑一次对账"），
+  `ChatPlan`/`LlmPlanner` 的工具 reason 也从"模型选择工具 recon_xxx"改成"模型直接选了一个动作"
+- **`LlmChatClient.completeJson` 的 `max_tokens` 400 → 900**：起草时模型把长参数原样回传，400 装不下会截成半截
+  JSON → 解析失败 → 三次后熔断 300 秒，接下来几轮全落词表（复跑验收时突然"变笨"就是这条）
+- 文档：[report-p2-toolcall.md](docs/report-p2-toolcall.md)（改前/改后对照 + 四组证据）、
+  `tech-by-stage.md` §10、`deep-dive-p2.md` ②③⑤⑦⑧、`metrics-loop.md` §2.1、`plan-roadmap.md` §八
+- 回归：`./mvnw -o test` → **868 tests / 0 failures**（起点 835）；新增 `ToolCallPlannerTest`（10 例）、`ChatRuntimeToolTest`（10 例）
+- 实测脚本：`work/p2-real.ps1`（起停 18097，按 `server.port` 定位进程，避免 jar 被锁）、
+  `work/p2-accept-toolcall.ps1`（四条验收，证据写 `logs/accept-p2.json`）、`work/p2-check-draftintake.ps1`（起草收参六轮）
+
+### 修复（2026-10-27：聊天里贴 YAML 起草，维度不再被丢掉）
+
+现象：在会话里贴一份完整 YAML（带 `dimension: [customer_id, order_no]`），回执只说「已记下：左 bill_left，右 bill_right」并追问「两侧靠哪一列连起来（业务键）？」——用户贴的正文被丢掉了。
+
+三处成因，缺一不可地一起修：
+
+- **模型路由不带正文**：`LlmPlanner` 只产出意图与槽位，正文一直是空的；之前只有词表路由会调用 `ChatIntentRouter#ruleBody`。现在 `ChatRuntime#withLocalRuleBody` 在 `DEFINE_RULE` 入口把正文补回来——**正文永远由本地确定性提取器提供，不由模型复述**（复述八百行 YAML 必错，而且模型本来也看不到完整校验上下文）
+- **正文前面的一句人话没剥掉**：`ruleBody` 只按行内前缀剥（"帮我贴一份规则："），碰到「贴一份 YAML 规则\ncode: …」就把中文散文留在正文第一行，YAML 解析器报 `mapping values are not allowed here`。改为按行找真正的起点（`code:` / `---` / `left:` / `{`）
+- **起草被存在性判成冲突**：`LlmPlanner#evidenceOf` 把 `DEFINE_RULE` 当"引用"核实，新编码不在规则库里就判 `CONFLICT` → 会话回成 HELP。起草是**创建**，不是引用，现在这条路径不再要求编码已存在；它能不能生效仍由闸门 1/闸门 2/人工审批管（`RUN`/`BUILD_MODEL` 引用不存在的规则依然判冲突）
+
+实测（18097，真模型 `deepseek-flash`）：贴一份两列业务键的 YAML → 回执「规则 PROBE_DIM_RECON 的草稿 v1 已落库……对账按「customer_id+order_no」对齐，核对「amount」」，不再是追问业务键。回归测试 `RuleBodyNormalizationTest`（4 条）+ `LlmPlannerTest` 两条。
+
+### 新增（2026-10-27：在线指标闭环）
+
+- **评测结果落库并有口径**：新增 `recon_eval_case`（维度：`batch`, `no`, `question`, `expected_intent`, `actual_intent`, `expected_tool`, `actual_tool`, `turns`, `multi`, `cost_ms`, `tokens_est`, `passed`）与 `EvalMetrics`。四项口径写成代码：意图命中率、工具选择率（分母只算需要工具的题）、**平均轮数只在 `multi=true` 的多轮任务上求均值**、每会话 token 中位数。`multi` 是必要的：把 30 条单轮题混进"平均轮数"会得出 1.24，而多轮口径是 2.13
+- **接口**：`POST /api/eval/{batch}/cases`（整批覆盖，不叠加）、`GET /api/eval/{batch}/metrics`、`GET /api/eval/batches`
+- **退步门禁**：`work/golden-run.mjs` 支持 `EVAL_BASELINE` + `EVAL_MAX_REGRESSION`，与基线逐项比差，超出容忍即 `exit code = 1`。实测：用 100/100/1 轮的严格基线比对，报"平均轮数、token 中位数退步"，退出码 1
+- **故障注入**：新增 `work/fault-injection.ps1`，注入"模型输出坏 JSON / 模型进程不可用 / 起草拿到致命违规"三种故障，契约是**降级而不是把异常抛给调用方**，产出 `docs/degradation-matrix.md`（实测 3/3 通过）
+- 文档：`docs/metrics-loop.md`（四个时间尺度、指标与旋钮、三道门、口径踩坑、边界）
+
+### 新增（2026-10-27：长任务的中间态恢复与启动巡检）
+
+- **中断的 Agent 会话可以从最后一个持久化产物接着做**：新增 `AgentOrchestrator#resume(runId, operator)` 与 `POST /api/agent/runs/{id}/resume`（`X-Operator` 必填；会话不存在 404、已结束 409）。恢复点只看轨迹里最后一个 `ACT`：`save-draft` → 只补试算；`shadow-trial` → 只补沉淀、不重跑试算（重跑会多一条任务）；`run-reconciliation` → 只补归因；`draft-round-N`/感知规划中途 → `SCRATCH` 从头跑，但**沿用同一个 runId 与步号**，轨迹不会出现两段 Step 1
+- **`recon_agent_run` 增加 `goal_json`**：`goal` 列存的是人能读的那句话，恢复不够用 —— `AgentGoal` 还有 trigger / intent / focusTypes / batchId / timeWindow，其中 intent 猜错会让"只想起草"的会话真的跑一次生产对账。旧记录该列为 NULL，恢复时退回"按文本 + 默认 intent=DRAFT_RULE 重建"（宁可少跑，不会多跑）。迁移与回滚脚本见 `docs/migrations/2026-10-27-agent-run-goal-json*.sql`
+- **启动巡检接管未完成的会话**：`AgentRunRecovery` 在 `ApplicationReadyEvent` 后把 `RUNNING` 状态的会话交给 `resume`（后台单线程，不挡端口监听；单个失败只记日志）。只接管**本进程启动之前**创建的行（端口在就绪事件之前已监听，刚受理的会话可能正在跑）；`FAILED` 只由人显式调接口恢复
+- **启动清理不再把遗留会话标成 `FAILED`**：`TrialTaskRegistry` 只清点、留一条日志，把"接着做"交给 `AgentRunRecovery`；`AgentRunRepository#failUnfinished` 删除。旧行为会把已落库的草稿、已跑完的试算一起判成没发生过，而它们正是恢复要保住的产物。恢复失败时保持原状并记 `WARN`（每次启动最多重试一轮，有界）
+- **草稿落库但试算没通过 → `PARTIAL` 而不是 `SUCCESS`**：`conclude()` 统一判状态。实测场景：H2 不认 `CRC32` 时每条分片都 FAILED、结论 INCONCLUSIVE，而会话报 SUCCESS，下游会以为"已经验过了"
+- 修复：`AgentRunRepository#goalJson` 对可空列直接 `stream().findFirst()` 会 NPE（`Optional` 装不下 null），先滤空再取
+
+### 变更（2026-10-27：闸门与启动自检）
+
+- **生产档下"审批"不再是一个可配置项**：新增 `StartupSafety` —— 生产 profile（名字带 `prod`）下，`recon.model.require-approval=false` 直接**启动失败**（它会让 `recon_build_model` 把机器生成的 `__MODEL` 规则写成 ACTIVE、跳过试算与审批）；`recon.security.api-key` 未配置同样启动失败。开发档（`default`/`test`/`mcp`/`mysql`）保持原样，`recon.security.require-api-key=true` 可让联调档提前上锁
+- **试算有了同步触发口**：新增 `POST /api/rule-reviews/{code}/{version}/trial`（agent 未启用时 501，不伪装成"排队中"）。此前试算只能从 MCP 定义规则或异步调度器触发，闸门 1 的拒绝只落在日志里；现在它直接以 `422 + violations[]` 回到调用方
+- **试算被闸门 1 拒绝时回结构化违规**：新增 `RuleGateRejectedException` + `GateRejectionHandler`，HTTP 回 `422 {error:"gate_rejected", ruleCode, ruleVersion, violations:[{code,location,message,suggestion}]}`；Agent 侧 `shadow-trial` 步骤的 payload 也带 `violations[]`。以前 violations 被拼进一句中文，REST/MCP/脚本只能靠正则从文字里抠，`location`/`suggestion` 全丢
+- **`recon_run` 对"存在但没生效"的规则给出正确原因**：`RuleCatalog.resolve` 不再一律报「未找到规则」，而是「规则 X 存在（v1，状态 DRAFT），但没有可以运行的生效版本：先跑试算，再走人工审批生效」——否则人刚看到"已落库为草稿"，回头执行却被告知规则不存在
+- **工具返回文本不再写「下一步：recon_xxx」**：`recon_define_rule` / `recon_draft_rule` 的收尾改成陈述句，建议走 `ToolSpec.suggestion`（`ToolNames.SUGGESTIONS` 现覆盖 `RUN`/`JOB_SUMMARY`/`DEFINE_RULE`/`DRAFT_RULE`）
+- **`tools/mcp-smoke.mjs` 按真实契约断言**：`recon_build_model` 之后断言 `__MODEL` 落 DRAFT、`recon_run` 被拒；旧断言写的是"建完直接跑、差异分类一致"，等于按"机器生成规则免审生效"写脚本
+- **评测 CI 不再静默跳过 p2**：没配 `DEEPSEEK_API_KEY` 时 p2 档照跑，按"模型不可用"如实记录，而不是从基线里整条消失
+- 文档：`docs/mcp.md` 明确「多轮 Agent 走 `/mcp`，stdio 是单轮」——stdio 的 `TrialTaskRegistry`/`ImportTaskRegistry` 在进程内存里，下一次 `tools/call` 可能落在另一个进程
+
 ### 新增
 
 - **自定义对账维度（声明式）**：`left`/`right` 新增 `dimension`（列名列表或任意 SQL 表达式，引擎统一生成为键列 `__biz_key`）、`dimensionSeparator`、`measures`（`别名: SQL 表达式`，声明后就是聚合维度，引擎先 `GROUP BY` 再比对）、`where`。
