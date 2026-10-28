@@ -64,6 +64,14 @@ public final class DraftIntake {
     private static final Pattern CODE = Pattern.compile("\\b([A-Z][A-Z0-9_]{2,})\\b");
 
     /**
+     * 这些词是"话"，不是字段名。判断"用户点名的词有没有对应列"时要跳过，
+     * 否则「帮我起草个规则」里的"规则"也会被当成翻不出来的字段去追问。
+     */
+    private static final java.util.Set<String> STOP_WORDS = java.util.Set.of(
+            "规则", "表", "这两张表", "两张表", "对账", "比对", "字段", "维度",
+            "这样", "然后", "一下", "一个", "这条", "那条", "这次", "两份", "两边");
+
+    /**
      * 「根据订单和状态对账」这类说法里的字段线索。
      *
      * <p>它不是参数本身：用户说的是业务词（订单、状态），规则要的是列名（order_no、status）。
@@ -168,14 +176,22 @@ public final class DraftIntake {
                 // 带 + 的多半是复合业务键（客户+订单号），不是"键 + 比对字段"
                 boolean composite = newHint.contains("+");
                 List<String> matched = new ArrayList<>();
-                for (String token : newHint.split("\\s*(?:和|与|、|,|，|\\+|\\s)\\s*")) {
+                List<String> unmatched = new ArrayList<>();
+                for (String token : newHint.split("\\s*(?:和|与|、|,|，|\\+|\\s|：|:)\\s*")) {
+                    if (token.isBlank()) {
+                        continue;
+                    }
                     String column = matchColumn(token, columns);
                     if (column != null && !matched.contains(column)) {
                         matched.add(column);
+                    } else if (column == null && token.length() <= 8 && !STOP_WORDS.contains(token)) {
+                        // 翻不出来 ≠ 用户没说过。留着让上层追问，别替他删维度
+                        unmatched.add(token);
                     }
                 }
                 if (!matched.isEmpty()) {
-                    newHint = null;
+                    // 有翻不出来的词就把它们留在 hint 里：上层据此追问，而不是静默丢维度
+                    newHint = unmatched.isEmpty() ? null : String.join("、", unmatched);
                     if (composite) {
                         if (newKey == null) {
                             newKey = String.join("和", matched);
@@ -234,6 +250,19 @@ public final class DraftIntake {
         }
 
         /**
+         * 直接用这两张表当左右。
+         *
+         * <p>只差右侧时用：解析器不知道上一问问的是哪一边，一律"第一张表当左"，
+         * 直接合进去会把左边覆盖掉，收出"左 X，右 X"——同一张表对账，永远 0 差异。
+         */
+        public Hints withSides(String newLeft, String newRight) {
+            if (newLeft == null || newRight == null || newLeft.equalsIgnoreCase(newRight)) {
+                return this;
+            }
+            return new Hints(code, name, newLeft, newRight, key, compare, hint);
+        }
+
+        /**
          * 把模型（或别处）认出来的槽位并进来：<b>已经有的不动</b>，只补空位。
          *
          * <p>模型没有写权限，它只提值；「用户早就说了的不许被模型改写」这条守在这里，
@@ -262,6 +291,84 @@ public final class DraftIntake {
             return left != null && right != null && key != null && compare != null;
         }
 
+        /** 业务键里的各列（{@code order_no和customer_id} → 两列）。 */
+        public List<String> keyColumns() {
+            if (key == null || key.isBlank()) {
+                return List.of();
+            }
+            return java.util.Arrays.stream(key.split("\\s*(?:和|与|、|,|，|\\+|\\s)\\s*"))
+                    .map(String::trim)
+                    .filter(part -> !part.isEmpty())
+                    .toList();
+        }
+
+        /**
+         * 业务键/比对字段里，<b>用户自己的话推不出来</b>的列。
+         *
+         * <p>为什么要有这一道：模型很擅长把"日期"认成 {@code updated_at}——列是真的存在，
+         * 但用户从没这么说过，写进规则就是替他改了口径（实测：alice 说"订单、客户、日期"，
+         * 骨架里出现 {@code updated_at}，她下一句"我说的日期是消费日期"也照旧）。
+         * 这里只认两种来源：原话里出现了列名本身，或出现了能翻到它的中文别名。
+         *
+         * @param evidence 用户到目前为止的原话（本轮 + 攒下来的 spoken）
+         */
+        public List<String> untraceable(String evidence, List<String> columns) {
+            List<String> candidates = new ArrayList<>(keyColumns());
+            if (compare != null) {
+                candidates.add(compare);
+            }
+            return untraceable(candidates, evidence, columns);
+        }
+
+        /**
+         * 同上，但只看这几列。
+         *
+         * <p>调用方只递<b>这一轮新填的</b>列：前几轮用户自己说过的值不该被重新审一遍——
+         * 那会把"回 order_no"之后的「比金额」误判成猜列，把已经收到的业务键丢掉。
+         */
+        public List<String> untraceable(Collection<String> candidates, String evidence, List<String> columns) {
+            List<String> guessed = new ArrayList<>();
+            if (evidence == null || evidence.isBlank() || columns == null || columns.isEmpty()
+                    || candidates == null) {
+                return guessed;
+            }
+            for (String column : candidates) {
+                if (!traceable(column, evidence, columns)) {
+                    guessed.add(column);
+                }
+            }
+            return guessed;
+        }
+
+        /** 把这几列从业务键/比对字段里摘掉（用户否掉的时候用）。 */
+        public Hints withoutColumns(List<String> drop) {
+            if (drop == null || drop.isEmpty()) {
+                return this;
+            }
+            List<String> kept = keyColumns().stream().filter(column -> !drop.contains(column)).toList();
+            return new Hints(code, name, left, right,
+                    kept.isEmpty() ? null : String.join("和", kept),
+                    drop.contains(compare) ? null : compare,
+                    hint);
+        }
+
+        private static boolean traceable(String column, String evidence, List<String> columns) {
+            String text = evidence.toLowerCase(Locale.ROOT);
+            if (column == null || column.isBlank()) {
+                return true;
+            }
+            if (text.contains(column.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+            for (String word : ROOTS.keySet()) {
+                if (text.contains(word.toLowerCase(Locale.ROOT))
+                        && column.equalsIgnoreCase(matchColumn(word, columns))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /**
          * 比对字段落在业务键里：按 key 比 key 永远相等，任务会以「0 差异」成功。
          *
@@ -282,6 +389,16 @@ public final class DraftIntake {
         /** 只把比对字段退回去，其余原样保留——下一轮只重问这一样。 */
         public Hints withoutCompare() {
             return new Hints(code, name, left, right, key, null, hint);
+        }
+
+        /**
+         * 摘掉"认不出的字段"那一句，其余原样保留。
+         *
+         * <p>问过之后要这么存：{@code resolveFrom} 每轮都会重跑，认不出的词留在这份里
+         * 就会把同一个问题再问一遍——用户答了「去掉这一维」，系统却还在问同一句。
+         */
+        public Hints withoutHint() {
+            return new Hints(code, name, left, right, key, compare, null);
         }
 
         /** 左右对调：「翻一下顺序」之后，回显、列名翻译、YAML 都要按新左右来。 */
@@ -523,6 +640,34 @@ public final class DraftIntake {
     }
 
     /**
+     * 中文口语 → 列名里的词根。
+     *
+     * <p>用户说"订单"、表里叫 {@code order_no}；说"金额"、表里叫 {@code amount}。
+     * 这张表就是这层翻译本身，也用在"这句话能不能推出这一列"的核对上
+     * （见 {@link Hints#untraceable}）——两处必须是同一份，否则一边能翻一边翻不了。
+     */
+    private static final Map<String, String> ROOTS = new LinkedHashMap<>();
+
+    static {
+        ROOTS.put("订单", "order");
+        ROOTS.put("订单号", "order");
+        ROOTS.put("单号", "order");
+        ROOTS.put("状态", "status");
+        ROOTS.put("金额", "amount");
+        ROOTS.put("钱", "amount");
+        ROOTS.put("款", "amount");
+        ROOTS.put("客户", "customer");
+        ROOTS.put("客户号", "customer");
+        ROOTS.put("时间", "updated");
+        ROOTS.put("更新时间", "updated");
+        ROOTS.put("更新", "updated");
+        ROOTS.put("主键", "id");
+        ROOTS.put("编号", "id");
+        ROOTS.put("ID", "id");
+        ROOTS.put("id", "id");
+    }
+
+    /**
      * 把业务词翻成列名。
      *
      * <p>先精确匹配，再按中文别名找（订单→order、状态→status…），最后退化成包含匹配。
@@ -538,15 +683,7 @@ public final class DraftIntake {
                 return column;
             }
         }
-        String fragment = switch (needle) {
-            case "订单", "订单号", "单号" -> "order";
-            case "状态" -> "status";
-            case "金额", "钱", "款" -> "amount";
-            case "客户", "客户号" -> "customer";
-            case "时间", "更新时间" -> "time";
-            case "主键", "编号", "ID", "id" -> "id";
-            default -> needle.toLowerCase(Locale.ROOT);
-        };
+        String fragment = ROOTS.getOrDefault(needle, needle.toLowerCase(Locale.ROOT));
         for (String column : columns) {
             if (column.toLowerCase(Locale.ROOT).contains(fragment)) {
                 return column;

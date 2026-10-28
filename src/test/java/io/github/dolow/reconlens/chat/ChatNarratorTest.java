@@ -47,4 +47,25 @@ class ChatNarratorTest {
         assertThat(active.decorate(ChatIntent.DEFINE_RULE, "起草个规则", raw)).isEqualTo(raw);
         assertThat(active.decorate(ChatIntent.APPROVE, "我要批准", raw)).isEqualTo(raw);
     }
+
+    @Test
+    @DisplayName("半句话不算说完：被裁在「ORD_CUST_CONSU」的回执要退回模板")
+    void 半句话不算说完() {
+        assertThat(ChatNarrator.looksComplete("我理解你要起草规则 ORD_CUST_CONSU")).isFalse();
+        assertThat(ChatNarrator.looksComplete("我理解你要起草规则 ORD_CUST_CONSUME_DT_AMT_RECON")).isFalse();
+        assertThat(ChatNarrator.looksComplete("我理解你要起草规则 ORD_CUST_CONSUME_DT_AMT_RECON，确认吗？")).isTrue();
+        assertThat(ChatNarrator.looksComplete("这次就到这里。")).isTrue();
+        assertThat(ChatNarrator.looksComplete("")).isFalse();
+        assertThat(ChatNarrator.looksComplete(null)).isFalse();
+    }
+
+    @Test
+    @DisplayName("摘要里的规则编码能被认出来：确认的对象不能被改写成泛指")
+    void 摘要里的规则编码() {
+        assertThat(ChatNarrator.ruleCodeIn("起草规则 ORD_CUST_CONSUME_DT_AMT_RECON（维度 order_no，比 amount）"))
+                .isEqualTo("ORD_CUST_CONSUME_DT_AMT_RECON");
+        assertThat(ChatNarrator.ruleCodeIn("跑一次对账 BILL_VS_SETTLE")).isEqualTo("BILL_VS_SETTLE");
+        assertThat(ChatNarrator.ruleCodeIn("看一眼任务")).isNull();
+        assertThat(ChatNarrator.ruleCodeIn(null)).isNull();
+    }
 }

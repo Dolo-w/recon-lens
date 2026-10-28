@@ -285,4 +285,36 @@ class DraftIntakeTest {
 
         assertThat(DraftIntake.parse("换个规则吧", TABLES, hints).left()).isEqualTo("bill_left");
     }
+
+    @Test
+    @DisplayName("模型补的列要在用户原话里指得到：说「日期」推不出 updated_at")
+    void 模型补的列要能在原话里指到() {
+        DraftIntake.Hints hints = DraftIntake.Hints.EMPTY
+                .withTables("bill_left", "bill_right")
+                .withSlots(java.util.Map.of("key", "order_no和updated_at", "compare", "amount"));
+
+        // 用户说的是「订单、客户、日期」：order_no / amount 指得到，updated_at 指不到
+        assertThat(hints.untraceable("订单、客户、日期吧，比金额", COLUMNS))
+                .containsExactly("updated_at");
+        // 用户自己说了这一列（或它的别名），就不再拦
+        assertThat(hints.untraceable("就按 updated_at 和订单来，比金额", COLUMNS)).isEmpty();
+        assertThat(hints.untraceable("按订单和更新时间配，比金额", COLUMNS)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("用户否掉一列：只摘这一列，其余已收的不动")
+    void 否掉一列不动别的() {
+        DraftIntake.Hints hints = DraftIntake.Hints.EMPTY
+                .withTables("bill_left", "bill_right")
+                .withSlots(java.util.Map.of("key", "order_no和updated_at", "compare", "amount"));
+
+        DraftIntake.Hints kept = hints.withoutColumns(List.of("updated_at"));
+        assertThat(kept.key()).isEqualTo("order_no");
+        assertThat(kept.compare()).isEqualTo("amount");
+        assertThat(kept.left()).isEqualTo("bill_left");
+
+        DraftIntake.Hints noCompare = hints.withoutColumns(List.of("amount"));
+        assertThat(noCompare.compare()).isNull();
+        assertThat(noCompare.key()).isEqualTo("order_no和updated_at");
+    }
 }

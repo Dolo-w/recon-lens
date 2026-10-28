@@ -4,6 +4,8 @@ import io.github.dolow.reconlens.chat.plan.LlmChatClient;
 import java.util.EnumSet;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 把工具/引擎的输出"说成人话"。
@@ -30,7 +32,16 @@ public final class ChatNarrator {
 
     /** 喂给模型的原文上限：再长就截断，总结的价值不随长度增长，但延迟和费用会。 */
     private static final int MAX_INPUT = 2400;
-    private static final int MAX_TOKENS = 260;
+    /**
+     * 总结的输出预算。
+     *
+     * <p>这里踩过坑：预算给 260 时，模型（`deepseek-flash` 这类会先推理的）把额度烧在推理上，
+     * 正文被裁在半句话——用户看到的是「我理解你要起草规则 ORD_CUST_CONSU」，连对象都没说完。
+     * 所以既要把预算调够，也要在下面用 {@link #looksComplete} 兜住"被截断就退回原文"。
+     */
+    private static final int MAX_TOKENS = 600;
+    private static final int CONFIRM_TOKENS = 600;
+    private static final int MAX_CONFIRM_CHARS = 200;
 
     private static final String SYSTEM = """
             你是对账系统 recon-lens 的会话助手。把系统刚查到的结果改写成 2-3 句中文口语。
@@ -81,6 +92,10 @@ public final class ChatNarrator {
         if (text.isEmpty() || text.length() >= raw.length()) {
             return raw;
         }
+        // 被裁在半句话就退回原文：半句总结比不总结更糟——它看起来像系统的结论
+        if (!looksComplete(text)) {
+            return raw;
+        }
         return text + "\n\n—— 明细 ——\n" + raw;
     }
 
@@ -100,13 +115,44 @@ public final class ChatNarrator {
         }
         String prompt = "用户说：" + (userMessage == null ? "" : userMessage.trim())
                 + "\n系统理解成：" + summary;
-        Optional<String> text = client.completeText(CONFIRM_SYSTEM, prompt, 160);
+        Optional<String> text = client.completeText(CONFIRM_SYSTEM, prompt, CONFIRM_TOKENS);
         String trimmed = text.map(String::trim).orElse("");
-        if (trimmed.isEmpty() || trimmed.length() > 160) {
+        if (trimmed.isEmpty() || trimmed.length() > MAX_CONFIRM_CHARS) {
+            return fallback;
+        }
+        // 话说一半（被 max_tokens 裁掉）→ 退回模板。确认这一步宁可句式死板，也不能让用户
+        // 对着「我理解你要起草规则 ORD_CUST_CONSU」去按确认
+        if (!looksComplete(trimmed)) {
+            return fallback;
+        }
+        // 确认的对象被改写了（规则编码不见了）→ 也退回模板：用户确认的是那一串编码，
+        // 不是"一条对账规则"这种泛指
+        String code = ruleCodeIn(summary);
+        if (code != null && !trimmed.contains(code)) {
             return fallback;
         }
         return trimmed + "（回「确认」或「取消」）";
     }
+
+    /** 一句话有没有说完：末尾得是句末标点或收尾的引号/括号。 */
+    static boolean looksComplete(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        char tail = text.charAt(text.length() - 1);
+        return "？！。!?." .indexOf(tail) >= 0 || "」』”）)".indexOf(tail) >= 0;
+    }
+
+    /** 摘要里的大写编码（规则/任务这类会被确认的对象）。没有就返回 null。 */
+    static String ruleCodeIn(String summary) {
+        if (summary == null) {
+            return null;
+        }
+        Matcher m = RULE_CODE.matcher(summary);
+        return m.find() ? m.group() : null;
+    }
+
+    private static final Pattern RULE_CODE = Pattern.compile("[A-Z][A-Z0-9_]{5,40}");
 
     private static final String CONFIRM_SYSTEM = """
             你是对账系统的会话助手。系统把用户刚才那句话理解成了一个"会改数据"的操作，
