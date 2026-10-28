@@ -27,12 +27,22 @@ public record ChatEvent(String type, Map<String, Object> data) {
      * 就是错的依据，而不是等到整段答非所问才发现。
      */
     public static ChatEvent plan(ChatPlan plan) {
-        return of("plan", Map.of(
-                "source", plan.source().name(),
-                "confidence", String.format(java.util.Locale.ROOT, "%.2f", plan.confidence()),
-                "reason", plan.reason(),
-                "intent", plan.call().intent().name(),
-                "options", plan.options()));
+        java.util.LinkedHashMap<String, Object> data = new java.util.LinkedHashMap<>();
+        data.put("source", plan.source().name());
+        data.put("confidence", String.format(java.util.Locale.ROOT, "%.2f", plan.confidence()));
+        data.put("reason", plan.reason());
+        data.put("intent", plan.call().intent().name());
+        data.put("options", plan.options());
+        // 决策式（P2）之后，真正被执行的可能不是 intent 而是这个工具名。
+        // 轨迹里必须看得见"模型自己选了哪个工具"，否则回执对了也解释不清为什么。
+        if (plan.isToolCall()) {
+            data.put("tool", plan.toolName());
+            data.put("args", plan.toolArgs());
+        }
+        if (plan.isReply()) {
+            data.put("reply", true);
+        }
+        return of("plan", data);
     }
 
     /** 识别到的动作：{@code intent} 是枚举名，{@code label} 是中文动作名。 */
@@ -61,6 +71,19 @@ public record ChatEvent(String type, Map<String, Object> data) {
 
     public static ChatEvent done(long sessionId) {
         return of("done", Map.of("sessionId", sessionId));
+    }
+
+    /**
+     * 这一轮花了多少：{@code turnTokens} 本轮、{@code tokensUsed} 本会话累计、{@code phase} 当前预算档。
+     *
+     * <p>为什么单独一条而不是塞进 {@code done}：预算的解释力在"为什么这一轮它忘了上一句"，
+     * 那条线索必须在正文之前就能看见；塞进结尾事件，用户已经读完那段答非所问了。
+     */
+    public static ChatEvent budget(int turnTokens, int tokensUsed, String phase) {
+        return of("budget", Map.of(
+                "turnTokens", turnTokens,
+                "tokensUsed", tokensUsed,
+                "phase", phase == null ? "" : phase));
     }
 
     public static ChatEvent error(String message) {
