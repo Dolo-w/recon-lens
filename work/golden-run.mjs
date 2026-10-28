@@ -3,7 +3,7 @@
 // 量四件事：意图命中率、工具选择率、平均轮数、每会话 token 中位数。
 // token 用与 ChatSummarizer.estimateTokens 完全相同的规则估算（CJK=1，其它 4 字符=1），
 // 这样报告里的数字和系统内部"要不要压缩"的判断口径一致。
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 const BASE = process.env.BASE || "http://127.0.0.1:18080";
 const OPERATOR = "golden";
@@ -160,6 +160,9 @@ for (const [q, wantIntent, wantTool] of SINGLE) {
     q, wantIntent, gotIntent: res.intent, okIntent,
     wantTool, gotTools, okTool,
     chars: res.text.length,
+    multi: false,
+    // 与 sessionTokens 用同一个量法，否则入库的 token 中位数会和报告里的对不上
+    tokens: estimateTokens(q) + estimateTokens(res.text),
   });
   console.log(`${okIntent && (okTool !== false) ? "[PASS]" : "[FAIL]"} ` +
     `意图 ${res.intent}/${wantIntent}　工具 ${gotTools.join("/") || "-"}/${wantTool || "-"} :: ${q.slice(0, 24)}`);
@@ -178,7 +181,7 @@ for (const t of MULTI) {
   turnCounts.push(t.steps.length);
   sessionTokens.push(tokens);
   console.log(`${ok ? "[PASS]" : "[FAIL]"} ${t.steps.length} 轮 · ${t.name}${ok ? "" : `\n        末轮文本：${last.text.slice(0, 120)}`}`);
-  rows.push({ q: t.name, turns: t.steps.length, ok });
+  rows.push({ q: t.name, turns: t.steps.length, ok, tokens, multi: true });
 }
 
 const median = a => {
@@ -205,4 +208,125 @@ const misses = rows.filter(r => r.okIntent === false);
 if (misses.length) {
   console.log(`\n--- 没命中意图的 ${misses.length} 条（诊断用）---`);
   for (const m of misses) console.log(`  「${m.q}」→ ${m.gotIntent}（期望 ${m.wantIntent}）`);
+}
+
+// ---------- 批 5 / M17：落一份给 CI 与验收看的报告 ----------
+// 为什么落盘而不是只看 console：CI 的 job summary 与 PR 评审都需要一份稳定的、
+// 可 diff 的产物；console 会被日志滚动冲掉。
+const LABEL = process.env.EVAL_LABEL || "local";
+const OUT = process.env.EVAL_OUT || "docs/eval";
+const SLO = [
+  { key: "intentRate", name: "意图命中率", target: ">=90%", ok: Number(intentRate) >= 90, got: intentRate + "%" },
+  { key: "toolRate", name: "工具选择率", target: ">=85%", ok: Number(toolRate) >= 85, got: toolRate + "%" },
+  { key: "avgTurns", name: "平均轮数", target: "<=3", ok: Number(avgTurns) <= 3, got: avgTurns },
+  { key: "tokMedian", name: "每会话 token 中位数", target: "<=6000", ok: tokMedian <= 6000, got: String(tokMedian) },
+];
+const passed = SLO.filter(s => s.ok).length;
+
+mkdirSync(OUT, { recursive: true });
+writeFileSync(`${OUT}/${LABEL}.json`, JSON.stringify({
+  label: LABEL,
+  at: new Date().toISOString(),
+  base: BASE,
+  slo: SLO,
+  passed: `${passed}/${SLO.length}`,
+  totals: { single: SINGLE.length, multi: MULTI.length, toolDenom },
+  rows,
+}, null, 2));
+
+const md = [
+  `# 评测报告：${LABEL}`,
+  ``,
+  `> 生成时间：${new Date().toISOString()}　目标服务：${BASE}`,
+  `> 用例：${SINGLE.length} 条单轮 + ${MULTI.length} 个多轮任务；量法见 work/golden-run.mjs 文件头。`,
+  ``,
+  `## 四指标`,
+  ``,
+  `| 指标 | 目标 | 实测 | 判定 |`,
+  `|---|---|---|---|`,
+  ...SLO.map(s => `| ${s.name} | ${s.target} | ${s.got} | ${s.ok ? "达标" : "**未达标**"} |`),
+  ``,
+  `合计 ${passed}/${SLO.length} 项达标。`,
+  ``,
+  `## 逐条结果`,
+  ``,
+  `| 问句 | 期望意图 | 实际意图 | 期望工具 | 实际工具 | 通过 |`,
+  `|---|---|---|---|---|---|`,
+  ...rows.map(r => `| ${String(r.q).replace(/\|/g, "\\|")} | ${r.wantIntent || "-"} | ${r.gotIntent || "-"} | ${r.wantTool || "-"} | ${(r.gotTools || []).join("/") || "-"} | ${r.okIntent === false || r.okTool === false || r.ok === false ? "否" : "是"} |`),
+  ``,
+].join("\n");
+writeFileSync(`${OUT}/${LABEL}.md`, md);
+console.log(`\n报告已写入 ${OUT}/${LABEL}.md 与 ${OUT}/${LABEL}.json（${passed}/${SLO.length} 项达标）`);
+
+// ---------- 逐题记录入库（在线指标闭环的第一格）----------
+// 为什么还要入库：md 只能被人看，行化之后同一套口径函数（EvalMetrics）能聚合、能 diff、
+// 能进 CI 判定；真上线后这套函数直接换成读行为表，口径不用重写。
+if (process.env.EVAL_INGEST !== "0") {
+  const payload = rows.map((r, i) => ({
+    no: i + 1,
+    question: r.q,
+    expectedIntent: r.wantIntent || null,
+    actualIntent: r.gotIntent || null,
+    expectedTool: r.wantTool || null,
+    actualTool: (r.gotTools && r.gotTools.length) ? `[${r.gotTools.join(", ")}]` : null,
+    turns: r.turns || 1,
+    multi: r.multi === true,
+    costMs: 0,
+    tokensEst: r.tokens || 0,
+    passed: r.okIntent !== undefined ? (r.okIntent && r.okTool !== false) : r.ok === true,
+  }));
+  try {
+    const res = await fetch(`${BASE}/api/eval/${encodeURIComponent(LABEL)}/cases`, {
+      method: "POST",
+      headers: { ...H, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    console.log(`逐题记录入库：HTTP ${res.status} ${await res.text()}`);
+  } catch (e) {
+    // 入库失败不该让回放失败：报告已经落盘了
+    console.log(`逐题记录入库失败（不影响本地报告）：${e.message}`);
+  }
+}
+
+// ---------- 基准对比：让"退步"能让 CI 变红 ----------
+// 为什么要有这一步：没有对比的评测只是"今天跑了个数"，退步要靠人翻两份 md 才能发现。
+// 阈值默认 0（任何退步都失败），上线前可放宽到 EVAL_MAX_REGRESSION=2（容忍两个点）。
+const BASELINE = process.env.EVAL_BASELINE;
+if (BASELINE) {
+  try {
+    const r = await fetch(`${BASE}/api/eval/${encodeURIComponent(BASELINE)}/metrics`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const b = await r.json();
+    const now = {
+      intentHitRate: Number(intentRate),
+      toolSelectionRate: Number(toolRate),
+      averageTurns: Number(avgTurns),
+      tokenMedian: Number(tokMedian),
+    };
+    // delta 统一成"越大越好"，判定就只剩一句：delta < -阈值 就是退步
+    const cmp = [
+      { name: "意图命中率", base: b.intentHitRate, now: now.intentHitRate, higherBetter: true, unit: "%" },
+      { name: "工具选择率", base: b.toolSelectionRate, now: now.toolSelectionRate, higherBetter: true, unit: "%" },
+      { name: "平均轮数", base: b.averageTurns, now: now.averageTurns, higherBetter: false, unit: "" },
+      { name: "token 中位数", base: b.tokenMedian, now: now.tokenMedian, higherBetter: false, unit: "" },
+    ];
+    const maxReg = Number(process.env.EVAL_MAX_REGRESSION || 0);
+    console.log(`\n===== 基准对比：${BASELINE} → ${LABEL}（容忍退步 ${maxReg}）=====`);
+    const regressed = [];
+    for (const c of cmp) {
+      const delta = c.higherBetter ? c.now - c.base : c.base - c.now;
+      const verdict = delta < -maxReg ? "**退步**" : (delta > 0 ? "进步" : "持平");
+      if (delta < -maxReg) regressed.push(c.name);
+      console.log(`${c.name}：${c.base}${c.unit} → ${c.now}${c.unit}　Δ${delta >= 0 ? "+" : ""}${delta.toFixed(2)}　${verdict}`);
+    }
+    if (regressed.length) {
+      console.log(`\n[FAIL] 相对基准 ${BASELINE} 退步：${regressed.join("、")}`);
+      process.exitCode = 1;
+    } else {
+      console.log(`\n[OK] 相对基准 ${BASELINE} 没有超出容忍的退步`);
+    }
+  } catch (e) {
+    // 没有基准时不该让整条链路失败：先有数，再谈对比
+    console.log(`\n基准对比跳过：${e.message}`);
+  }
 }
