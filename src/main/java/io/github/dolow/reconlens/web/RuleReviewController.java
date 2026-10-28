@@ -2,9 +2,12 @@ package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.dsl.RuleException;
+import io.github.dolow.reconlens.dsl.RuleGateRejectedException;
 import io.github.dolow.reconlens.rule.RuleChange;
 import io.github.dolow.reconlens.rule.RuleLifecycleService;
+import io.github.dolow.reconlens.rule.RuleTrialRunner;
 import io.github.dolow.reconlens.store.ApprovalConfirmationRepository;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -15,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -39,10 +43,13 @@ public class RuleReviewController {
 
     private final RuleLifecycleService lifecycle;
     private final ReconProperties properties;
+    private final ObjectProvider<RuleTrialRunner> trialRunner;
 
-    public RuleReviewController(RuleLifecycleService lifecycle, ReconProperties properties) {
+    public RuleReviewController(RuleLifecycleService lifecycle, ReconProperties properties,
+                                ObjectProvider<RuleTrialRunner> trialRunner) {
         this.lifecycle = lifecycle;
         this.properties = properties;
+        this.trialRunner = trialRunner;
     }
 
     /** 审核页需要的东西：规则 diff（字段级）、当前状态、能不能跳过试算。 */
@@ -72,6 +79,28 @@ public class RuleReviewController {
         requireApiKey(apiKey);
         lifecycle.submit(code, version, operator);
         return Map.of("code", code, "version", version, "lifecycle", "REVIEWING");
+    }
+
+    /**
+     * 同步跑一次试算（闸门 2 的触发口）。
+     *
+     * <p>与 {@code recon_define_rule} 的"落草稿 + 排队试算"不同：这里<b>同步</b>跑完并返回结论。
+     * 被闸门 1 拒的时候，把结果说成"任务已投递"等于把一次拒绝伪装成一次提交，所以这里直接
+     * 以 {@code 422 + violations[]} 返回（见 {@code GateRejectionHandler}）。
+     *
+     * <p>agent 未启用时没有实现，回 501 并说明原因：不伪装成"试算中"。
+     */
+    @PostMapping("/{code}/{version}/trial")
+    public Map<String, Object> trial(@PathVariable String code, @PathVariable int version,
+                                     @RequestHeader(value = "X-Api-Key", required = false) String apiKey) {
+        requireApiKey(apiKey);
+        RuleTrialRunner runner = trialRunner.getIfAvailable();
+        if (runner == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_IMPLEMENTED,
+                    "试算未启用（recon.agent.enabled=false）：闸门 2 的实现随 Agent 子系统装配");
+        }
+        RuleTrialRunner.Result result = runner.run(code, version);
+        return Map.of("code", code, "version", version, "state", result.state());
     }
 
     /** 发审批 token：绑定 (code, version, 当前内容哈希)。 */
@@ -220,6 +249,17 @@ public class RuleReviewController {
             body.put("hint", e.hint());
         }
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(body);
+    }
+
+    /**
+     * 闸门 1 拒绝回 422（不是下面那个"请求有问题"的 400）。
+     *
+     * <p>本类的 {@code RuleException} handler 比 advice 优先，而闸门拒绝异常是它的子类，
+     * 不在这里显式拦一道就会被降级成 400 —— 调用方于是分不清"改规则"和"改请求"。
+     */
+    @ExceptionHandler(RuleGateRejectedException.class)
+    public ResponseEntity<Map<String, Object>> gateRejected(RuleGateRejectedException e) {
+        return GateRejectionHandler.response(e);
     }
 
     @ExceptionHandler(RuleException.class)

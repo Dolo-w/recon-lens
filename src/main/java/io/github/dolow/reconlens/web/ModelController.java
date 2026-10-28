@@ -1,6 +1,7 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.dsl.RuleException;
+import io.github.dolow.reconlens.dsl.RuleGateRejectedException;
 import io.github.dolow.reconlens.model.ModelBuilder;
 import io.github.dolow.reconlens.model.ModelException;
 import io.github.dolow.reconlens.rule.RuleTrialScheduler;
@@ -122,6 +123,12 @@ public class ModelController {
     public ResponseEntity<Map<String, Object>> onModelError(ModelException e) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(Map.of("error", "model_build_failed", "message", e.getMessage()));
+    }
+
+    /** 闸门 1 拒绝回 422，别被下面的 {@code RuleException} 处理器降级成 400。 */
+    @ExceptionHandler(RuleGateRejectedException.class)
+    public ResponseEntity<Map<String, Object>> onGateRejected(RuleGateRejectedException e) {
+        return GateRejectionHandler.response(e);
     }
 
     /** 规则不存在 / 规则体不合法（catalog.resolve 抛的就是这个）→ 400，和发起任务时的口径一致。 */

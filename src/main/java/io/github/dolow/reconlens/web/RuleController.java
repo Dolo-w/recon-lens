@@ -4,6 +4,7 @@ import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.domain.RuleLifecycle;
 import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleException;
+import io.github.dolow.reconlens.dsl.RuleGateRejectedException;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.store.RuleRepository;
@@ -212,6 +213,17 @@ public class RuleController {
         view.put("diffType", field.diffType());
         view.put("severity", field.severity());
         return view;
+    }
+
+    /**
+     * 闸门 1 拒绝必须回 422，而不是被下面的 {@code RuleException} 处理器降级成 400。
+     *
+     * <p>controller 内部的 {@code @ExceptionHandler} 比 {@code @RestControllerAdvice} 优先，
+     * 而闸门拒绝异常是 {@code RuleException} 的子类 —— 少了这一道，"改规则"和"改请求"就分不开。
+     */
+    @ExceptionHandler(RuleGateRejectedException.class)
+    public ResponseEntity<Map<String, Object>> onGateRejected(RuleGateRejectedException e) {
+        return GateRejectionHandler.response(e);
     }
 
     /** 规则体不合法（和规则文件同一套校验）→ 400，提示里带"改哪里"。 */

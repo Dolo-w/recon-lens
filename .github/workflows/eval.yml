@@ -1,0 +1,87 @@
+name: eval
+
+# 批 5 / M17：把 golden set 从「本地脚本」变成「常设基线」。
+# 为什么单独一个 workflow 而不是塞进 build：
+# 1) 评测要起服务、要真实 HTTP，比单测慢一个量级，不该拖慢每次 push；
+# 2) 结论要落成可 diff 的文件（docs/eval/*.md），和代码评审一起看；
+# 3) 两档（无模型 / 有模型）的耗时与依赖不同，用 matrix 分开跑，互不拖累。
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    paths:
+      - 'src/main/java/io/github/dolow/reconlens/chat/**'
+      - 'src/main/java/io/github/dolow/reconlens/llm/**'
+      - 'work/golden-run.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-${{ github.ref }}-${{ matrix.profile }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    name: eval / ${{ matrix.profile }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: p1
+            model: ''
+          # p2 不再"没密钥就跳过"：跳过等于这条基线永远不存在。
+          # 没有密钥时 p2 会退回词表行为，报告里如实记成"模型未启用"，而不是悄悄消失。
+          - profile: p2
+            model: 'on'
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 提示 p2 无密钥时会退回词表口径
+        if: matrix.profile == 'p2' && secrets.DEEPSEEK_API_KEY == ''
+        run: |
+          echo "::warning::没有 DEEPSEEK_API_KEY，p2 档会按'模型不可用'记录结论；配置 secret 后这条基线才代表真档。"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+
+      - name: Build
+        run: ./mvnw -B --no-transfer-progress -DskipTests package
+
+      - name: Start app (${{ matrix.profile }})
+        run: |
+          ARGS="--server.port=18080 --recon.agent.enabled=true --recon.engine.run-demo-on-startup=true"
+          if [ "${{ matrix.profile }}" = "p2" ]; then
+            ARGS="$ARGS --recon.chat.llm.base-url=https://api.deepseek.com --recon.chat.llm.model=deepseek-chat --recon.chat.llm.api-key=${{ secrets.DEEPSEEK_API_KEY }}"
+          fi
+          nohup java -jar target/recon-lens-0.1.0.jar $ARGS > app.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/api/jobs > /dev/null; then echo "app up after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          echo "app 起不来，日志尾巴："; tail -50 app.log; exit 1
+
+      - name: Run golden set
+        env:
+          BASE: http://127.0.0.1:18080
+          EVAL_LABEL: ${{ matrix.profile }}
+        run: node work/golden-run.mjs
+
+      - name: 把结论贴进 job summary
+        run: cat docs/eval/${{ matrix.profile }}.md >> $GITHUB_STEP_SUMMARY
+
+      - name: 收集失败现场
+        if: failure()
+        run: tail -100 app.log
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ matrix.profile }}
+          path: docs/eval/${{ matrix.profile }}.*
+          retention-days: 30

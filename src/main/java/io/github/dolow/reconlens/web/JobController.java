@@ -234,6 +234,13 @@ public class JobController {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of("error", e.getMessage()));
     }
 
+    /** 闸门 1 拒绝回 422：语义是"改规则"，与下面"改请求"的 400 分开。 */
+    @org.springframework.web.bind.annotation.ExceptionHandler(io.github.dolow.reconlens.dsl.RuleGateRejectedException.class)
+    public ResponseEntity<Map<String, Object>> handleGateRejected(
+            io.github.dolow.reconlens.dsl.RuleGateRejectedException e) {
+        return GateRejectionHandler.response(e);
+    }
+
     /** 规则体不合法（和规则文件同一套校验）→ 400，别让它变成 500。 */
     @org.springframework.web.bind.annotation.ExceptionHandler({RuleException.class, IllegalArgumentException.class})
     public ResponseEntity<Map<String, Object>> handleBadRequest(RuntimeException e) {

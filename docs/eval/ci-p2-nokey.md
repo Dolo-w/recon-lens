@@ -1,0 +1,58 @@
+# 评测报告：ci-p2-nokey
+
+> 生成时间：2026-10-26T16:59:00.362Z　目标服务：http://127.0.0.1:18088
+> 用例：30 条单轮 + 8 个多轮任务；量法见 work/golden-run.mjs 文件头。
+
+## 四指标
+
+| 指标 | 目标 | 实测 | 判定 |
+|---|---|---|---|
+| 意图命中率 | >=90% | 100.0% | 达标 |
+| 工具选择率 | >=85% | 100.0% | 达标 |
+| 平均轮数 | <=3 | 2.13 | 达标 |
+| 每会话 token 中位数 | <=6000 | 136 | 达标 |
+
+合计 4/4 项达标。
+
+## 逐条结果
+
+| 问句 | 期望意图 | 实际意图 | 期望工具 | 实际工具 | 通过 |
+|---|---|---|---|---|---|
+| 规则库里有哪几条规则？ | LIST_RULES | LIST_RULES | recon_list_rules | recon_list_rules | 是 |
+| 现在有哪些对账规则 | LIST_RULES | LIST_RULES | recon_list_rules | recon_list_rules | 是 |
+| 列一下生效中的规则 | LIST_RULES | LIST_RULES | recon_list_rules | recon_list_rules | 是 |
+| 跑一下 BILL_VS_SETTLE | RUN | RUN | recon_run | recon_run | 是 |
+| 用 BILL_VS_SETTLE 帮我做一次对账 | RUN | RUN | recon_run | recon_run | 是 |
+| 按 BILL_VS_SETTLE 对一次账 | RUN | RUN | recon_run | recon_run | 是 |
+| CUSTOMER_STATUS_RECON 跑一次 | RUN | RUN | recon_run | recon_run | 是 |
+| 看下差异 | LIST_DIFFS | LIST_DIFFS | recon_list_diffs | recon_list_diffs | 是 |
+| 有哪些对不上的 | LIST_DIFFS | LIST_DIFFS | recon_list_diffs | recon_list_diffs | 是 |
+| 左边缺了哪些记录 | LIST_DIFFS | LIST_DIFFS | recon_list_diffs | recon_list_diffs | 是 |
+| 差异明细给我 | LIST_DIFFS | LIST_DIFFS | recon_list_diffs | recon_list_diffs | 是 |
+| 这次对账跑完了吗 | JOB_SUMMARY | JOB_SUMMARY | recon_job_summary | recon_job_summary | 是 |
+| 任务进度怎么样 | JOB_SUMMARY | JOB_SUMMARY | recon_job_summary | recon_job_summary | 是 |
+| 这单扫了多少行 | JOB_SUMMARY | JOB_SUMMARY | recon_job_summary | recon_job_summary | 是 |
+| 为什么差这么多 | EXPLAIN_JOB | EXPLAIN_JOB | recon_explain_job | recon_explain_job | 是 |
+| 整单给我归因一下 | EXPLAIN_JOB | EXPLAIN_JOB | recon_explain_job | recon_explain_job | 是 |
+| 这批差异都是什么原因 | EXPLAIN_JOB | EXPLAIN_JOB | recon_explain_job | recon_explain_job | 是 |
+| 第 1 条差异怎么解释 | EXPLAIN_DIFF | EXPLAIN_DIFF | recon_explain_diff | recon_explain_diff | 是 |
+| 差异 3 是什么原因 | EXPLAIN_DIFF | EXPLAIN_DIFF | recon_explain_diff | recon_explain_diff | 是 |
+| 第一条差异帮我看看 | EXPLAIN_DIFF | EXPLAIN_DIFF | recon_explain_diff | recon_explain_diff | 是 |
+| 重跑失败分片 | RETRY | RETRY | recon_retry | recon_retry | 是 |
+| 重试一下 | RETRY | RETRY | recon_retry | recon_retry | 是 |
+| 把失败的分片重新跑一遍 | RETRY | RETRY | recon_retry | recon_retry | 是 |
+| 给 BILL_VS_SETTLE 建预处理模型 | BUILD_MODEL | BUILD_MODEL | recon_build_model | recon_build_model | 是 |
+| 物化这张账单表 | BUILD_MODEL | BUILD_MODEL | recon_build_model | recon_build_model | 是 |
+| BILL_VS_SETTLE 的试算结论是什么 | TRIAL_STATUS | TRIAL_STATUS | - | - | 是 |
+| 规则能不能批 | APPROVE | APPROVE | - | - | 是 |
+| 审批要怎么走 | APPROVE | APPROVE | - | - | 是 |
+| 你能做什么 | HELP | HELP | - | - | 是 |
+| 帮助 | HELP | HELP | - | - | 是 |
+| 跑一次 → 看差异 → 整单归因（槽位接力） | - | - | - | - | 是 |
+| 跑一次 → 单条归因 | - | - | - | - | 是 |
+| 跑一次 → 重跑失败分片 | - | - | - | - | 是 |
+| 列规则 → 跑其中一条 | - | - | - | - | 是 |
+| 任务总览 → 看差异 | - | - | - | - | 是 |
+| 起草规则（贴 YAML）→ 试算结论 | - | - | - | - | 是 |
+| 审批怎么做 → 不真的批准 | - | - | - | - | 是 |
+| 草稿直接跑 → 给出可读理由 | - | - | - | - | 是 |

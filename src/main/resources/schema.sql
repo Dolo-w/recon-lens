@@ -167,6 +167,9 @@ CREATE INDEX IF NOT EXISTS idx_approval_confirmation_rule
 CREATE TABLE IF NOT EXISTS recon_agent_run (
   id             BIGINT AUTO_INCREMENT PRIMARY KEY,
   goal           TEXT         NOT NULL,
+  -- 结构化目标（AgentGoal 的 JSON）：恢复长任务时要靠它还原 intent/trigger/focusTypes，
+  -- 只有 goal 那一段文本是不够的 —— "只起草"和"真的跑一次对账"是两条不同的路
+  goal_json      TEXT         NULL,
   -- SCHEDULED / NL_QUESTION / API：决定"谁发起的"，也决定要不要走 LLM
   trigger_type   VARCHAR(16)  NOT NULL,
   status         VARCHAR(16)  NOT NULL,
@@ -200,6 +203,7 @@ CREATE TABLE IF NOT EXISTS recon_agent_step (
   truncated  BOOLEAN     NOT NULL DEFAULT FALSE,
   status     VARCHAR(16) NOT NULL,
   cost_ms    INT         NULL,
+  tokens_est INT         NULL,
   created_at TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_agent_step ON recon_agent_step (run_id, seq);
@@ -429,3 +433,26 @@ CREATE TABLE IF NOT EXISTS bill_right (
 
 CREATE INDEX IF NOT EXISTS idx_left_order ON bill_left (order_no);
 CREATE INDEX IF NOT EXISTS idx_right_order ON bill_right (order_no);
+-- 评测逐题记录：把 golden set 的每一条落成行，而不是只落一份 markdown。
+--
+-- 为什么需要它：一份 md 只能被人看，不能聚合、不能 diff、不能进 CI 判定。
+-- 行化之后，「同一套口径函数」既能聚合回放记录，也能在真上线后改成聚合行为表
+-- （字段刻意与 recon_agent_step 对齐：turns / cost_ms / tokens_est）。
+--
+-- 保留策略：评测记录是小数据（每次 30~300 行），不设 TTL；清理交给运维。
+CREATE TABLE IF NOT EXISTS recon_eval_case (
+  id              BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  batch           VARCHAR(64)  NOT NULL,
+  case_no         INT          NOT NULL,
+  question        TEXT         NOT NULL,
+  expected_intent VARCHAR(32)  NULL,
+  actual_intent   VARCHAR(32)  NULL,
+  expected_tool   VARCHAR(64)  NULL,
+  actual_tool     VARCHAR(255) NULL,
+  turns           INT          NOT NULL DEFAULT 1,
+  multi           BOOLEAN      NOT NULL DEFAULT FALSE,
+  cost_ms         INT          NULL,
+  tokens_est      INT          NULL,
+  passed          BOOLEAN      NOT NULL,
+  created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

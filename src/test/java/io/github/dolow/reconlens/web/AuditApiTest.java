@@ -92,14 +92,17 @@ class AuditApiTest {
     @Test
     void 单次运行的步骤能导出来() throws Exception {
         long runId = runs.startRun("步骤用例", "NL_QUESTION", "alice");
-        runs.recordStep(runId, 1, "ACT", "recon_run", "jobId=1", "跑了一次", "digest-1", false, "OK", 12);
+        runs.recordStep(runId, 1, "ACT", "recon_run", "jobId=1", "跑了一次", "digest-1", false, "OK", 12, 34);
         runs.finishRun(runId, AgentRunRepository.RunStatus.SUCCESS, null, 1L, null, null);
 
         mvc.perform(get("/api/audit/runs/" + runId).header("X-Operator", "alice"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.run.id").value((int) runId))
                 .andExpect(jsonPath("$.steps[0].action").value("recon_run"))
-                .andExpect(jsonPath("$.steps[0].digest").value("digest-1"));
+                .andExpect(jsonPath("$.steps[0].digest").value("digest-1"))
+                // M15：耗时与估算 token 都要能从接口拿到，不能只躺在表里
+                .andExpect(jsonPath("$.steps[0].costMs").value(12))
+                .andExpect(jsonPath("$.steps[0].tokensEst").value(34));
     }
 
     @Test

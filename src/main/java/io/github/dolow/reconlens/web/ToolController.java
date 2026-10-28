@@ -38,6 +38,10 @@ public class ToolController {
             one.put("name", spec.name());
             one.put("description", spec.description());
             one.put("inputSchema", spec.inputSchema());
+            one.put("write", spec.write());
+            if (spec.suggestion() != null) {
+                one.put("suggestion", spec.suggestion());
+            }
             items.add(one);
         }
         Map<String, Object> body = new LinkedHashMap<>();

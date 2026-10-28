@@ -6,6 +6,7 @@ import io.github.dolow.reconlens.recall.CaseHit;
 import io.github.dolow.reconlens.recall.DocChunk;
 import io.github.dolow.reconlens.recall.DocChunkService;
 import io.github.dolow.reconlens.recall.DocHit;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -37,9 +38,23 @@ public class RecallController {
     private final CaseMemoryService cases;
     private final DocChunkService docs;
 
-    public RecallController(CaseMemoryService cases, DocChunkService docs) {
+    /**
+     * 是否允许用 {@code ?mode=} 强制检索层。
+     *
+     * <p>{@code mode} 是评测开关，不是产品功能：它能让调用方绕过生产的自动降级链，
+     * 直接问"向量层现在返回什么"。默认关闭——一条能改行为的入参挂在公开读接口上，
+     * 就不是"调试开关"，是"后门"：它既能被用来探测未启用的向量层，
+     * 也能让同一次检索在两次调用里走不同的代码路径，事后谁对不上账。
+     *
+     * <p>要用就在评测 profile 里显式打开：{@code recon.recall.force-mode-enabled=true}。
+     */
+    private final boolean forceModeEnabled;
+
+    public RecallController(CaseMemoryService cases, DocChunkService docs,
+                            @Value("${recon.recall.force-mode-enabled:false}") boolean forceModeEnabled) {
         this.cases = cases;
         this.docs = docs;
+        this.forceModeEnabled = forceModeEnabled;
     }
 
     public record CaseRequest(String ruleCode, String diffType, String causeKey, String resolution,
@@ -142,6 +157,10 @@ public class RecallController {
      * <p>{@code mode} 是**评测用**开关：{@code vector|fulltext|keyword} 强制走某一层，
      * 不传就走生产的自动降级。没有它就没法回答"向量到底比全文好在哪"——
      * 自动降级下永远只能看到"最后命中哪层"，看不到"换个层会怎样"。
+     *
+     * <p>但它默认是关的（{@code recon.recall.force-mode-enabled=false}）：关着的时候传
+     * {@code mode} 直接 400，而不是"悄悄忽略"——悄悄忽略会让评测脚本以为自己测的是向量层，
+     * 实际测的是全文层，出来的对比数字全是错的。
      */
     @GetMapping("/docs/search")
     public Map<String, Object> searchDocs(@RequestParam String q,
@@ -165,7 +184,11 @@ public class RecallController {
         body.put("retriever", docs.describeSearch());
         body.put("mode", outcome.mode().name());
         body.put("degraded", outcome.degraded());
+        // 一条结果同时被关键词和全文给出过时，mode 只能报"排序赢家"；
+        // sources 才是"这批结果是被哪些通道找到的"——降级判断要的是后者。
+        body.put("sources", outcome.sources().stream().map(Enum::name).toList());
         body.put("reason", outcome.reason());
+        body.put("forced", force != null);
         body.put("total", items.size());
         body.put("items", items);
         return body;
@@ -203,17 +226,31 @@ public class RecallController {
         return item;
     }
 
-    /** 评测用的强制模式解析：认不出的值一律当"不强制"，退回生产路径。 */
-    private static io.github.dolow.reconlens.recall.DegradingDocSearch.Mode forceMode(String mode) {
+    /**
+     * 评测用的强制模式解析：空值当"不强制"；认不出的值报错；开关关着时任何合法 mode 都拒绝。
+     *
+     * <p>先认值、再看开关：参数拼错（mode=magic）和"想用评测开关"是两回事，
+     * 混在一起会对着一个拼写错误说"生产环境请去掉该参数"。
+     *
+     * <p>拒绝而不是忽略：评测脚本传了 mode 说明它要测那一层，静默退回生产路径会让
+     * "向量 vs 全文"的对比数字建立在错误的前提上——这比接口报错危险得多。
+     */
+    private io.github.dolow.reconlens.recall.DegradingDocSearch.Mode forceMode(String mode) {
         if (mode == null || mode.isBlank()) {
             return null;
         }
-        return switch (mode.trim().toLowerCase()) {
+        io.github.dolow.reconlens.recall.DegradingDocSearch.Mode parsed = switch (mode.trim().toLowerCase()) {
             case "vector" -> io.github.dolow.reconlens.recall.DegradingDocSearch.Mode.VECTOR;
             case "fulltext" -> io.github.dolow.reconlens.recall.DegradingDocSearch.Mode.FULLTEXT;
             case "keyword" -> io.github.dolow.reconlens.recall.DegradingDocSearch.Mode.KEYWORD;
-            default -> null;
+            default -> throw new IllegalArgumentException("未知检索层：" + mode + "（只认 vector|fulltext|keyword）");
         };
+        if (!forceModeEnabled) {
+            throw new IllegalArgumentException(
+                    "检索层强制开关未启用（recon.recall.force-mode-enabled=false）：mode 只用于评测，"
+                            + "生产环境请去掉该参数，走自动降级");
+        }
+        return parsed;
     }
 
     private static Map<String, Object> view(DocChunk c) {

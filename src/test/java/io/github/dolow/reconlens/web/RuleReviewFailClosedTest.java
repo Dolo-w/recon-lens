@@ -1,7 +1,10 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.rule.RuleTrialRunner;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -17,10 +20,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class RuleReviewFailClosedTest {
 
+    /** 试算实现随 agent 装配；这里只关心"没密钥就拒绝"，不需要它存在。 */
+    private static ObjectProvider<RuleTrialRunner> noRunner() {
+        return new StaticListableBeanFactory().getBeanProvider(RuleTrialRunner.class);
+    }
+
     @Test
     void 没配密钥时审批接口关闭() {
         ReconProperties properties = new ReconProperties();
-        RuleReviewController controller = new RuleReviewController(null, properties);
+        RuleReviewController controller = new RuleReviewController(null, properties, noRunner());
 
         assertThat(properties.getReview().getApiKey()).isEmpty();
         assertThatThrownBy(() -> controller.review("ANY_RULE", 1, "whatever"))
@@ -32,7 +40,7 @@ class RuleReviewFailClosedTest {
     void 配了密钥也要比对一致() {
         ReconProperties properties = new ReconProperties();
         properties.getReview().setApiKey("s3cret");
-        RuleReviewController controller = new RuleReviewController(null, properties);
+        RuleReviewController controller = new RuleReviewController(null, properties, noRunner());
 
         assertThatThrownBy(() -> controller.review("ANY_RULE", 1, "wrong"))
                 .isInstanceOf(RuleReviewController.ReviewForbiddenException.class)
@@ -43,7 +51,7 @@ class RuleReviewFailClosedTest {
     void 被拒时给出可照做的下一步_而不是只报一个错误码() {
         ReconProperties properties = new ReconProperties();
         properties.getReview().setApiKey("s3cret");
-        RuleReviewController controller = new RuleReviewController(null, properties);
+        RuleReviewController controller = new RuleReviewController(null, properties, noRunner());
 
         RuleReviewController.ReviewForbiddenException e = org.assertj.core.api.Assertions.catchThrowableOfType(
                 () -> controller.review("ANY_RULE", 1, "wrong"),

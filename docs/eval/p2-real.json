@@ -1,0 +1,433 @@
+{
+  "label": "p2-real",
+  "at": "2026-10-26T17:27:14.381Z",
+  "base": "http://127.0.0.1:18089",
+  "slo": [
+    {
+      "key": "intentRate",
+      "name": "意图命中率",
+      "target": ">=90%",
+      "ok": true,
+      "got": "100.0%"
+    },
+    {
+      "key": "toolRate",
+      "name": "工具选择率",
+      "target": ">=85%",
+      "ok": true,
+      "got": "100.0%"
+    },
+    {
+      "key": "avgTurns",
+      "name": "平均轮数",
+      "target": "<=3",
+      "ok": true,
+      "got": "2.13"
+    },
+    {
+      "key": "tokMedian",
+      "name": "每会话 token 中位数",
+      "target": "<=6000",
+      "ok": true,
+      "got": "141"
+    }
+  ],
+  "passed": "4/4",
+  "totals": {
+    "single": 30,
+    "multi": 8,
+    "toolDenom": 25
+  },
+  "rows": [
+    {
+      "q": "规则库里有哪几条规则？",
+      "wantIntent": "LIST_RULES",
+      "gotIntent": "LIST_RULES",
+      "okIntent": true,
+      "wantTool": "recon_list_rules",
+      "gotTools": [
+        "recon_list_rules"
+      ],
+      "okTool": true,
+      "chars": 216
+    },
+    {
+      "q": "现在有哪些对账规则",
+      "wantIntent": "LIST_RULES",
+      "gotIntent": "LIST_RULES",
+      "okIntent": true,
+      "wantTool": "recon_list_rules",
+      "gotTools": [
+        "recon_list_rules"
+      ],
+      "okTool": true,
+      "chars": 216
+    },
+    {
+      "q": "列一下生效中的规则",
+      "wantIntent": "LIST_RULES",
+      "gotIntent": "LIST_RULES",
+      "okIntent": true,
+      "wantTool": "recon_list_rules",
+      "gotTools": [
+        "recon_list_rules"
+      ],
+      "okTool": true,
+      "chars": 216
+    },
+    {
+      "q": "跑一下 BILL_VS_SETTLE",
+      "wantIntent": "RUN",
+      "gotIntent": "RUN",
+      "okIntent": true,
+      "wantTool": "recon_run",
+      "gotTools": [
+        "recon_run"
+      ],
+      "okTool": true,
+      "chars": 272
+    },
+    {
+      "q": "用 BILL_VS_SETTLE 帮我做一次对账",
+      "wantIntent": "RUN",
+      "gotIntent": "RUN",
+      "okIntent": true,
+      "wantTool": "recon_run",
+      "gotTools": [
+        "recon_run"
+      ],
+      "okTool": true,
+      "chars": 272
+    },
+    {
+      "q": "按 BILL_VS_SETTLE 对一次账",
+      "wantIntent": "RUN",
+      "gotIntent": "RUN",
+      "okIntent": true,
+      "wantTool": "recon_run",
+      "gotTools": [
+        "recon_run"
+      ],
+      "okTool": true,
+      "chars": 272
+    },
+    {
+      "q": "CUSTOMER_STATUS_RECON 跑一次",
+      "wantIntent": "RUN",
+      "gotIntent": "RUN",
+      "okIntent": true,
+      "wantTool": "recon_run",
+      "gotTools": [
+        "recon_run"
+      ],
+      "okTool": true,
+      "chars": 259
+    },
+    {
+      "q": "看下差异",
+      "wantIntent": "LIST_DIFFS",
+      "gotIntent": "LIST_DIFFS",
+      "okIntent": true,
+      "wantTool": "recon_list_diffs",
+      "gotTools": [
+        "recon_list_diffs"
+      ],
+      "okTool": true,
+      "chars": 622
+    },
+    {
+      "q": "有哪些对不上的",
+      "wantIntent": "LIST_DIFFS",
+      "gotIntent": "LIST_DIFFS",
+      "okIntent": true,
+      "wantTool": "recon_list_diffs",
+      "gotTools": [
+        "recon_list_diffs"
+      ],
+      "okTool": true,
+      "chars": 427
+    },
+    {
+      "q": "左边缺了哪些记录",
+      "wantIntent": "LIST_DIFFS",
+      "gotIntent": "LIST_DIFFS",
+      "okIntent": true,
+      "wantTool": "recon_list_diffs",
+      "gotTools": [
+        "recon_list_diffs"
+      ],
+      "okTool": true,
+      "chars": 204
+    },
+    {
+      "q": "差异明细给我",
+      "wantIntent": "LIST_DIFFS",
+      "gotIntent": "LIST_DIFFS",
+      "okIntent": true,
+      "wantTool": "recon_list_diffs",
+      "gotTools": [
+        "recon_list_diffs"
+      ],
+      "okTool": true,
+      "chars": 427
+    },
+    {
+      "q": "这次对账跑完了吗",
+      "wantIntent": "JOB_SUMMARY",
+      "gotIntent": "JOB_SUMMARY",
+      "okIntent": true,
+      "wantTool": "recon_job_summary",
+      "gotTools": [
+        "recon_job_summary"
+      ],
+      "okTool": true,
+      "chars": 276
+    },
+    {
+      "q": "任务进度怎么样",
+      "wantIntent": "JOB_SUMMARY",
+      "gotIntent": "JOB_SUMMARY",
+      "okIntent": true,
+      "wantTool": "recon_job_summary",
+      "gotTools": [
+        "recon_job_summary"
+      ],
+      "okTool": true,
+      "chars": 276
+    },
+    {
+      "q": "这单扫了多少行",
+      "wantIntent": "JOB_SUMMARY",
+      "gotIntent": "JOB_SUMMARY",
+      "okIntent": true,
+      "wantTool": "recon_job_summary",
+      "gotTools": [
+        "recon_job_summary"
+      ],
+      "okTool": true,
+      "chars": 276
+    },
+    {
+      "q": "为什么差这么多",
+      "wantIntent": "EXPLAIN_JOB",
+      "gotIntent": "EXPLAIN_JOB",
+      "okIntent": true,
+      "wantTool": "recon_explain_job",
+      "gotTools": [
+        "recon_explain_job"
+      ],
+      "okTool": true,
+      "chars": 656
+    },
+    {
+      "q": "整单给我归因一下",
+      "wantIntent": "EXPLAIN_JOB",
+      "gotIntent": "EXPLAIN_JOB",
+      "okIntent": true,
+      "wantTool": "recon_explain_job",
+      "gotTools": [
+        "recon_explain_job"
+      ],
+      "okTool": true,
+      "chars": 656
+    },
+    {
+      "q": "这批差异都是什么原因",
+      "wantIntent": "EXPLAIN_JOB",
+      "gotIntent": "EXPLAIN_JOB",
+      "okIntent": true,
+      "wantTool": "recon_explain_job",
+      "gotTools": [
+        "recon_explain_job"
+      ],
+      "okTool": true,
+      "chars": 656
+    },
+    {
+      "q": "第 1 条差异怎么解释",
+      "wantIntent": "EXPLAIN_DIFF",
+      "gotIntent": "EXPLAIN_DIFF",
+      "okIntent": true,
+      "wantTool": "recon_explain_diff",
+      "gotTools": [
+        "recon_explain_diff"
+      ],
+      "okTool": true,
+      "chars": 161
+    },
+    {
+      "q": "差异 3 是什么原因",
+      "wantIntent": "EXPLAIN_DIFF",
+      "gotIntent": "EXPLAIN_DIFF",
+      "okIntent": true,
+      "wantTool": "recon_explain_diff",
+      "gotTools": [
+        "recon_explain_diff"
+      ],
+      "okTool": true,
+      "chars": 176
+    },
+    {
+      "q": "第一条差异帮我看看",
+      "wantIntent": "EXPLAIN_DIFF",
+      "gotIntent": "EXPLAIN_DIFF",
+      "okIntent": true,
+      "wantTool": "recon_explain_diff",
+      "gotTools": [
+        "recon_explain_diff"
+      ],
+      "okTool": true,
+      "chars": 161
+    },
+    {
+      "q": "重跑失败分片",
+      "wantIntent": "RETRY",
+      "gotIntent": "RETRY",
+      "okIntent": true,
+      "wantTool": "recon_retry",
+      "gotTools": [
+        "recon_retry"
+      ],
+      "okTool": true,
+      "chars": 30
+    },
+    {
+      "q": "重试一下",
+      "wantIntent": "RETRY",
+      "gotIntent": "RETRY",
+      "okIntent": true,
+      "wantTool": "recon_retry",
+      "gotTools": [
+        "recon_retry"
+      ],
+      "okTool": true,
+      "chars": 30
+    },
+    {
+      "q": "把失败的分片重新跑一遍",
+      "wantIntent": "RETRY",
+      "gotIntent": "RETRY",
+      "okIntent": true,
+      "wantTool": "recon_retry",
+      "gotTools": [
+        "recon_retry"
+      ],
+      "okTool": true,
+      "chars": 30
+    },
+    {
+      "q": "给 BILL_VS_SETTLE 建预处理模型",
+      "wantIntent": "BUILD_MODEL",
+      "gotIntent": "BUILD_MODEL",
+      "okIntent": true,
+      "wantTool": "recon_build_model",
+      "gotTools": [
+        "recon_build_model"
+      ],
+      "okTool": true,
+      "chars": 304
+    },
+    {
+      "q": "物化这张账单表",
+      "wantIntent": "BUILD_MODEL",
+      "gotIntent": "BUILD_MODEL",
+      "okIntent": true,
+      "wantTool": "recon_build_model",
+      "gotTools": [
+        "recon_build_model"
+      ],
+      "okTool": true,
+      "chars": 42
+    },
+    {
+      "q": "BILL_VS_SETTLE 的试算结论是什么",
+      "wantIntent": "TRIAL_STATUS",
+      "gotIntent": "TRIAL_STATUS",
+      "okIntent": true,
+      "wantTool": null,
+      "gotTools": [],
+      "okTool": null,
+      "chars": 100
+    },
+    {
+      "q": "规则能不能批",
+      "wantIntent": "APPROVE",
+      "gotIntent": "APPROVE",
+      "okIntent": true,
+      "wantTool": null,
+      "gotTools": [],
+      "okTool": null,
+      "chars": 254
+    },
+    {
+      "q": "审批要怎么走",
+      "wantIntent": "APPROVE",
+      "gotIntent": "APPROVE",
+      "okIntent": true,
+      "wantTool": null,
+      "gotTools": [],
+      "okTool": null,
+      "chars": 254
+    },
+    {
+      "q": "你能做什么",
+      "wantIntent": "HELP",
+      "gotIntent": "HELP",
+      "okIntent": true,
+      "wantTool": null,
+      "gotTools": [],
+      "okTool": null,
+      "chars": 514
+    },
+    {
+      "q": "帮助",
+      "wantIntent": "HELP",
+      "gotIntent": "HELP",
+      "okIntent": true,
+      "wantTool": null,
+      "gotTools": [],
+      "okTool": null,
+      "chars": 514
+    },
+    {
+      "q": "跑一次 → 看差异 → 整单归因（槽位接力）",
+      "turns": 3,
+      "ok": true
+    },
+    {
+      "q": "跑一次 → 单条归因",
+      "turns": 2,
+      "ok": true
+    },
+    {
+      "q": "跑一次 → 重跑失败分片",
+      "turns": 2,
+      "ok": true
+    },
+    {
+      "q": "列规则 → 跑其中一条",
+      "turns": 2,
+      "ok": true
+    },
+    {
+      "q": "任务总览 → 看差异",
+      "turns": 3,
+      "ok": true
+    },
+    {
+      "q": "起草规则（贴 YAML）→ 试算结论",
+      "turns": 2,
+      "ok": true
+    },
+    {
+      "q": "审批怎么做 → 不真的批准",
+      "turns": 1,
+      "ok": true
+    },
+    {
+      "q": "草稿直接跑 → 给出可读理由",
+      "turns": 2,
+      "ok": true
+    }
+  ]
+}

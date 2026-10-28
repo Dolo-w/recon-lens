@@ -100,12 +100,12 @@ public class AuditController {
                 .orElseThrow(() -> new IllegalArgumentException("没有这次运行：" + id));
         List<AgentRunRepository.AgentStep> steps = runs.listSteps(id);
         if (CSV.equalsIgnoreCase(format)) {
-            List<String> head = List.of("seq", "phase", "action", "status", "costMs", "truncated",
+            List<String> head = List.of("seq", "phase", "action", "status", "costMs", "tokensEst", "truncated",
                     "digest", "input", "payload");
             List<List<String>> body = new ArrayList<>();
             for (AgentRunRepository.AgentStep s : steps) {
                 body.add(List.of(String.valueOf(s.seq()), str(s.phase()), str(s.action()), str(s.status()),
-                        str(s.costMs()), String.valueOf(s.truncated()), str(s.digest()),
+                        str(s.costMs()), str(s.tokensEst()), String.valueOf(s.truncated()), str(s.digest()),
                         str(s.inputJson()), str(s.payload())));
             }
             return csv(head, body);
@@ -120,6 +120,7 @@ public class AuditController {
             m.put("action", s.action());
             m.put("status", s.status());
             m.put("costMs", s.costMs());
+            m.put("tokensEst", s.tokensEst());
             m.put("truncated", s.truncated());
             m.put("digest", s.digest());
             m.put("input", s.inputJson());
