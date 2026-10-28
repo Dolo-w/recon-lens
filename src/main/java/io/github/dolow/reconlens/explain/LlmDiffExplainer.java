@@ -46,6 +46,9 @@ public class LlmDiffExplainer implements DiffExplainer {
     private final LlmChatClient client;
     private final RuleBasedExplainer fallback;
     private final int batchLimit;
+    /** 归因这条路的熔断账本：模型挂了的时候，解释差异不该每次都等满超时。 */
+    private final io.github.dolow.reconlens.llm.LlmCircuitBreaker breaker =
+            new io.github.dolow.reconlens.llm.LlmCircuitBreaker("差异归因");
 
     public LlmDiffExplainer(LlmChatClient client, RuleBasedExplainer fallback, ReconProperties properties) {
         this.client = client;
@@ -77,10 +80,19 @@ public class LlmDiffExplainer implements DiffExplainer {
         if (!available() || diffs.isEmpty()) {
             return Map.of();
         }
+        if (!breaker.allow()) {
+            // 熔断期间直接返回空：调用方（ExplainService）会落回规则模板，不留空
+            return Map.of();
+        }
         List<DiffRecord> batch = diffs.size() > batchLimit
                 ? new ArrayList<>(diffs.subList(0, batchLimit))
                 : new ArrayList<>(diffs);
         Optional<String> content = client.complete(SYSTEM_PROMPT, buildUserPrompt(rule, batch));
+        if (content.isEmpty()) {
+            breaker.onFailure();
+            return Map.of();
+        }
+        breaker.onSuccess();
         return content.map(this::parse).orElseGet(Map::of);
     }
 
@@ -105,7 +117,7 @@ public class LlmDiffExplainer implements DiffExplainer {
             }
             facts.append('\n');
         }
-        return PromptGuard.dataBlock("diff-list", facts.toString())
+        return PromptGuard.dataBlockTokens("diff-list", facts.toString(), 1200)
                 + "\n请按 `差异ID|一句话说明` 的格式逐行输出，共 " + diffs.size() + " 行。";
     }
 

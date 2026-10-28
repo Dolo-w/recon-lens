@@ -58,7 +58,10 @@ class ChatClaimsTest {
         String block = claims.render(1L);
         assertThat(block).startsWith("〔当前有效〕");
         assertThat(block).contains("ORDER_STATUS_RECON 起草参数");
-        assertThat(block).contains("维度 status").contains("（第 41 轮）");
+        assertThat(block).contains("维度 status").contains("第 41 轮，草稿");
+        // 形状：块内才是事实，块外只有一行标题。用户在自己那句里敲同样的标题，
+        // 也因为写不出 <<<SYS-nonce>>> 而冒充不了这一段。
+        assertThat(block).contains("<<<SYS-").contains("<<<END-SYS-");
         // 覆盖语义：旧值不能和新值同时出现在提示词里
         assertThat(block).doesNotContain("维度 order_no");
     }
@@ -71,7 +74,8 @@ class ChatClaimsTest {
         claims.record(1L, "draft:D", "d", 4);
 
         String block = claims.render(1L);
-        assertThat(block.split("\n")).hasSize(4);   // 标题 + 3 行
+        // 标题 + SYS 开标记 + 3 行 + SYS 闭标记
+        assertThat(block.split("\n")).hasSize(6);
         assertThat(block).contains("D 起草参数").contains("C 起草参数").contains("B 起草参数");
         assertThat(block).doesNotContain("A 起草参数");
     }
@@ -79,7 +83,7 @@ class ChatClaimsTest {
     @Test
     void 非草稿主题原样显示主题名() {
         claims.record(1L, "口径.账单", "按订单号逐笔比金额", 7);
-        assertThat(claims.render(1L)).contains("口径.账单：按订单号逐笔比金额（第 7 轮）");
+        assertThat(claims.render(1L)).contains("口径.账单：按订单号逐笔比金额（第 7 轮，草稿）");
     }
 
     @Test

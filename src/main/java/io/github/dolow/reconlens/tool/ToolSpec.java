@@ -24,4 +24,19 @@ public record ToolSpec(String name,
     public ToolOutcome invoke(Map<String, Object> args) {
         return handler.call(args == null ? Map.of() : args);
     }
+
+    /**
+     * 会不会改状态。会话层用它决定"直接执行"还是"先回执再执行"，控制台用它标红按钮。
+     *
+     * <p>从 {@link ToolNames#WRITES} 查而不是存在 record 里：清单只有一份，
+     * 加工具时不会出现"spec 说只读、枚举说写"这种两处打架。
+     */
+    public boolean write() {
+        return ToolNames.WRITES.contains(name);
+    }
+
+    /** 跑完之后建议的下一步（可能为空）。结构化返回，不拼进结果正文。 */
+    public String suggestion() {
+        return ToolNames.SUGGESTIONS.get(name);
+    }
 }

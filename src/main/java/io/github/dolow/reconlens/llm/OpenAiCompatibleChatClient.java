@@ -39,6 +39,12 @@ public class OpenAiCompatibleChatClient implements LlmChatClient {
     private final ReconProperties properties;
     private final ObjectMapper mapper = new ObjectMapper();
 
+    /**
+     * 最近一次请求的真实 token 用量。用 ThreadLocal 而不是字段：client 是单例 Bean，
+     * 会话线程可能并发；{@code complete → lastTokens} 必须落在同一个线程里才有意义。
+     */
+    private static final ThreadLocal<Integer> LAST_TOKENS = ThreadLocal.withInitial(() -> 0);
+
     private volatile RestClient client;
 
     public OpenAiCompatibleChatClient(ReconProperties properties) {
@@ -75,6 +81,7 @@ public class OpenAiCompatibleChatClient implements LlmChatClient {
                     .body(String.class);
 
             JsonNode root = mapper.readTree(response == null ? "{}" : response);
+            LAST_TOKENS.set(usageOf(root));
             String content = root.path("choices").path(0).path("message").path("content").asText("");
             return content == null || content.isBlank() ? Optional.empty() : Optional.of(content);
         } catch (Exception e) {
@@ -83,6 +90,24 @@ public class OpenAiCompatibleChatClient implements LlmChatClient {
             log.warn("调用大模型失败（本次按不可用处理，由调用方决定降级方式）: {}", e.toString());
             return Optional.empty();
         }
+    }
+
+    @Override
+    public int lastTokens() {
+        return LAST_TOKENS.get();
+    }
+
+    /**
+     * 从响应里取真实用量：{@code usage.total_tokens} 优先；只有分项时相加；都没有返回 0。
+     * 返回 0 不代表"没花钱"，只代表这次拿不到，调用方会退回字符数估算。
+     */
+    static int usageOf(JsonNode root) {
+        JsonNode usage = root.path("usage");
+        int total = usage.path("total_tokens").asInt(0);
+        if (total > 0) {
+            return total;
+        }
+        return usage.path("prompt_tokens").asInt(0) + usage.path("completion_tokens").asInt(0);
     }
 
     private RestClient client() {

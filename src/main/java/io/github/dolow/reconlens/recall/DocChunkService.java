@@ -88,7 +88,8 @@ public class DocChunkService {
             return chain.searchWithModes(query, source, limit);
         }
         return new DegradingDocSearch.Outcome(search.search(query, source, limit),
-                DegradingDocSearch.Mode.KEYWORD, true, "装配的是单层检索（没有降级链）");
+                DegradingDocSearch.Mode.KEYWORD, true, "装配的是单层检索（没有降级链）",
+                java.util.Set.of(DegradingDocSearch.Mode.KEYWORD));
     }
 
     /** 评测用：强制某一层。生产调用不要用（会把 N4 的降级链绕开）。 */
@@ -98,7 +99,8 @@ public class DocChunkService {
             return chain.searchForced(query, source, limit, force);
         }
         return new DegradingDocSearch.Outcome(search.search(query, source, limit),
-                DegradingDocSearch.Mode.KEYWORD, true, "装配的是单层检索（没有降级链）");
+                DegradingDocSearch.Mode.KEYWORD, true, "装配的是单层检索（没有降级链）",
+                java.util.Set.of(DegradingDocSearch.Mode.KEYWORD));
     }
 
     /** 没配模型时返回 0，一行都不查。 */

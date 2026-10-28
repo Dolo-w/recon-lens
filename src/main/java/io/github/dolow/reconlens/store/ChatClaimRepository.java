@@ -47,8 +47,13 @@ public class ChatClaimRepository {
         this.jdbc = jdbc;
     }
 
-    /** 一条结论：主题、内容、第几轮说的、谁说的。 */
-    public record ChatClaim(String key, String value, int seq, String source, Instant updatedAt) {
+    /**
+     * 一条结论：主题、内容、第几轮说的、谁说的、以及<b>权威等级</b>。
+     *
+     * <p>authority 原来只存在于跨会话视图（{@code SharedClaim}），会话内视图拿不到，
+     * 于是提示词里"已审批的口径"和"用户随口一句"看起来一样硬。
+     */
+    public record ChatClaim(String key, String value, int seq, String source, String authority, Instant updatedAt) {
     }
 
     /** 跨会话读到的一条：带来源会话与权威等级。 */
@@ -61,6 +66,7 @@ public class ChatClaimRepository {
             rs.getString("claim_value"),
             rs.getInt("claim_seq"),
             rs.getString("source"),
+            rs.getString("authority"),
             rs.getTimestamp("updated_at") == null ? null : rs.getTimestamp("updated_at").toInstant());
 
     private static final RowMapper<SharedClaim> SHARED_MAPPER = (rs, rowNum) -> new SharedClaim(
@@ -152,7 +158,7 @@ public class ChatClaimRepository {
 
     /** 最近更新的几条结论（新的在前），会话内视图用。 */
     public List<ChatClaim> recent(long sessionId, int limit) {
-        return jdbc.query("SELECT claim_key, claim_value, claim_seq, source, updated_at FROM recon_chat_claim "
+        return jdbc.query("SELECT claim_key, claim_value, claim_seq, source, authority, updated_at FROM recon_chat_claim "
                 + "WHERE session_id = ? ORDER BY updated_at DESC, id DESC LIMIT ?",
                 MAPPER, sessionId, Math.max(1, limit));
     }

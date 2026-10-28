@@ -60,8 +60,12 @@ public record ContextFacts(String text, Set<String> ruleCodes, Set<Long> jobIds,
     /**
      * 从规则目录与任务表拼出这张卡片。
      *
-     * <p>任何一步失败都退化成 {@link #EMPTY}：事实是"锦上添花"，取不到就不校验、不注入，
+     * <p>任何一步失败都退化成 {@link #EMPTY}：事实是"锦上添花"，取不到就不注入，
      * 会话按原来的词表/槽位逻辑继续跑。
+     *
+     * <p>但退化不等于放行：{@link #EMPTY} 里 knowsRules/knowsJobs/knowsTables 全为 false，
+     * 拿它去核实，任何带规则编码、任务号、表名的动作都会判成"没核实"（见
+     * LlmPlanner#evidenceOf 的兜底分支），运行时据此先问一句，而不是拿着用户的话去执行。
      */
     public static ContextFacts build(RuleCatalog catalog, ReconRepository repository) {
         try {

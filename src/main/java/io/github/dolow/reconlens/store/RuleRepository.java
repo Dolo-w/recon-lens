@@ -52,6 +52,18 @@ public class RuleRepository {
         return (max == null ? 0 : max) + 1;
     }
 
+    /**
+     * 规则表总行数。规则表只追加、不删行，所以行数变化就等价于"有新版本或新规则"。
+     *
+     * <p>用来给系统事实（{@code ContextFacts}）做<b>廉价的失效键</b>：比拿
+     * {@code MAX(version)} 可靠——后者在"已有一条 v3 的规则、又改了另一条 v1"时不变，
+     * 缓存就会拿着旧目录过 30 秒。
+     */
+    public int ruleCounter() {
+        Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM recon_rule", Integer.class);
+        return n == null ? 0 : n;
+    }
+
     /** 人工 / seed 直通生效版本的既有路径（保持引入 Agent 之前的行为）。 */
     public long insert(String code, int version, String specJson, String createdBy) {
         return insert(code, version, specJson, createdBy, RuleLifecycle.ACTIVE, RuleOrigin.HUMAN,

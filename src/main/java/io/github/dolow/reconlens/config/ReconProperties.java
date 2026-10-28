@@ -86,12 +86,29 @@ public class ReconProperties {
 
         private String apiKey = "";
 
+        /**
+         * 是否强制要求 {@link #apiKey}。{@code null}（默认）表示跟随环境：生产 profile
+         * （名字里带 {@code prod}）下强制，其它 profile 下不强制。
+         *
+         * <p>配 {@code true} 可以让联调档提前上锁；配 {@code false} 是生产档的显式逃生门
+         * （会打 WARN）。判定在 {@code StartupSafety} 里，配错直接启动失败。
+         */
+        private Boolean requireApiKey;
+
         public String getApiKey() {
             return apiKey;
         }
 
         public void setApiKey(String apiKey) {
             this.apiKey = apiKey;
+        }
+
+        public Boolean getRequireApiKey() {
+            return requireApiKey;
+        }
+
+        public void setRequireApiKey(Boolean requireApiKey) {
+            this.requireApiKey = requireApiKey;
         }
 
         public boolean enforced() {
@@ -107,6 +124,8 @@ public class ReconProperties {
      *
      * <p>{@code recon.model.require-approval=false} 保留旧行为（直接 ACTIVE），只应在
      * 没启用 Agent 模块（没有试算能力）的部署里用 —— 那等于明确接受"机器生成的规则免审生效"。
+     * <b>生产 profile 下这个开关被 {@code StartupSafety} 直接拒绝</b>：审批这道关在生产环境里
+     * 不能是一个可配置项。
      */
     public static class Model {
 

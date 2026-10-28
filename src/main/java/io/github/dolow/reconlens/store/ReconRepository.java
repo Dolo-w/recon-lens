@@ -182,6 +182,17 @@ public class ReconRepository implements DiffWriter {
     }
 
     /**
+     * 任务表总行数（含试算）。给系统事实（{@code ContextFacts}）做廉价失效键用：
+     * 每跑一次对账都会多一行，行数变化就说明"最近任务"这张卡片已经旧了。
+     *
+     * <p>为什么不用 {@code latestProdJobId()}：它会漏掉试算任务，而卡片里最近任务是混着列的。
+     */
+    public int jobCounter() {
+        Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM recon_job", Integer.class);
+        return n == null ? 0 : n;
+    }
+
+    /**
      * 巡检用：最近若干次<b>生产</b>任务，跨规则、按 id 倒序。
      *
      * <p>为什么不按规则分别查：规则数量是个位数而任务数量是三位数，一次查询 + 本地分组，

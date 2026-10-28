@@ -329,8 +329,13 @@ public final class ChatIntentRouter {
         return create && object;
     }
 
-    /** 判断这句话是不是"贴了一份规则"。返回正文，不是则 {@code null}。 */
-    private static String ruleBody(String text) {
+    /**
+     * 判断这句话是不是"贴了一份规则"。返回正文，不是则 {@code null}。
+     *
+     * <p>包内可见：模型路由的路径也要用它——模型只判"这是起草规则"，正文永远回到这里取，
+     * 不让模型复述一遍 YAML（复述就会抄错，而且它本来也看不到完整校验上下文）。
+     */
+    static String ruleBody(String text) {
         Matcher fence = FENCE.matcher(text);
         if (fence.find()) {
             String inner = fence.group(1).trim();
@@ -341,8 +346,38 @@ public final class ChatIntentRouter {
         boolean looksYaml = text.contains("left:") && text.contains("right:");
         boolean looksJson = text.startsWith("{") && text.contains("\"") && text.contains(":");
         if (looksYaml || looksJson) {
+            // 正文前面常有一句人话（"贴一份 YAML 规则"）。只剥行内前缀不够：剩下的首行是中文散文，
+            // 交给 YAML 解析器就是 "mapping values are not allowed here"。按行找真正的起点。
+            String fromFirstBlock = fromFirstRuleLine(text);
+            if (fromFirstBlock != null) {
+                return fromFirstBlock;
+            }
             String stripped = text.replaceFirst("^(帮我)?(贴|加|定义|新增|提交|存)(一下)?(一条|一份|个)?(规则)?[：:，,\\s]*", "");
             return stripped.isBlank() ? text : stripped;
+        }
+        return null;
+    }
+
+    /**
+     * 从第一行"像规则正文"的位置切起：{@code code:}、{@code ---}、{@code left:} 开头或 JSON 的 {@code {}。
+     * 找不到就返回 {@code null}，让调用方退回按行内前缀剥。
+     */
+    private static String fromFirstRuleLine(String text) {
+        String[] lines = text.split("\\R", -1);
+        for (int i = 0; i < lines.length; i++) {
+            String trimmed = lines[i].strip();
+            if (trimmed.startsWith("code:") || trimmed.startsWith("---") || trimmed.startsWith("left:")
+                    || trimmed.startsWith("{")) {
+                StringBuilder sb = new StringBuilder();
+                for (int j = i; j < lines.length; j++) {
+                    if (j > i) {
+                        sb.append('\n');
+                    }
+                    sb.append(lines[j]);
+                }
+                String body = sb.toString().strip();
+                return body.isEmpty() ? null : body;
+            }
         }
         return null;
     }

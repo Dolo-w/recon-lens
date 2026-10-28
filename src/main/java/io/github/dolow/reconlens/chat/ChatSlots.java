@@ -80,6 +80,34 @@ public record ChatSlots(String ruleCode, Long jobId, Long diffId, String lastInt
         return new ChatSlots(ruleCode, jobId, diffId, lastIntent, focusTypes, table, null, Map.of());
     }
 
+    /**
+     * 并发写冲突后的合并：<b>以最新落库的那份为底，本轮写过的字段覆盖上去</b>。
+     *
+     * <p>为什么不能"重试时直接盖掉最新那份"：两个人同时说话时，A 刚把焦点切到任务 7，
+     * B 的这一轮还拿着旧 rev 和旧 jobId；直接覆盖等于把 A 的焦点抹掉——用户看到的是
+     * "我刚说的它忘了"，而库里没有任何痕迹。
+     *
+     * <p>为什么必须由调用方先读最新再合并、而不是在这里查库：槽位是纯值对象，
+     * 它不该知道会话表长什么样（ChatRuntime 知道）。
+     *
+     * <p>{@code pending} 以<b>本轮</b>为准：半句话是"刚刚问出去的"，旧的那份已经过期，
+     * 合并进来只会让用户下一句被填进上一个动作。
+     */
+    public ChatSlots mergeWith(ChatSlots newer) {
+        if (newer == null) {
+            return this;
+        }
+        return new ChatSlots(
+                ruleCode != null ? ruleCode : newer.ruleCode,
+                jobId != null ? jobId : newer.jobId,
+                diffId != null ? diffId : newer.diffId,
+                lastIntent != null ? lastIntent : newer.lastIntent,
+                focusTypes.isEmpty() ? newer.focusTypes : focusTypes,
+                table != null ? table : newer.table,
+                hasPending() ? pendingAction : newer.pendingAction,
+                hasPending() ? pendingArgs : newer.pendingArgs);
+    }
+
     /** 有 jobId 才能答"差异 / 归因"；没有就该反问，而不是默认最近一条。 */
     public boolean hasJob() {
         return jobId != null;

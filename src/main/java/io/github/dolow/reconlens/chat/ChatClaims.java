@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.llm.PromptGuard;
 import io.github.dolow.reconlens.store.ChatClaimRepository;
 
 import java.util.ArrayList;
@@ -28,8 +29,12 @@ public class ChatClaims {
      *
      * <p>它是上下文文本里的一个约定：规划器裁剪长摘要时必须认出这一段并原样留下——
      * 结论板被截断，就等于"用户刚改的口"没告诉模型。
+     *
+     * <p>它<b>留在 SYS 块外面</b>：块外这一行是给人看的段落标题，也是 {@code fitContext}
+     * 的切分基准；块内才是模型该当事实读的内容。以前整段只有这一行标题、没有边界，
+     * 用户在自己的话里敲一句同样的标题就能冒充它——现在形状不同了，冒充不了。
      */
-    public static final String HEADER = "〔当前有效〕后说的覆盖先说的";
+    public static final String HEADER = "〔当前有效〕后说的覆盖先说的；同一件事以〔已审批〕为准，〔草稿〕只是草案";
 
     /** 跨会话结论块的起始标记。同样不能被裁掉。 */
     public static final String SHARED_HEADER = "〔历史结论·同一操作人，当前会话优先〕";
@@ -107,18 +112,23 @@ public class ChatClaims {
      *
      * <p>渲染在摘要之后、同一段文本里：模型看到的顺序是「压缩过的历史 → 此刻还算数的结论」，
      * 后者更近、更硬，冲突时自然压过前者。
+     *
+     * <p>每条都带权威等级（已审批 / 已确认 / 草稿）：以前只写"第 N 轮"，于是"用户随口确认的
+     * 口径"和"人工审批过的口径"在提示词里长得一样，模型没法优先信后者；而跨会话那份
+     * （{@link #renderShared}）一直是带等级的，两份视图不对称。
      */
     public String render(long sessionId) {
         List<ChatClaimRepository.ChatClaim> claims = items(sessionId);
         if (claims.isEmpty()) {
             return "";
         }
-        StringBuilder sb = new StringBuilder(HEADER).append('\n');
+        StringBuilder body = new StringBuilder();
         for (ChatClaimRepository.ChatClaim claim : claims) {
-            sb.append("· ").append(label(claim.key())).append("：").append(clip(claim.value()))
-                    .append("（第 ").append(claim.seq()).append(" 轮）\n");
+            body.append("· ").append(label(claim.key())).append("：").append(clip(claim.value()))
+                    .append("（第 ").append(claim.seq()).append(" 轮，")
+                    .append(authorityLabel(claim.authority())).append("）\n");
         }
-        return sb.toString().stripTrailing();
+        return HEADER + "\n" + PromptGuard.systemBlock("claims", body.toString().stripTrailing());
     }
 
     /**

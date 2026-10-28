@@ -6,9 +6,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 检索降级链：<b>向量 → 全文 → 关键词</b>（ADR-0001 N4）。
@@ -31,15 +33,28 @@ public class DegradingDocSearch implements DocSearch {
 
     private static final Logger LOG = LoggerFactory.getLogger(DegradingDocSearch.class);
 
+    /**
+     * 归一化后分数的放大倍数。
+     *
+     * <p>为什么还要放大：{@code DocHit.score} 是 {@code int}，归一化后的 0~1 四舍五入会全部变成
+     * 0 或 1，排序直接塌掉。乘 100 让三层的贡献落在 0~70/0~30/0~50 这个整数区间里，
+     * 既保住了可读性，也没丢精度。
+     */
+    private static final double SCORE_SCALE = 100.0;
+
     public enum Mode { VECTOR, FULLTEXT, KEYWORD }
 
     /**
      * 一次检索的结果与"它是怎么来的"。
      *
-     * @param degraded 有没有降级（不是 VECTOR 就是降级）
-     * @param reason   降级原因（人能看懂的一句话；用上向量时为空）
+     * @param mode     最终入选结果里贡献最大的那一层（回显用，人看一眼就知道该不该信）
+     * @param degraded 有没有降级（最终结果里没有向量的贡献就是降级）
+     * @param reason   降级原因（人能看懂的一句话；向量参与且有效时为空）
+     * @param sources  <b>最终入选的 hit 分别来自哪几层</b>——这是 M12 修的那个错：
+     *                 原来只说"这次是 KEYWORD 模式"，可实际命中的既有全文也有关键词，
+     *                 调用方无从判断一份结果到底靠的是语义还是字面
      */
-    public record Outcome(List<DocHit> hits, Mode mode, boolean degraded, String reason) {
+    public record Outcome(List<DocHit> hits, Mode mode, boolean degraded, String reason, Set<Mode> sources) {
     }
 
     private final VectorDocSearch vector;
@@ -67,8 +82,11 @@ public class DegradingDocSearch implements DocSearch {
      * 关键词就永远没机会——而实测里向量漏掉的那几条恰好被关键词捞回（20 条口径问法：
      * 向量 recall@3 = 75%，关键词 = 60%，并集 = 90%）。兜底和融合是两件事，前者保可用，后者提质量。
      *
-     * <p>权重是拍出来的，但方向有依据：向量负责语义（0.7），关键词负责"用户用词和文档用词一致"（0.3），
-     * 全文（严格 AND）只有在用户基本照抄原文时才命中，命中即强信号（0.5）。
+     * <p>权重是拍出来的，但方向有依据，而且<b>必须按"归一化后的相对上限"来理解</b>：
+     * 向量 ×1.0（语义主导）、关键词 ×0.35（用户用词与文档用词一致）、全文 ×0.5（严格 AND，
+     * 命中即强信号）。三者的和可以超过 1.0，所以一篇只被关键词和全文同时命中的文档
+     * 最高能拿 85 分，仍低于一次满分语义命中的 100 分——这就是"向量为主"的量化含义：
+     * 字面匹配再多，也压不过一次真正的语义命中（M12 的实测用例就是钉这条）。
      *
      * <p>标题<b>不进向量</b>（它会稀释正文，实测把 recall@1 从 80% 拉到 70%），
      * 但标题命中查询词是强信号，所以做加分成。
@@ -77,6 +95,10 @@ public class DegradingDocSearch implements DocSearch {
         List<String> reasons = new ArrayList<>();
         Map<Long, DocHit> kept = new LinkedHashMap<>();
         Map<Long, Double> scores = new LinkedHashMap<>();
+        Map<Long, Mode> bestLayer = new LinkedHashMap<>();
+        Map<Long, Double> bestShare = new LinkedHashMap<>();
+        // 每条结果被哪些通道"给出来过"（不是它最终靠哪层赢的）
+        Map<Long, Set<Mode>> givenBy = new LinkedHashMap<>();
 
         boolean usedVector = false;
         if (vector.available()) {
@@ -88,15 +110,15 @@ public class DegradingDocSearch implements DocSearch {
                 // 还是降级语义（degraded=true），否则调用方会以为这次是语义检索。
                 usedVector = true;
             }
-            merge(kept, scores, hits, 0.7);
+            merge(kept, scores, bestLayer, bestShare, givenBy, hits, Mode.VECTOR, 1.0);
         } else {
             reasons.add(vector.reason());
         }
 
         List<DocHit> keywordHits = keyword.search(query, source, limit * 2);
-        merge(kept, scores, keywordHits, 0.3);
+        merge(kept, scores, bestLayer, bestShare, givenBy, keywordHits, Mode.KEYWORD, 0.35);
         List<DocHit> fulltextHits = fulltext.search(query, source, limit * 2);
-        merge(kept, scores, fulltextHits, 0.5);
+        merge(kept, scores, bestLayer, bestShare, givenBy, fulltextHits, Mode.FULLTEXT, 0.5);
 
         List<DocHit> fused = new ArrayList<>();
         for (Map.Entry<Long, Double> entry : scores.entrySet()) {
@@ -112,15 +134,57 @@ public class DegradingDocSearch implements DocSearch {
             reasons.add("向量、关键词、全文都没命中");
         }
 
-        Mode mode = usedVector ? Mode.VECTOR : (fulltextHits.isEmpty() ? Mode.KEYWORD : Mode.FULLTEXT);
-        return new Outcome(fused, mode, !usedVector, usedVector ? "" : String.join("；", reasons));
+        // 来源集合取自"最终入选的这几条被哪些通道给出来过"：
+        // 跑过全文但一条都没进结果，就不该被标成"全文检索"；
+        // 一条结果既被关键词也被全文给出过，两条通道都算数——排序只有一个赢家，
+        // 但"它是怎么被找到的"不该被赢家覆盖掉。
+        Set<Mode> sources = new LinkedHashSet<>();
+        for (DocHit hit : fused) {
+            sources.addAll(givenBy.getOrDefault(hit.chunk().id(), Set.of()));
+        }
+        boolean degraded = !sources.contains(Mode.VECTOR);
+        if (degraded && usedVector) {
+            reasons.add("向量给出的候选没有进入最终结果");
+        }
+        if (degraded && !usedVector && !fused.isEmpty()) {
+            reasons.add("本次结果全部来自字面匹配（关键词/全文），没有语义参与");
+        }
+        Mode mode = fused.isEmpty() ? Mode.KEYWORD
+                : bestLayer.getOrDefault(fused.get(0).chunk().id(), Mode.KEYWORD);
+        return new Outcome(fused, mode, degraded, degraded ? String.join("；", reasons) : "", sources);
     }
 
-    /** 同一 slice 在多层的分数相加；保留 matched 最多的那条用于回显。 */
-    private static void merge(Map<Long, DocHit> kept, Map<Long, Double> scores, List<DocHit> hits, double weight) {
+    /**
+     * 同一 slice 在多层的分数相加；<b>每层先归一到 0~1，再乘权重</b>。
+     *
+     * <p>为什么必须归一化：三层的原始分数量纲根本不同——向量是余弦相似度（0~1），
+     * 关键词是命中二元组的<b>计数</b>（中文字符串能到十几），全文是评分函数的相加结果。
+     * 直接相加等于让"计数天然更大的一层"单边决定排序：一篇手册只要多命中两个词，
+     * 就能压过语义上明显更近的另一篇。这正是 M12 修的那个缺陷——分数看起来有排序，
+     * 实际上排的是"哪一层一直在给大数"。
+     *
+     * <p>两个边界显式处理：一层里所有 hit 同分时没有"相对高低"，给正分的都按满分算
+     * （这一层确实认为它们相关）；全 0 分保持 0。
+     */
+    private static void merge(Map<Long, DocHit> kept, Map<Long, Double> scores,
+                              Map<Long, Mode> bestLayer, Map<Long, Double> bestShare,
+                              Map<Long, Set<Mode>> givenBy,
+                              List<DocHit> hits, Mode layer, double weight) {
+        if (hits == null || hits.isEmpty()) {
+            return;
+        }
+        double max = hits.stream().mapToDouble(DocHit::score).max().orElse(0);
+        double min = hits.stream().mapToDouble(DocHit::score).min().orElse(0);
         for (DocHit hit : hits) {
+            double share = max > min ? (hit.score() - min) / (max - min) : (max > 0 ? 1.0 : 0.0);
+            double contribution = share * weight * SCORE_SCALE;
             long id = hit.chunk().id();
-            scores.merge(id, hit.score() * weight, Double::sum);
+            givenBy.computeIfAbsent(id, k -> new LinkedHashSet<>()).add(layer);
+            scores.merge(id, contribution, Double::sum);
+            if (contribution >= bestShare.getOrDefault(id, -1.0)) {
+                bestShare.put(id, contribution);
+                bestLayer.put(id, layer);
+            }
             DocHit previous = kept.get(id);
             if (previous == null || hit.matched().size() > previous.matched().size()) {
                 kept.put(id, hit);
@@ -129,10 +193,13 @@ public class DegradingDocSearch implements DocSearch {
     }
 
     /**
-     * 标题命中加分：查询里的中文二元组有多少出现在标题里，每个 +5，封顶 20。
+     * 标题命中加分：查询里的中文二元组有多少出现在标题里，每个 +10，封顶 30。
      *
      * <p>为什么按二元组：中文没有分词器，而业务词多是两字词（汇率、容差、分片）。
      * 标题短，命中一个词通常就意味着"说的就是这篇"。
+     *
+     * <p>幅度必须与归一化后的权重同量纲（三层合计最高 150）：标题只是一个 tie-break，
+     * 不能压过语义命中——否则"标题党"文档会靠标题挤掉真正相关的那篇。
      */
     private static double titleBonus(String query, String title) {
         if (query == null || title == null || title.isBlank()) {
@@ -146,7 +213,7 @@ public class DegradingDocSearch implements DocSearch {
                 hits++;
             }
         }
-        return Math.min(hits * 5, 20);
+        return Math.min(hits * 10, 30);
     }
 
     /**
@@ -162,16 +229,18 @@ public class DegradingDocSearch implements DocSearch {
         }
         return switch (force) {
             case VECTOR -> new Outcome(vector.search(query, source, limit), Mode.VECTOR,
-                    !vector.available(), vector.available() ? "" : vector.reason());
-            case FULLTEXT -> new Outcome(fulltext.search(query, source, limit), Mode.FULLTEXT, false, "");
-            case KEYWORD -> new Outcome(keyword.search(query, source, limit), Mode.KEYWORD, false, "");
+                    !vector.available(), vector.available() ? "" : vector.reason(), Set.of(Mode.VECTOR));
+            case FULLTEXT -> new Outcome(fulltext.search(query, source, limit), Mode.FULLTEXT, false, "",
+                    Set.of(Mode.FULLTEXT));
+            case KEYWORD -> new Outcome(keyword.search(query, source, limit), Mode.KEYWORD, false, "",
+                    Set.of(Mode.KEYWORD));
         };
     }
 
     @Override
     public String describe() {
         return vector.available()
-                ? "融合检索（向量 0.7 + 关键词 0.3 + 全文锚点 0.5，标题加分；向量不可用时自动降级）"
+                ? "融合检索（向量 ×1.0 + 关键词 ×0.35 + 全文锚点 ×0.5，各层先归一到 0~1，标题加分；向量不可用时自动降级）"
                 : "关键词 + 全文融合（未配置向量模型，自动降级）";
     }
 

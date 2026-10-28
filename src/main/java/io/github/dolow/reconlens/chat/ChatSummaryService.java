@@ -75,12 +75,15 @@ public class ChatSummaryService {
             }
             int recent = 0;
             for (ChatTurn turn : pending) {
-                recent += ChatSummarizer.estimateTokens(turn.content());
+                recent += TurnBudget.estimate(turn.content());
             }
             int need = SYSTEM_OVERHEAD_TOKENS
-                    + ChatSummarizer.estimateTokens(session.summary())
+                    + TurnBudget.estimate(session.summary())
                     + recent;
-            int budget = (int) Math.floor(windowTokens * BUDGET_RATIO);
+            // 两个上限取小的：窗口比例管"模型的窗口够不够"，TurnBudget.TOTAL 管"我们一次到底愿意发多少"。
+            // 没有后者时，window 配成 32000 就能让历史长到 17k token，然后在装配 prompt 时被静默裁掉 ——
+            // 触发压缩的阈值与真正发出去的预算必须是同一把尺子，否则"压过了"不等于"压对了"。
+            int budget = Math.min((int) Math.floor(windowTokens * BUDGET_RATIO), TurnBudget.TOTAL);
             if (need <= budget || recent < MIN_RECENT_TOKENS) {
                 return null;
             }

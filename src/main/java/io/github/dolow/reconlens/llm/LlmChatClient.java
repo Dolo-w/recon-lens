@@ -5,8 +5,8 @@ import java.util.Optional;
 /**
  * 通用 chat 客户端：<b>只做一件事 —— 把 (system, user) 换成一段文本</b>（设计 §8.2 / 评审 R19）。
  *
- * <p>接口刻意不返回 {@code Optional<Choice>}、不带 token 统计、不暴露 HTTP 细节。原因是它有两个
- * 差异极大的调用方：
+ * <p>接口刻意不返回 {@code Optional<Choice>}、不暴露 HTTP 细节，主契约只有"文本进、文本出"。
+ * token 统计是<b>旁路</b>（{@link #lastTokens}）：它不是主契约，理由是它有两个差异极大的调用方：
  * <ul>
  *   <li>{@code explain.LlmDiffExplainer}：失败要静默落回规则模板，多一句报错都会污染对账结论；</li>
  *   <li>{@code agent.RuleDrafter}：失败要变成"转人工"，<b>绝不能</b>变成一条自动批准的规则。</li>
@@ -27,6 +27,17 @@ public interface LlmChatClient {
      * @return 模型返回的正文；不可用、请求失败、返回体里没有 content、content 全空白 → {@link Optional#empty()}
      */
     Optional<String> complete(String system, String user);
+
+    /**
+     * 最近一次 {@link #complete} 的真实 token 用量（{@code usage.total_tokens}）；拿不到时返回 0。
+     *
+     * <p>为什么不放进返回值：返回 {@code Optional<String>} 是接口的稳定契约，多包一层 record 会让
+     * 所有调用方都要改签名；而 token 是"顺便记一笔"的账，取不到就退化成估算（调用方本来就有
+     * 字符数估算兜底）。实现必须是线程安全的：调用方是同一个线程内 {@code complete → lastTokens}。
+     */
+    default int lastTokens() {
+        return 0;
+    }
 
     /** 用于日志与报告：当前接入的是哪套实现。 */
     default String name() {

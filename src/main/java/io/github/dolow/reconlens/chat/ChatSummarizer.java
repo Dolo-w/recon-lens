@@ -374,21 +374,10 @@ public final class ChatSummarizer {
      * token 估算：中日韩字符按 1 算，其它按 4 字符 1 个算。
      *
      * <p>只用于"该不该压缩"这个判断，不用于计费，所以宁可粗一点也不要引入 tokenizer。
+     * 实现搬到了 {@link io.github.dolow.reconlens.llm.Tokens} —— 提示词装配、预算账本、
+     * 摘要触发三处要用同一把尺子，否则"按预算截断"和"按预算触发压缩"会得出两个结论。
      */
     public static int estimateTokens(String text) {
-        if (text == null || text.isEmpty()) {
-            return 0;
-        }
-        int wide = 0;
-        int narrow = 0;
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (c >= 0x2E80) {
-                wide++;
-            } else {
-                narrow++;
-            }
-        }
-        return wide + (narrow + 3) / 4;
+        return io.github.dolow.reconlens.llm.Tokens.estimate(text);
     }
 }

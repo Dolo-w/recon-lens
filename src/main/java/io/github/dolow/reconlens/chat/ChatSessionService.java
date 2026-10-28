@@ -187,6 +187,7 @@ public class ChatSessionService {
      * 是一个需要解释的事实。交接不记账，事后就无法回答"谁给她的"。
      */
     public ChatSession handover(SessionScope scope, long sessionId, String toOperator) {
+        long startedAt = System.nanoTime();
         ChatSession session = requireWritable(scope, sessionId);
         String target = new SessionScope(toOperator).operator(); // 复用同一套非空/长度校验
         if (target.equals(session.operator())) {
@@ -195,7 +196,7 @@ public class ChatSessionService {
         if (!sessions.transfer(scope, sessionId, target)) {
             throw new SessionNotFoundException(sessionId);
         }
-        recordHandover(session, target);
+        recordHandover(session, target, startedAt);
         // 交接之后原 owner 已经读不到了，必须换新 owner 的 scope 再读一遍
         return sessions.find(SessionScope.of(target), sessionId)
                 .orElseThrow(() -> new IllegalStateException("交接后新 owner 读不到会话：" + sessionId));
@@ -209,7 +210,8 @@ public class ChatSessionService {
         return session;
     }
 
-    private void recordHandover(ChatSession session, String toOperator) {
+    private void recordHandover(ChatSession session, String toOperator, long startedAt) {
+        int costMs = (int) java.time.Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
         long runId = runs.startRun(
                 "会话交接 #" + session.id() + "：" + session.operator() + " → " + toOperator,
                 "SESSION_HANDOVER", session.operator());
@@ -218,7 +220,8 @@ public class ChatSessionService {
                 + " owner：" + session.operator() + " → " + toOperator
                 + "，可见性：" + Visibility.HANDOVER.name();
         runs.recordStep(runId, 1, "ACT", "handover-session",
-                "session=" + session.id(), payload, null, false, "OK", null);
+                "session=" + session.id(), payload, null, false, "OK", costMs,
+                io.github.dolow.reconlens.llm.Tokens.estimate(payload));
         runs.finishRun(runId, AgentRunRepository.RunStatus.SUCCESS, null, null, null, null);
     }
 }
