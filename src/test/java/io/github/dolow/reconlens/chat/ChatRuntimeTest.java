@@ -38,13 +38,13 @@ class ChatRuntimeTest {
         SessionScope scope = SessionScope.of("zhang");
         long sessionId = sessions.open(scope, "端到端").id();
 
-        List<ChatEvent> run = collect(scope, sessionId, "跑一下 BILL_VS_SETTLE");
+        List<ChatEvent> run = confirmedRun(scope, sessionId, "跑一下 BILL_VS_SETTLE");
         assertThat(eventTypes(run)).contains("intent", "tool", "delta", "slot", "done");
         assertThat(data(run, "intent")).containsEntry("intent", "RUN");
 
         ChatSession afterRun = sessions.require(scope, sessionId);
         assertThat(afterRun.stateJson()).contains("BILL_VS_SETTLE");
-        assertThat(afterRun.turnCount()).isEqualTo(2);
+        assertThat(afterRun.turnCount()).isEqualTo(4);   // 两次对话（跑一下 + 确认）× 每轮两行
 
         // 第二句不提交任务号，靠槽位
         List<ChatEvent> summary = collect(scope, sessionId, "为什么差这么多");
@@ -60,7 +60,7 @@ class ChatRuntimeTest {
     void 值不等会被翻译成规则里真实存在的差异类型() {
         SessionScope scope = SessionScope.of("lisi");
         long sessionId = sessions.open(scope, "差异翻译").id();
-        collect(scope, sessionId, "跑一下 BILL_VS_SETTLE");
+        confirmedRun(scope, sessionId, "跑一下 BILL_VS_SETTLE");
 
         List<ChatEvent> diffs = collect(scope, sessionId, "值不等的差异有哪些");
         String text = text(diffs);
@@ -81,7 +81,7 @@ class ChatRuntimeTest {
     void 没给任务号时_只读动作按最近一次生产任务回答_并且说明是猜的() {
         SessionScope scope = SessionScope.of("wangwu");
         long ran = sessions.open(scope, "先跑一单").id();
-        collect(scope, ran, "跑一下 BILL_VS_SETTLE");
+        confirmedRun(scope, ran, "跑一下 BILL_VS_SETTLE");
         java.util.regex.Matcher m = java.util.regex.Pattern
                 .compile("\"jobId\":(\\d+)")
                 .matcher(sessions.require(scope, ran).stateJson());
@@ -258,10 +258,39 @@ class ChatRuntimeTest {
         assertThat(picked).contains("记下了").contains("其他会话");
     }
 
+    /**
+     * 写动作只有一个回执判据（2026-10-28 统一）：不管模型给的是工具形态 {@code recon_run}
+     * 还是意图形态 {@code RUN}，也**不看用户原话里有没有点名规则**，参数齐了就一律先问。
+     *
+     * <p>改之前"消息里出现了大写规则编码"这条豁免只挂在意图形态上，于是同一句话在两种形态下
+     * 一边问一边不问——安全规则不能取决于模型这次选了哪种 JSON。
+     */
+    @Test
+    void 点名了规则也要先回执_写动作的判据不分形态() {
+        SessionScope scope = SessionScope.of("zhouba");
+        long sessionId = sessions.open(scope, "统一点名回执").id();
+
+        List<ChatEvent> first = collect(scope, sessionId, "跑一下 BILL_VS_SETTLE");
+        assertThat(text(first)).contains("确认执行").contains("BILL_VS_SETTLE");
+        assertThat(eventTypes(first)).as("回执这一轮不该真的跑").doesNotContain("tool");
+
+        List<ChatEvent> second = collect(scope, sessionId, "确认");
+        assertThat(eventTypes(second)).contains("tool");
+        // 确认之后不能再问一次（本轮修掉的"确认套娃"）
+        assertThat(text(second)).doesNotContain("确认执行吗");
+    }
+
     private List<ChatEvent> collect(SessionScope scope, long sessionId, String message) {
         List<ChatEvent> events = new ArrayList<>();
         runtime.handle(scope, sessionId, message, events::add);
         return events;
+    }
+
+    /** 写动作要两段式：发一句 → 断言停在回执 → 回「确认」→ 返回确认后那一轮事件。 */
+    private List<ChatEvent> confirmedRun(SessionScope scope, long sessionId, String message) {
+        List<ChatEvent> ask = collect(scope, sessionId, message);
+        assertThat(text(ask)).as("写动作必须先回执").contains("确认执行");
+        return collect(scope, sessionId, "确认");
     }
 
     private static List<String> eventTypes(List<ChatEvent> events) {

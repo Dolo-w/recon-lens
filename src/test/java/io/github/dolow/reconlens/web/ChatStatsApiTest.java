@@ -48,8 +48,10 @@ class ChatStatsApiTest {
         awaitAssistantTurns(sessionId, 1);
         chat(sessionId, "我能做什么");        // HELP，空手回
         awaitAssistantTurns(sessionId, 2);
-        chat(sessionId, "跑一下 BILL_VS_SETTLE"); // RUN，调 recon_run
+        chat(sessionId, "跑一下 BILL_VS_SETTLE"); // RUN，先停在回执（写动作一律要确认）
         awaitAssistantTurns(sessionId, 3);
+        chat(sessionId, "确认");                  // 确认后才真的调 recon_run
+        awaitAssistantTurns(sessionId, 4);
 
         JsonNode body = json.readTree(mockMvc.perform(get("/api/chat/stats")
                         .header("X-Operator", "alice"))
@@ -61,7 +63,8 @@ class ChatStatsApiTest {
 
         assertThat(body.path("byIntent").path("LIST_RULES").asInt()).isEqualTo(1);
         assertThat(body.path("byIntent").path("HELP").asInt()).isEqualTo(1);
-        assertThat(body.path("byIntent").path("RUN").asInt()).isEqualTo(1);
+        // 写动作两段式：回执一轮 + 确认后执行一轮，两轮都是 RUN（口径：按执行轮次记，不按"用户说了几句"记）
+        assertThat(body.path("byIntent").path("RUN").asInt()).isEqualTo(2);
 
         assertThat(body.path("byTool").path("recon_list_rules").asInt()).isEqualTo(1);
         assertThat(body.path("byTool").path("recon_run").asInt()).isEqualTo(1);

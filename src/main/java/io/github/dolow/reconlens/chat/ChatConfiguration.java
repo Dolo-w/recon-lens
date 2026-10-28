@@ -108,10 +108,36 @@ public class ChatConfiguration {
         return new LlmChatClient(baseUrl, apiKey, model, timeoutMs, objectMapper);
     }
 
+    /**
+     * 第二步开关：{@code recon.chat.loop.enabled}，默认关。
+     *
+     * <p>它会为每个"读动作"多花一次模型往返（且只在第一次规划就走模型时才可能发生），
+     * 换来的是"看完差异清单顺手把归因也做了"这种少一句交互的体验。
+     * 默认关的理由很实际：这条链路改的是<b>一次请求里发生几次动作</b>，
+     * 它的失败模式（多跑一步、回执重复）比"少一句体验"贵得多，要开是部署时的明确决定。
+     */
     @Bean
-    public ChatPlanner chatPlanner(LlmChatClient chatLlmClient, ObjectMapper objectMapper) {
-        return new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
-                new LlmPlanner(chatLlmClient, objectMapper));
+    public ChatPlanner chatPlanner(LlmChatClient chatLlmClient, ObjectMapper objectMapper,
+                                   @Value("${recon.chat.loop.enabled:false}") boolean loopEnabled,
+                                   @Value("${recon.chat.mode:legacy}") String mode,
+                                   @Value("${recon.chat.loop.max-hops:5}") int maxHops,
+                                   ToolRegistry toolRegistry, ChatHandbook handbook) {
+        // 工具清单从注册表读（不手抄）：模型看到的参数名和真正被调用的工具必须同源，
+        // 否则工具改了参数、提示词还写着旧名，表现成"调用成功但没答案"。
+        io.github.dolow.reconlens.chat.plan.ToolCallPlanner tools =
+                new io.github.dolow.reconlens.chat.plan.ToolCallPlanner(toolRegistry, objectMapper);
+        ChatMode chatMode = ChatMode.of(mode);
+        // 循环模式：跳数上限只在模型真能用时才有意义；没有 key 时退回老路径，
+        // 否则每一句都得到"模型没给出可用的决定"，比不会说话还糟。
+        boolean freeLoop = chatMode.loop() && chatLlmClient.configured();
+        LlmPlanner llm = new LlmPlanner(chatLlmClient, objectMapper, loopEnabled || freeLoop, tools,
+                freeLoop ? Math.max(1, maxHops) : 0, handbook == null ? null : handbook.text());
+        if (freeLoop) {
+            // 不套词表：自由循环里没有"先命中词表"这一步，词表的快路径与熔断兜底
+            // 都有同一个副作用——把模型本来答得出的话换成固定菜单。
+            return llm;
+        }
+        return new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()), llm);
     }
 
     /**
@@ -151,10 +177,14 @@ public class ChatConfiguration {
                                    RuleCatalog ruleCatalog, ObjectMapper objectMapper, ChatPlanner chatPlanner,
                                    ChatNarrator chatNarrator, RuleNamer ruleNamer,
                                    io.github.dolow.reconlens.store.ChatDraftRepository chatDraftRepository,
-                                   DraftSlotFiller draftSlotFiller, ChatClaims chatClaims) {
+                                   DraftSlotFiller draftSlotFiller, ChatClaims chatClaims,
+                                   FactsCache factsCache, TurnLedger turnLedger,
+                                   @Value("${recon.chat.mode:legacy}") String mode,
+                                   @Value("${recon.chat.loop.max-hops:5}") int maxHops) {
         return new ChatRuntime(chatSessionService, chatSummaryService, toolRegistry, recallAugmenter,
                 reconRepository, reconEngine, ruleCatalog, objectMapper, chatPlanner, chatNarrator,
-                chatDraftRepository, ruleNamer, draftSlotFiller, chatClaims);
+                chatDraftRepository, ruleNamer, draftSlotFiller, chatClaims, factsCache, turnLedger,
+                ChatMode.of(mode), maxHops);
     }
 
     /** 表单入口：与会话共用 {@link ChatRuntime#submit}，不另起一套动作实现。 */

@@ -45,6 +45,17 @@ public class ChatRuntime {
     /** 给规划器的"最近几轮原话"条数：多了撑 prompt，少了接不住"它/刚才那单"。 */
     private static final int HISTORY_TURNS = 6;
 
+    /**
+     * 理解阶段多带几轮：预算给到 4000 token，装得下 8 轮还不会截半句。
+     *
+     * <p>「刚才那个任务」「它」这类指代，6 轮常常刚好差一轮；理解阶段多要两轮是最便宜的对策，
+     * 真正放不下时由 {@code TurnBudget.rounds} 整轮丢弃，不会留下半句。
+     */
+    private static final int HISTORY_TURNS_UNDERSTANDING = 8;
+
+    /** 槽位写入的最大尝试次数（第 1 次 + 冲突后最多再合并重试 2 次）。 */
+    private static final int SLOT_SAVE_ATTEMPTS = 3;
+
     /** 从 {@code recon_list_tables} 的人话输出里认表名（行首带「·」的那些）。 */
     private static final java.util.regex.Pattern TABLE_LINE =
             java.util.regex.Pattern.compile("·\\s*([A-Za-z_][A-Za-z0-9_]*)");
@@ -71,6 +82,15 @@ public class ChatRuntime {
     private static final java.util.regex.Pattern COMPARE_CUE =
             java.util.regex.Pattern.compile("比|核对|对一下|对比");
 
+    /**
+     * 回答"我准备就按这一列写，对吗"时的肯定。
+     *
+     * <p>只在这种确认之后的一轮里看（槽位里有 {@code guessed} 标记），所以放宽一点没风险；
+     * 但没有"去掉"这一支——那是由收集器自己的否定词处理的。
+     */
+    private static final java.util.regex.Pattern GUESS_YES =
+            java.util.regex.Pattern.compile("^(是|对|嗯|好|行|可以|没错|就是|就用|按这个|就这样)");
+
     /** 等用户确认的写操作。与 pendingAction 同一个槽位，只是值固定为它。 */
     static final String CONFIRM_ACTION = "CONFIRM";
 
@@ -91,9 +111,19 @@ public class ChatRuntime {
     private static final java.util.regex.Pattern AFFIRM =
             java.util.regex.Pattern.compile("^(确认|好|可以|行|对|是|执行|跑|开始|ok|yes|嗯|没问题|就这么办)");
 
-    /** 「否」：取消。 */
+    /**
+     * 「否」：取消。**只认句首的干脆否定**，且不认疑问句。
+     *
+     * <p>为什么不能像以前那样满句子找 `不`：用户看到回执后常会反问一句
+     * 「不是三个维度吗」——那是他在质疑刚才的理解，不是让系统撤单。
+     * 满句子匹配 `不` 会把这一问当成取消，回一句"好，这次不做"，
+     * 既答非所问，又把待确认的动作静默丢掉。
+     */
     private static final java.util.regex.Pattern NEGATE =
-            java.util.regex.Pattern.compile("不|别|取消|算了|不用|先不|不行|停|no");
+            java.util.regex.Pattern.compile("^(不|别|取消|算了|不用|先不|先别|不行|停|no)");
+
+    /** 疑问标记：带它的句子一律不算"干脆的取消"。 */
+    private static final java.util.regex.Pattern QUESTION = java.util.regex.Pattern.compile("[吗呢么？?]");
 
     /** 一次回复：正文（给人看）+ 工具记录（给审计）+ 新槽位。 */
     record Reply(String text, String toolJson, ChatSlots slots) {
@@ -156,13 +186,49 @@ public class ChatRuntime {
      */
     private final ChatClaims claims;
 
+    /** 系统事实的短命缓存：同一份目录 30 秒内只拼一次（见 {@link FactsCache}）。 */
+    private final FactsCache factsCache;
+
+    /**
+     * 会话级 token 账本：累计过线之后把预算档从理解档收到执行档（见 {@link TurnLedger}）。
+     *
+     * <p>为什么不并进会话状态：累计值只是"这个会话聊了多久"的近似，不是账务数据；
+     * 放进 {@code ChatSession} 的 JSON 要走仓储/服务/迁移三处，换来的只是重启后不清零。
+     */
+    private final TurnLedger ledger;
+
+    /**
+     * 对话装法：判意图（老路径）还是让模型自己走（自由循环，{@code recon.chat.mode}）。
+     *
+     * <p>它不是"更聪明的路由"，而是**换掉编排本身**：循环模式里没有槽位改写、没有词表快路径、
+     * 没有起草收集器，模型看到的是事实 + 记忆 + 工具 + 手册，自己决定下一步。
+     * 两种装法共用同一套执行层（{@code dispatch}/{@code dispatchTool}）和同一条写动作回执。
+     */
+    private final ChatMode mode;
+
+    /** 自由循环最多几跳（含第一跳）。0 表示不开放多跳，行为与单步一样。 */
+    private final int loopHops;
+
     public ChatRuntime(ChatSessionService sessions, ChatSummaryService summaries, ToolRegistry registry,
             io.github.dolow.reconlens.recall.RecallAugmenter recall,
             io.github.dolow.reconlens.store.ReconRepository repository,
                        ReconEngine engine, RuleCatalog catalog, ObjectMapper json,
                        io.github.dolow.reconlens.chat.plan.ChatPlanner planner, ChatNarrator narrator,
                        io.github.dolow.reconlens.store.ChatDraftRepository chatDrafts, RuleNamer namer,
-                       DraftSlotFiller slotFiller, ChatClaims claims) {
+                       DraftSlotFiller slotFiller, ChatClaims claims, FactsCache factsCache,
+                       TurnLedger ledger) {
+        this(sessions, summaries, registry, recall, repository, engine, catalog, json, planner, narrator,
+                chatDrafts, namer, slotFiller, claims, factsCache, ledger, ChatMode.LEGACY, 0);
+    }
+
+    public ChatRuntime(ChatSessionService sessions, ChatSummaryService summaries, ToolRegistry registry,
+            io.github.dolow.reconlens.recall.RecallAugmenter recall,
+            io.github.dolow.reconlens.store.ReconRepository repository,
+                       ReconEngine engine, RuleCatalog catalog, ObjectMapper json,
+                       io.github.dolow.reconlens.chat.plan.ChatPlanner planner, ChatNarrator narrator,
+                       io.github.dolow.reconlens.store.ChatDraftRepository chatDrafts, RuleNamer namer,
+                       DraftSlotFiller slotFiller, ChatClaims claims, FactsCache factsCache,
+                       TurnLedger ledger, ChatMode mode, int loopHops) {
         this.sessions = sessions;
         this.summaries = summaries;
         this.registry = registry;
@@ -177,6 +243,10 @@ public class ChatRuntime {
         this.namer = namer;
         this.slotFiller = slotFiller;
         this.claims = claims;
+        this.factsCache = factsCache;
+        this.ledger = ledger == null ? new TurnLedger() : ledger;
+        this.mode = mode == null ? ChatMode.LEGACY : mode;
+        this.loopHops = Math.max(0, loopHops);
     }
 
     /**
@@ -192,6 +262,19 @@ public class ChatRuntime {
             int userSeq = session.turnCount() + 1;
 
             ChatSlots slots = readSlots(session);
+            // 会话刚开、话里却带着"刚才/上面"：这句在续一段本会话里没有的上下文
+            // （常见于服务重启后内存库清零，或换了会话）。不装作接得上，也不去猜——
+            // 猜错的代价是拿错对象去执行，比多问一句贵得多。
+            if (session.turnCount() == 0 && slots.pendingAction() == null && refersToEarlier(message)) {
+                String text = "这条会话里没有更早的记录，你说的「" + brief(message) + "」我接不上。"
+                        + "如果刚才贴过规则、跑过任务，把那段话再贴一次或给个任务号，我就能接着做。";
+                sessions.append(scope, sessionId, "assistant", text,
+                        envelope(ChatIntent.HELP, tools));
+                ChatSlots next = slots.withIntent(ChatIntent.HELP.name());
+                saveSlotsWithRetry(scope, sessionId, session.stateRev(), next);
+                emit(sink, Reply.text(text, next), next, sessionId);
+                return;
+            }
             // 历史结论出现两种说法：上一轮已经问过"以哪个为准"，这一句是在回答它。
             if (PICK_CLAIM.equals(slots.pendingAction())) {
                 Reply picked = resolvePick(session, slots, message, userSeq);
@@ -229,37 +312,85 @@ public class ChatRuntime {
                     slots = slots.clearPending();
                 }
             }
-            List<String> history = recentUserMessages(scope, sessionId, HISTORY_TURNS);
+            // 预算档由累计用量决定，不由这一句话的长度决定：短会话一律给理解档，
+            // 因为"理解错了后面全错"的代价远大于多花的那点 token。
+            TurnBudget.Phase phase = ledger.phaseOf(sessionId);
+            int historyLimit = phase == TurnBudget.Phase.UNDERSTANDING ? HISTORY_TURNS_UNDERSTANDING : HISTORY_TURNS;
+            // 自由循环里"记忆"得是双向的：只给用户原话，模型看不到自己上一轮问过什么、查过什么，
+            // 于是每轮都把两张表重新 describe 一遍、把同一个问题再问一遍（实测里连着三轮）。
+            List<String> history = mode.loop()
+                    ? recentDialogue(scope, sessionId, historyLimit)
+                    : recentUserMessages(scope, sessionId, historyLimit);
             // 每轮重建一次系统事实（规则目录 + 最近任务 + 表名）：只读元数据，不读任何数据行。
             // 它同时是"给模型看的索引"和"校验模型输出的依据"——两件事用同一份事实，才不会自相矛盾。
-            ContextFacts facts = ContextFacts.build(catalog, repository);
+            ContextFacts facts = factsCache.get(factsCache.revision(),
+                    () -> ContextFacts.build(catalog, repository));
             // 摘要（压缩过的历史）+〔当前有效〕（还没被推翻的结论）+〔历史结论〕（同一操作人跨会话）。
             // 顺序就是优先级：越靠后越硬，当前会话的结论压过历史结论。
             String contextText = composeContext(session.summary(), claims.render(sessionId),
                     sharedBlock(session, slots, message));
             io.github.dolow.reconlens.chat.plan.ChatPlan plan = planner.plan(message, slots, facts, history,
-                            contextText)
-                    .orElseThrow(() -> new IllegalStateException("规划器必须给出结果"));
-            ChatIntentRouter.Call call = resumePending(plan.call(), slots, message, tools);
-            ChatIntentRouter.Call referenced = applyDraftReference(sessionId, call, message);
-            if (referenced != call) {
-                // 「第二条」指的是本会话账本里的第 N 条草稿：解析结果要回执，用户才看得出按哪条理解的
-                call = referenced;
-                int index = draftIndex(message);
-                plan = io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.85,
-                        index >= 1
-                                ? "按会话草稿账本第 " + index + " 条：" + call.ruleCode()
-                                : "按会话草稿描述匹配：" + call.ruleCode());
+                            contextText, phase)
+                    .orElseGet(this::planFallback);
+            ChatIntentRouter.Call call = plan.call();
+            // 起草的收集是状态机：上一问还没答完时，"这句是不是在回答它"由槽位判定，
+            // 不能由模型今天愿不愿意多聊一句决定。实测：问完左侧表，用户回「bill_left」，
+            // 模型把它接过去答了一段，已经收下的表当场丢了，下一句又从"左侧用哪张表"开始。
+            // 只读工具（真的换了话题）与起草/写工具仍然放行。
+            //
+            // 自由循环里这段整体关闭：那正是"编排"本身——参数怎么收、什么时候问，交给模型；
+            // 它想查列就查列，想问就问。留在循环里就成了两套状态机抢同一句话。
+            if (!mode.loop()) {
+            boolean intakePending = DraftIntake.ACTION.equals(slots.pendingAction());
+            boolean readOnlyTool = plan.isToolCall() && !ToolNames.WRITES.contains(plan.toolName())
+                    && !ToolNames.DRAFT_RULE.equals(plan.toolName());
+            // 只读工具也要让路的场合：这一句本来就是在回答起草的问题。问"是要去掉这一维，
+            // 还是它对应哪一列"，用户回「bill_right」，模型十有八九读成"看这张表"——
+            // 那是把参数当指令，收集器就得从头再来。
+            boolean draftAnswer = readOnlyTool && parsesAsDraftAnswer(message, slots, tools);
+            boolean intakeOwnsTurn = intakePending && (!readOnlyTool || draftAnswer);
+            if (intakeOwnsTurn || (!plan.isToolCall() && !plan.isReply())) {
+                // 这两步都在改写"按什么理解"：工具调用是模型自己给出的完整动作，
+                // 拿槽位/草稿账本去覆盖它，等于把它的判断丢掉——还留下一个与 args 不一致的 Call。
+                ChatIntentRouter.Call resumed = resumePending(call, slots, message, tools);
+                if (intakeOwnsTurn && plan.isReply() && resumed == call) {
+                    // 模型自己答了、而且这句确实不是起草参数：按换话题处理，把半截草稿放下，
+                    // 否则用户问「这几张表什么关系」会一直被拉回"左侧用哪张表"。
+                    slots = slots.clearPending();
+                } else {
+                    call = resumed;
+                    ChatIntentRouter.Call referenced = applyDraftReference(sessionId, call, message);
+                    if (referenced != call) {
+                        // 「第二条」指的是本会话账本里的第 N 条草稿：解析结果要回执，用户才看得出按哪条理解的
+                        call = referenced;
+                        int index = draftIndex(message);
+                        plan = io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.85,
+                                index >= 1
+                                        ? "按会话草稿账本第 " + index + " 条：" + call.ruleCode()
+                                        : "按会话草稿描述匹配：" + call.ruleCode());
+                    }
+                    if (call != plan.call()) {
+                        // 续接上一轮的"半句话"：这一句本身可能被判成 HELP（比如只回了一个规则编码），
+                        // 但它在回答上一轮的追问，所以要把"按什么理解"如实说成人话，别让用户看到 HELP。
+                        plan = io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.85,
+                                "续接上一轮：" + slots.pendingAction() + "（" + message.trim() + "）");
+                    }
+                }
             }
-            if (call != plan.call()) {
-                // 续接上一轮的"半句话"：这一句本身可能被判成 HELP（比如只回了一个规则编码），
-                // 但它在回答上一轮的追问，所以要把"按什么理解"如实说成人话，别让用户看到 HELP。
-                plan = io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.85,
-                        "续接上一轮：" + slots.pendingAction() + "（" + message.trim() + "）");
-            }
+            }  // end of !mode.loop()
             // 先推"怎么理解的"，再推"理解成了什么"：用户第一眼要的是依据，不是枚举名
             sink.accept(ChatEvent.plan(plan));
             sink.accept(ChatEvent.intent(call.intent()));
+            // 这一轮进提示词的大致总量：用户、事实、摘要+结论板、历史。它是估算，不是账单——
+            // 但"它为什么忘了上一句"这种事，靠这个数就能自查，不用翻日志猜。
+            int turnTokens = TurnBudget.estimate(message)
+                    + TurnBudget.estimate(facts.text())
+                    + TurnBudget.estimate(contextText)
+                    + history.stream().mapToInt(turn -> TurnBudget.estimate(turn)).sum();
+            int tokensUsed = ledger.add(sessionId, turnTokens);
+            log.info("本轮预算 session={} phase={} turn≈{} tokensUsed≈{}",
+                    sessionId, phase, turnTokens, tokensUsed);
+            sink.accept(ChatEvent.budget(turnTokens, tokensUsed, phase.name()));
 
             // 历史结论里同一件事有两种说法：不替用户挑，先把两种摆出来问。
             // 放在执行之前——按错口径跑一遍，差异清单会把人带沟里，比多问一句贵得多。
@@ -283,22 +414,46 @@ public class ChatRuntime {
             }
 
             Reply reply;
+            // 这一轮真正"最后执行的是哪个动作"：开了第二步时会与 plan 里的不同，
+            // 槽位要记的是实际发生的那个，否则下一轮模型会以为上一步是 LIST_DIFFS。
+            java.util.concurrent.atomic.AtomicReference<ChatIntent> executed =
+                    new java.util.concurrent.atomic.AtomicReference<>(call.intent());
+            // 写动作只有一个判据：不管是工具形态（recon_run）还是意图形态（RUN），
+            // 只要是"写、且参数齐了"，就必须先回执。判据曾经按形态分岔，结果同一句话
+            // 在两种形态下一边问一边不问——安全规则不能取决于模型这次选了哪种 JSON。
+            boolean write = writeAction(plan);
             if (slots.hasPending() && message != null && CANCEL.matcher(message).find()) {
                 // 用户在回答"要哪张表"时说"算了"：这是在叫停，不是要重开一个话题
                 reply = Reply.text("好，这次不建了；刚记下的参数已经清空。", slots.clearPending());
+            } else if (mode.loop()) {
+                // 自由循环：没有"这一步该选哪个动作"的分发，只有"做到哪儿了"的推进。
+                // 取消、写回执、收尾都在 loopTurn 里按执行结果决定，narrate 也不参与——
+                // 循环里模型自己就是说话的人，再让总结层改一遍等于二次创作。
+                reply = loopTurn(scope, message, facts, history, contextText, plan, slots, tools, sink, executed);
             } else if (call.intent() == ChatIntent.HELP && plan.hasOptions()) {
                 // 带候选的"没听懂"不是"要说明书"：给一句短问句 + 候选项，别甩整页帮助
                 reply = Reply.text(clarifyText(plan), slots);
-            } else if (needsWriteConfirm(call, message)) {
+            } else if (plan.isReply()) {
+                // 模型自己选了「说话/反问」：它的原话就是回答，任何总结层改写都算篡改
+                reply = Reply.text(plan.reply(), slots);
+            } else if (write) {
                 // 两段式的第一段：会改数据的动作，先把"我理解成什么"说给用户听，等一句确认
-                String summary = describeCall(call);
+                String summary = plan.isToolCall() ? describeTool(plan) : describeCall(call);
                 String text = narrator == null ? null : narrator.confirm(call.intent(), summary, message);
                 reply = Reply.text(text == null ? defaultConfirm(summary) : text,
-                        slots.withPending(CONFIRM_ACTION, pendingOf(call, summary)));
+                        slots.withPending(CONFIRM_ACTION, pendingOf(plan, summary)));
             } else {
-                reply = narrate(dispatch(scope, call, slots, message, tools, sink), call.intent(), message);
+                // 守卫话术（IntentReview）必须逐字到达用户：它是"我先不动手"的凭据，
+                // 过一遍总结模型就会变成"好的，我来帮你执行"——上一轮实测就是这么翻车的。
+                boolean verbatim = !plan.isToolCall()
+                        && io.github.dolow.reconlens.chat.plan.IntentReview.question(message, call.intent()) != null;
+                Reply first = dispatch(scope, plan, slots, message, tools, sink);
+                Reply merged = plan.isToolCall()
+                        ? first
+                        : followUp(scope, sessionId, message, facts, call, first, tools, sink, executed);
+                reply = verbatim ? merged : narrate(merged, call.intent(), message);
             }
-            ChatSlots next = reply.slots().withIntent(call.intent().name());
+            ChatSlots next = reply.slots().withIntent(executed.get().name());
             // 起草成功才记一条账本：这是"本会话产生过哪些规则版本"的唯一事实来源。
             recordDraftIfNeeded(session, sessionId, call, reply, null, userSeq);
 
@@ -314,6 +469,137 @@ public class ChatRuntime {
             log.warn("会话处理失败 session={} message={}", sessionId, message, e);
             sink.accept(ChatEvent.error(friendly(e)));
         }
+    }
+
+    /**
+     * 规划器没给出结果时怎么办。
+     *
+     * <p>老路径当成 bug：词表规划器必须总能命中，命中不了说明代码坏了，500 比瞎答诚实。
+     * 自由循环里它是一次真实的模型失败（超时、回了个坏 JSON、熔断），用户该听到一句话。
+     */
+    private io.github.dolow.reconlens.chat.plan.ChatPlan planFallback() {
+        if (!mode.loop()) {
+            throw new IllegalStateException("规划器必须给出结果");
+        }
+        log.warn("自由循环这一轮没拿到计划，回一句兜底话");
+        return io.github.dolow.reconlens.chat.plan.ChatPlan.reply(
+                "这次模型没给出可用的决定，你换个说法再试一次？", 0.3);
+    }
+
+    /**
+     * 自由循环：做一步、看真实结果、再问模型下一步，直到它说够了、跳数用完、或撞上写动作回执。
+     *
+     * <p><b>它和 {@code followUp} 的区别是"谁在决定"</b>：{@code followUp} 问的是"还差一步吗"，
+     * 门槛是只读、不重复、证据一致；这里问的是"现在最该做什么"，模型可以查列、可以反问、
+     * 可以连续调两个只读工具。唯一不让步的是写：一到写动作就停，把回执交给用户。
+     *
+     * <p><b>为什么中间步骤只回灌给模型、不直接给用户</b>：一步的真实结果（整张表结构、一列差异）
+     * 是下一跳的依据，不是用户要的答案；用户要看的是模型消化之后那一句。跳数用尽时模型没来得及
+     * 总结，才把最后一步的原样抬出来兜底——那时"看到原始结果"也好过"什么都没看到"。
+     *
+     * @param executed 出参：最后真正执行的动作，槽位要记这个而不是第一跳的
+     */
+    private Reply loopTurn(SessionScope scope, String message, ContextFacts facts, List<String> history,
+                           String contextText, io.github.dolow.reconlens.chat.plan.ChatPlan first,
+                           ChatSlots startSlots, List<String> tools, Consumer<ChatEvent> sink,
+                           java.util.concurrent.atomic.AtomicReference<ChatIntent> executed) {
+        StringBuilder said = new StringBuilder();
+        // 说给模型看的（每一跳的依据）和说给用户看的（模型最后的判断）不是一回事：
+        // 实测里 if 全拼起来，用户会先看到两张表的完整结构、再看到一句结论。
+        String modelSaid = null;
+        String lastStepText = null;
+        ChatSlots slots = startSlots;
+        io.github.dolow.reconlens.chat.plan.ChatPlan plan = first;
+        int hop = 0;
+        int limit = Math.max(1, loopHops);
+        String blockedWrite = null;
+        while (true) {
+            hop++;
+            // 起草在 writeAction 里不算写（词表形态下它走收集器）；循环里没人替模型收参数，
+            // 它一样是个"点了就要人点头"的动作，所以这里把它也算进来。
+            boolean write = writeAction(plan)
+                    || (plan.isToolCall() && ToolNames.WRITES.contains(plan.toolName()));
+            // 模型带着"按订单、资源对账"这种半句话就来点 recon_draft_rule 时，不给用户回执：
+            // 先把"被打回"告诉模型，让它自己决定是不是还缺东西。实测里直接给回执，用户只能
+            // 顺着说"确认"，然后拿一句含糊描述去后台起草；说别的（"bill_left"）也只是再来一次
+            // 回执——模型和用户都被卡在同一个地方。
+            //
+            // 只在"描述明显太薄"时这么做：写动作该拦还是要拦，回执不能因为模型话少就不给。
+            String callKey = plan.isToolCall() ? plan.toolName() + plan.toolArgs() : null;
+            boolean firstBlockedWrite = write && thinDraft(plan)
+                    && !(callKey != null && callKey.equals(blockedWrite));
+            Reply step;
+            if (firstBlockedWrite) {
+                blockedWrite = callKey;
+                step = Reply.text("（系统：这条写动作没有执行——它需要用户点头。"
+                        + "如果有参数或口径还没问清，趁现在问用户；问清了再调一次。）", slots);
+            } else if (write) {
+                // 写动作在循环里也只有一个去处：回执。不走 dispatchTool —— 那条路的
+                // "已拦下"是防线，不是正常路径；正常路径里用户根本不该看到一次工具事件。
+                ChatIntent writing = plan.call() == null ? ChatIntent.HELP : plan.call().intent();
+                String summary = plan.isToolCall() ? describeTool(plan) : describeCall(plan.call());
+                String text = narrator == null ? null : narrator.confirm(writing, summary, message);
+                step = Reply.text(text == null ? defaultConfirm(summary) : text,
+                        slots.withPending(CONFIRM_ACTION, pendingOf(plan, summary)));
+            } else if (plan.isReply()) {
+                step = Reply.text(plan.reply(), slots);
+            } else {
+                step = dispatch(scope, plan, slots, message, tools, sink);
+            }
+            slots = step.slots();
+            executed.set(plan.call() == null ? ChatIntent.HELP : plan.call().intent());
+            appendSaid(said, step.text());
+            if (!firstBlockedWrite) {
+                lastStepText = step.text();
+            }
+            if (plan.isReply()) {
+                modelSaid = step.text();
+            }
+            boolean awaitingConfirm = CONFIRM_ACTION.equals(slots.pendingAction());
+            if ((write && !firstBlockedWrite) || awaitingConfirm || plan.isReply() || hop >= limit) {
+                break;
+            }
+            java.util.Optional<io.github.dolow.reconlens.chat.plan.ChatPlan> next =
+                    planner.continueLoop(message, slots, facts, history, contextText, said.toString(), hop);
+            if (next.isEmpty()) {
+                break;
+            }
+            // 下一跳也是"模型给的判断"，用户要能看到——否则界面上只有第一跳的依据
+            plan = next.get();
+            sink.accept(ChatEvent.plan(plan));
+            sink.accept(ChatEvent.intent(plan.call() == null ? ChatIntent.HELP : plan.call().intent()));
+        }
+        if (modelSaid == null && lastStepText != null && hop < limit
+                && !CONFIRM_ACTION.equals(slots.pendingAction())) {
+            // 模型查完就收手、没给结论：再要一句人话。多花一次调用，换掉一整张表的原始输出——
+            // 实测里用户收到的是 bill_right 的六行列定义，而问题只是"资源指哪一列"。
+            appendSaid(said, "（系统：查到这里够了。用一两句话把结论告诉用户，不要再调工具。）");
+            java.util.Optional<io.github.dolow.reconlens.chat.plan.ChatPlan> wrap =
+                    planner.continueLoop(message, slots, facts, history, contextText, said.toString(), hop);
+            if (wrap.isPresent() && wrap.get().isReply()) {
+                modelSaid = wrap.get().reply();
+                sink.accept(ChatEvent.plan(wrap.get()));
+            }
+        }
+        log.info("自由循环结束 hops={} chars={}", hop, said.length());
+        // 模型自己说过话，就把它的判断给用户；它只查了没总结（跳数用尽），退回最后一步的输出，
+        // 免得用户这边一片空白。中间的每一步都进了 transcript，下一跳的模型看得见。
+        String visible = modelSaid != null ? modelSaid : lastStepText;
+        if (visible == null || visible.isBlank()) {
+            // 只有一种情况会走到这儿：第一拍就是一条被打回的薄写动作，模型也没接着说。
+            visible = "这一步还差点信息——把要处理的表和要比的字段补一句？";
+        }
+        return Reply.text(visible == null ? "" : visible.strip(), slots);
+    }
+
+    private static void appendSaid(StringBuilder said, String text) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
+        if (said.length() > 0) {
+            said.append("\n\n");
+        }
+        said.append(text.strip());
     }
 
     /**
@@ -349,7 +635,10 @@ public class ChatRuntime {
      */
     private Reply runGuarded(SessionScope scope, ChatIntentRouter.Call call, ChatSlots slots, List<String> tools) {
         try {
-            return dispatch(scope, call, slots, null, tools, event -> { });
+            // 表单是"用户点名动作 + 填了参数"的一次提交，等价于已经确认过——
+            // 再问一句"确认执行吗"只会让人点两次。聊天入口仍由 handle 里那道闸拦。
+            return dispatch(scope, io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.9, "表单动作"),
+                    slots, null, tools, event -> { }, true);
         } catch (SessionNotFoundException | SessionNotWritableException e) {
             throw e;
         } catch (RuntimeException e) {
@@ -374,23 +663,85 @@ public class ChatRuntime {
     }
 
     /**
-     * 写槽位，冲突就重读一次再写。
+     * 写槽位：冲突就回读最新一份、合并后再写，最多 {@value #SLOT_SAVE_ATTEMPTS} 次。
      *
-     * <p>冲突的来源：同一会话里两个人同时发消息（或一个人连发两条）。重试一次足够——槽位是个
-     * 小状态机，不是需要合并的文档；再冲突说明高频并发，让它盖过去并留一行 WARN 比无限重试更诚实。
+     * <p>冲突的来源：同一会话里两个人同时发消息（或一个人连发两条）。
+     * <b>为什么不能只重试一次并且原样覆盖</b>：两个人同时说话时，A 刚把焦点切到任务 7，
+     * B 这一轮还拿着旧 rev 和旧 jobId，直接覆盖等于把 A 的焦点抹掉——用户看到的是"刚说的它忘了"，
+     * 而库里没有任何痕迹可查。
+     *
+     * <p>合并规则在 {@link ChatSlots#mergeWith(ChatSlots)}：本轮写过的字段覆盖，其余取最新，
+     * 半句话（pending）以本轮为准。仍然冲突到第三次，说明吞吐已经超过"槽位"这个粒度的设计意图，
+     * 留一行 WARN 比无限重试更诚实。
      */
     private boolean saveSlotsWithRetry(SessionScope scope, long sessionId, int rev, ChatSlots slots) {
-        String payload = writeSlots(slots);
-        if (sessions.saveSlots(scope, sessionId, rev, payload)) {
+        ChatSlots mine = slots;
+        if (sessions.saveSlots(scope, sessionId, rev, writeSlots(mine))) {
             return true;
         }
-        ChatSession fresh = sessions.require(scope, sessionId);
-        if (sessions.saveSlots(scope, sessionId, fresh.stateRev(), payload)) {
-            log.info("槽位并发写入已重试成功 session={} rev={}", sessionId, rev);
-            return true;
+        for (int attempt = 2; attempt <= SLOT_SAVE_ATTEMPTS; attempt++) {
+            ChatSession fresh = sessions.require(scope, sessionId);
+            // 回读最新再合并：直接盖掉最新那份，等于把别人刚切过去的焦点抹掉（用户看到的是"它忘了"）。
+            mine = mine.mergeWith(readSlots(fresh));
+            if (sessions.saveSlots(scope, sessionId, fresh.stateRev(), writeSlots(mine))) {
+                log.info("槽位并发写入已重试成功 session={} rev={} attempt={}", sessionId, rev, attempt);
+                return true;
+            }
         }
-        log.warn("槽位并发写冲突，本轮槽位未落库 session={} rev={}", sessionId, rev);
+        log.warn("槽位并发写冲突 {} 次仍未落库 session={} rev={}", SLOT_SAVE_ATTEMPTS, sessionId, rev);
         return false;
+    }
+
+    /**
+     * 「第二步」：上一步是读动作、且开关打开时，问规划器还差不差一个动作。
+     *
+     * <p>三条硬约束写在这里，不写在提示词里（提示词是建议，这里是闸）：
+     * <ol>
+     *   <li>写动作不续跑——回执必须等用户说"确认"，续跑等于绕过回执；</li>
+     *   <li>第二步也只能是读动作——就算模型硬给了一个 RUN，这里直接丢掉；</li>
+     *   <li>第二步失败不影响第一步——已经拿到的结果照常回给用户。</li>
+     * </ol>
+     *
+     * <p>叙述只做一次：合并后的文本在 {@link #handle} 里统一过 {@link #narrate}。
+     * 分两次叙述会让用户听到两句"总结"，而第二句是在总结第一句的总结。
+     */
+    private Reply followUp(SessionScope scope, long sessionId, String message,
+                           ContextFacts facts, ChatIntentRouter.Call call, Reply first,
+                           List<String> tools, Consumer<ChatEvent> sink,
+                           java.util.concurrent.atomic.AtomicReference<ChatIntent> executed) {
+        if (call.intent().isWrite()) {
+            return first;
+        }
+        io.github.dolow.reconlens.chat.plan.ChatPlan done =
+                io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 1.0, "上一步");
+        java.util.Optional<io.github.dolow.reconlens.chat.plan.ChatPlan> next =
+                planner.continuePlan(message, first.slots(), facts, done, first.text());
+        if (next.isEmpty()) {
+            // 常见情况：模型判定这一步已经收尾，或两步环没开（词表规划器永远返回空）
+            log.debug("两步环：没有第二步 session={} 第一步={}（模型判 done / 开关关闭 / 模型不可用）",
+                    sessionId, call.intent());
+            return first;
+        }
+        ChatIntent second = next.get().call().intent();
+        if (second == ChatIntent.HELP || second.isWrite() || second == call.intent()) {
+            log.debug("两步环：第二步被拒 session={} 第一步={} 第二步={} 原因={}", sessionId, call.intent(), second,
+                    second == ChatIntent.HELP ? "模型给了 HELP"
+                            : second.isWrite() ? "第二步是写动作（写动作用户得自己确认）" : "与第一步相同");
+            return first;
+        }
+        log.info("两步环：接着做第二步 session={} {} → {}", sessionId, call.intent(), second);
+        // 先推"接着做哪一步"，再执行：控制台上看得到这一轮其实发生了两次动作
+        executed.set(second);
+        sink.accept(ChatEvent.plan(next.get()));
+        sink.accept(ChatEvent.intent(second));
+        Reply extra;
+        try {
+            extra = dispatch(scope, next.get(), first.slots(), message, tools, sink);
+        } catch (RuntimeException e) {
+            log.warn("第二步没做成，已拿到的结果照常返回 session={} intent={}", sessionId, second, e);
+            return first;
+        }
+        return Reply.text(first.text() + "\n\n———— 接着把下一步也做了：" + extra.text(), extra.slots());
     }
 
     /**
@@ -398,6 +749,23 @@ public class ChatRuntime {
      * 审计看到的是工具真实返回，模型只影响"怎么读"。
      */
     private Reply narrate(Reply reply, ChatIntent intent, String message) {
+        return narrate(reply, intent, message, false);
+    }
+
+    /**
+     * @param verbatim 逐字返回，不过总结层、也不做 agent 尾巴清理。
+     *                 只给两种回复用：模型自己写的 reply，和 {@code IntentReview} 的守卫话术——
+     *                 后者是"我先不动手"的证据，改写它等于把证据换成了承诺。
+     */
+    private Reply narrate(Reply reply, ChatIntent intent, String message, boolean verbatim) {
+        if (verbatim) {
+            return reply;
+        }
+        // 带 YAML 骨架的回执是"待确认的正式文本"：改一个字段就是要落库的东西。
+        // 实测里总结层给它添过一个用户没说过的"以 updated_at 为准"——结构化内容一律不许改写。
+        if (reply.text() != null && reply.text().contains("```yaml")) {
+            return reply;
+        }
         // 规则清单已经是按 lifecycle 写好的人话；再交给总结模型只会把"调 recon_xxx"带回来
         if (intent == ChatIntent.LIST_RULES) {
             return reply;
@@ -642,13 +1010,48 @@ public class ChatRuntime {
      * 这一点很重要：用户在确认前改主意说「等等，先看一下差异」，不能被当成"确认"，
      * 也不能被待确认状态挡住。
      */
+    /**
+     * 这句话是不是一句干脆的取消。
+     *
+     * <p>三条都要满足：不能太长、不能带疑问标记、句首就是否定词。
+     * 「不是三个维度吗」这种反问被排除在取消之外——用户是在质疑理解，不是撤单。
+     */
+    static boolean isCancel(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String t = text.strip();
+        if (t.length() > 12) {
+            return false;
+        }
+        if (QUESTION.matcher(t).find()) {
+            return false;
+        }
+        return NEGATE.matcher(t).find();
+    }
+
+    /** 这句话是不是在指"刚才/上面"那一段——本会话没有它，就说明上下文断了。 */
+    private static boolean refersToEarlier(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        return java.util.regex.Pattern.compile("刚才|刚刚|上一条|上面|前面那|那个|那次|继续|接着")
+                .matcher(text).find();
+    }
+
+    /** 回执里引用用户原话时截短，别把一整段 YAML 贴回去。 */
+    private static String brief(String text) {
+        String t = text == null ? "" : text.strip().replaceAll("\\s+", " ");
+        return t.length() <= 24 ? t : t.substring(0, 24) + "…";
+    }
+
     private Confirmed handleConfirm(SessionScope scope, long sessionId, ChatSlots slots, String message,
                                     List<String> tools, Consumer<ChatEvent> sink, int userSeq) {
         String text = message == null ? "" : message.trim();
         if (text.isEmpty()) {
             return null;
         }
-        if (NEGATE.matcher(text).find()) {
+        if (isCancel(text)) {
             // 「不是，是 CUSTOMER_STATUS_RECON」：这是在改主意，不是在取消
             if (ruleCodeMentioned(text) != null) {
                 return null;
@@ -659,16 +1062,31 @@ public class ChatRuntime {
         if (!AFFIRM.matcher(text).find()) {
             return null;
         }
-        ChatIntentRouter.Call call = callOf(slots.pendingArgs());
-        if (call == null) {
-            return new Confirmed(Reply.text("这个操作我记不清了，请再说一遍要做什么。", slots.clearPending()),
-                    ChatIntent.HELP);
+        // 确认之后要还原的可能是两种东西：老路径的 Call，或者模型点名的工具。
+        // 工具必须连参数一起还原——回执只问了"要不要做"，参数是上一轮模型给的，
+        // 用户确认的是那组参数，不能确认完再让工具自己去猜。
+        io.github.dolow.reconlens.chat.plan.ChatPlan plan;
+        ChatIntentRouter.Call call;
+        String pendingTool = slots.pendingArgs().get("tool");
+        if (pendingTool != null && !pendingTool.isBlank()) {
+            Map<String, String> toolArgs = readToolArgs(slots.pendingArgs().get("toolArgs"));
+            call = io.github.dolow.reconlens.chat.plan.ToolCallPlanner.callFor(pendingTool, toolArgs);
+            plan = io.github.dolow.reconlens.chat.plan.ChatPlan.tool(call, pendingTool, toolArgs, 0.95,
+                    "已确认：" + slots.pendingArgs().getOrDefault("summary", "执行 " + pendingTool),
+                    io.github.dolow.reconlens.chat.plan.ChatPlan.Evidence.CONSISTENT);
+        } else {
+            call = callOf(slots.pendingArgs());
+            if (call == null) {
+                return new Confirmed(Reply.text("这个操作我记不清了，请再说一遍要做什么。", slots.clearPending()),
+                        ChatIntent.HELP);
+            }
+            // 让用户看到"确认的到底是哪一件"，再动手
+            plan = io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.95,
+                    "已确认：" + slots.pendingArgs().getOrDefault("summary", describeCall(call)));
         }
-        // 让用户看到"确认的到底是哪一件"，再动手
-        sink.accept(ChatEvent.plan(io.github.dolow.reconlens.chat.plan.ChatPlan.keyword(call, 0.95,
-                "已确认：" + slots.pendingArgs().getOrDefault("summary", describeCall(call)))));
+        sink.accept(ChatEvent.plan(plan));
         sink.accept(ChatEvent.intent(call.intent()));
-        Reply reply = dispatch(scope, call, slots.clearPending(), text, tools, sink);
+        Reply reply = dispatch(scope, plan, slots.clearPending(), text, tools, sink, true);
         recordDraftIfNeeded(sessionOrNull(scope, sessionId), sessionId, call, reply,
                 slots.pendingArgs().get("spoken"), userSeq);
         return new Confirmed(Reply.text(reply.text(), reply.slots().clearPending()), call.intent());
@@ -710,6 +1128,66 @@ public class ChatRuntime {
         return args;
     }
 
+    /**
+     * 工具版回执：除了 {@link #pendingOf(ChatIntentRouter.Call, String)} 的字段，还记下工具名与参数。
+     *
+     * <p>参数用的是模型给的那一份，原样存成 JSON。确认之后不再重算——重算等于让工具
+     * 自己再猜一遍参数，"确认"就名不副实了。
+     */
+    private Map<String, String> pendingOf(io.github.dolow.reconlens.chat.plan.ChatPlan plan, String summary) {
+        Map<String, String> args = pendingOf(plan.call(), summary);
+        if (!plan.isToolCall()) {
+            return args;
+        }
+        try {
+            args.put("toolArgs", json.writeValueAsString(plan.toolArgs()));
+            args.put("tool", plan.toolName());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            // 存不下参数就别存工具名：按 Call 还原虽然会丢参数，但至少不会"确认了却调错"
+            log.warn("暂存工具参数失败 tool={}", plan.toolName(), e);
+        }
+        return args;
+    }
+
+    /**
+     * 回执文案里的"这一步要做什么"。
+     *
+     * <p>不能报工具名：{@code recon_draft_rule} 是给宿主大模型看的注册名，人看到的是
+     * "执行 recon_draft_rule"这种内部术语（实测用户当场问"这是什么"）。工具的意图映射能为空
+     * （Agent 系工具没有对应枚举），所以这里留一张中文话术表，认不出的工具退化成不带名字的一句。
+     */
+    private static String describeTool(io.github.dolow.reconlens.chat.plan.ChatPlan plan) {
+        ChatIntentRouter.Call call = plan.call();
+        if (call != null && call.intent() != ChatIntent.HELP) {
+            return describeCall(call);
+        }
+        String ruleCode = plan.toolArgs().get("ruleCode");
+        String table = plan.toolArgs().get("table");
+        String tail = ruleCode != null ? " " + ruleCode : (table != null ? " " + table : "");
+        return switch (plan.toolName()) {
+            case ToolNames.DRAFT_RULE -> "起草一条对账规则";
+            case ToolNames.RUN -> "跑一次对账" + tail;
+            case ToolNames.SUBMIT_APPROVAL -> "把这条草稿提交审批";
+            case ToolNames.REGISTER_TABLE -> "把一张表登记进对账范围" + tail;
+            case ToolNames.IMPORT_FILE -> "导入一个数据文件" + tail;
+            case ToolNames.TRIAL_STATUS -> "看起草与试算的进度";
+            default -> "做这一步";
+        };
+    }
+
+    /** 回执里存下来的参数（JSON 对象）。坏数据当空参数，由工具自己校验并报错。 */
+    private Map<String, String> readToolArgs(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Map.of();
+        }
+        try {
+            return json.readValue(raw, new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() { });
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            log.warn("暂存的工具参数读不出来 raw={}", raw, e);
+            return Map.of();
+        }
+    }
+
     /** 一句话说清楚"这一下会做什么"（模型挂了也能用的兜底）。 */
     private static String describeCall(ChatIntentRouter.Call call) {
         return switch (call.intent()) {
@@ -726,44 +1204,86 @@ public class ChatRuntime {
     }
 
     /**
-     * 写操作要不要先确认。
+     * 模型给的起草描述是不是"太薄"——只有意图，没有表、键、字段。
      *
-     * <p>判据不是"是不是写"，而是"**参数是不是用户自己说出来的**"：
-     * 用户点名了规则（「跑一下 BILL_VS_SETTLE」）说明他知道自己在做什么，直接执行；
-     * 靠事实/槽位/唯一候选补出来的参数，就得让他再看一眼。
+     * <p>只用来决定"这一拍要不要先把话退给模型"，不是参数校验：真正的校验在 Agent 的闸门里。
+     * 40 这个数取的是"一句话里至少说清了对哪两张表、按什么键"——实测里
+     * 「按订单、资源对账」是 9 个字，模型补完表的问法之后回的是 60 多字的结构化描述。
      */
-    private static boolean needsWriteConfirm(ChatIntentRouter.Call call, String message) {
-        if (call == null || !call.intent().isWrite()) {
+    private static boolean thinDraft(io.github.dolow.reconlens.chat.plan.ChatPlan plan) {
+        if (!plan.isToolCall() || !ToolNames.DRAFT_RULE.equals(plan.toolName())) {
             return false;
         }
-        switch (call.intent()) {
-            case RUN, BUILD_MODEL -> {
-                if (call.ruleCode() == null) {
-                    return false;   // 缺参数：交给各自的"要跑哪条"反问
-                }
-            }
-            case RETRY -> {
-                if (call.jobId() == null) {
-                    return false;
-                }
-            }
-            case DEFINE_RULE -> {
-                // 还没收齐参数时不能确认——那正是要一句句问的时候。
-                // 收齐之后由 draftStep 自己生成骨架再问确认（那里才知道要落什么）。
-                if (call.ruleBody() == null || call.ruleBody().isBlank()) {
-                    return false;
-                }
-            }
-            default -> { }
+        String desc = plan.toolArgs().get("businessDescription");
+        return desc != null && desc.strip().length() < 40;
+    }
+
+    /**
+     * 写动作的统一判据（工具形态与意图形态共用）。
+     *
+     * <p>参数没齐时不回执——那正是要一句句问的时候，先问参数再问确认，不能问两遍。
+     * 参数齐了就一律回执，**不看用户原话里有没有点名规则**：那句话在工具形态下照样会回执，
+     * 两种形态必须给人同一种回答，否则"问不问"变成模型今天选哪种 JSON 的运气。
+     *
+     * <p>起草是例外，它不是一次动作：先要把两张表、业务键、比对字段问清楚。那种"问"由
+     * {@code draftStep} 自己带着（收齐后给出骨架再请确认），所以这里不提前拦一道。
+     */
+    private static boolean writeAction(io.github.dolow.reconlens.chat.plan.ChatPlan plan) {
+        if (plan.isToolCall()) {
+            return !ToolNames.DRAFT_RULE.equals(plan.toolName())
+                    && ToolNames.WRITES.contains(plan.toolName());
         }
-        String upper = message == null ? "" : message.toUpperCase(java.util.Locale.ROOT);
-        if (call.ruleCode() != null && upper.contains(call.ruleCode().toUpperCase(java.util.Locale.ROOT))) {
+        return plan.call() != null && writeReady(plan.call());
+    }
+
+    /** 意图形态的"参数齐了"：缺参时交给各分支自己的追问，不在这里拦。 */
+    private static boolean writeReady(ChatIntentRouter.Call call) {
+        if (!call.intent().isWrite()) {
             return false;
         }
-        if (call.jobId() != null && message != null && message.contains(String.valueOf(call.jobId()))) {
-            return false;
+        return switch (call.intent()) {
+            case RUN, BUILD_MODEL -> call.ruleCode() != null;
+            case RETRY -> call.jobId() != null;
+            // 还没收齐参数时不能确认——那正是要一句句问的时候。
+            // 收齐之后由 draftStep 自己生成骨架再问确认（那里才知道要落什么）。
+            case DEFINE_RULE -> call.ruleBody() != null && !call.ruleBody().isBlank();
+            default -> false;
+        };
+    }
+
+    /**
+     * 最近几轮**对话**（从旧到新，用户与助手都在），只给自由循环用。
+     *
+     * <p>助手那侧只留前 120 字：它是"我上一轮说了什么"，用来避免同一个问题问两遍、
+     * 同一张表查两遍；整段工具输出留在当轮的 transcript 里就够了，跨轮再带一遍纯属烧 token。
+     */
+    private List<String> recentDialogue(SessionScope scope, long sessionId, int limit) {
+        try {
+            List<ChatTurn> turns = sessions.turns(scope, sessionId);
+            List<String> out = new ArrayList<>();
+            int seenUser = 0;
+            for (int i = turns.size() - 1; i >= 0 && seenUser < limit; i--) {
+                ChatTurn turn = turns.get(i);
+                String content = turn.content();
+                if (content == null || content.isBlank()) {
+                    continue;
+                }
+                if ("user".equals(turn.role())) {
+                    seenUser++;
+                    out.add(0, "用户：" + content);
+                } else if ("assistant".equals(turn.role())) {
+                    String clipped = content.strip();
+                    if (clipped.length() > 120) {
+                        clipped = clipped.substring(0, 120) + "…";
+                    }
+                    out.add(0, "助手：" + clipped);
+                }
+            }
+            return out;
+        } catch (RuntimeException e) {
+            log.debug("读会话历史失败 session={}", sessionId, e);
+            return List.of();
         }
-        return true;
     }
 
     /**
@@ -952,6 +1472,22 @@ public class ChatRuntime {
         return call;
     }
 
+    /** 这句话有没有给起草补上新参数（表名、列名、业务键都算）。比的是"和上一轮比变了没有"。 */
+    private boolean parsesAsDraftAnswer(String message, ChatSlots slots, List<String> tools) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        try {
+            List<String> tables = tableNames(call(ToolNames.LIST_TABLES, java.util.Map.of(), tools).text());
+            DraftIntake.Hints prior = DraftIntake.Hints.from(slots.pendingArgs());
+            return !DraftIntake.parse(message, tables, prior).equals(prior);
+        } catch (RuntimeException e) {
+            // 读表失败不该把这一轮变成"抢话题"：按"没补上参数"处理，走模型那条路
+            log.debug("起草参数试探失败 message={}", message, e);
+            return false;
+        }
+    }
+
     /** 这句话里提到的、规则库真实存在的规则编码。 */
     private String ruleCodeMentioned(String message) {
         String upper = message.toUpperCase(java.util.Locale.ROOT);
@@ -967,8 +1503,56 @@ public class ChatRuntime {
         return null;
     }
 
-    private Reply dispatch(SessionScope scope, ChatIntentRouter.Call call, ChatSlots slots,
+    private Reply dispatch(SessionScope scope, io.github.dolow.reconlens.chat.plan.ChatPlan plan, ChatSlots slots,
                            String message, List<String> tools, Consumer<ChatEvent> sink) {
+        return dispatch(scope, plan, slots, message, tools, sink, false);
+    }
+
+    /**
+     * @param confirmed 这次调用是用户点头之后发起的（确认回执的下半程）。只有它能为真，
+     *                  写工具的防线才会让路——否则"确认"会被再要一次确认，套娃。
+     */
+    private Reply dispatch(SessionScope scope, io.github.dolow.reconlens.chat.plan.ChatPlan plan, ChatSlots slots,
+                           String message, List<String> tools, Consumer<ChatEvent> sink, boolean confirmed) {
+        // 工具是先于意图的一等动作：模型点了哪个工具就执行哪个，不再反推成枚举再走固定分支。
+        // 这条分支放在守卫之前是有意的——守卫是"词表既然分不清这是问还是做"的补丁，
+        // 而模型已经用 name+args 说清楚了要做什么，再拿它去拦只会把合法的工具调用变成反问。
+        if (plan.isToolCall()) {
+            // 起草不是一个"点一下就完"的工具：一句"按订单、资源对账"里没有表、没有键，
+            // 直接开后台起草只会拿一份猜出来的骨架去试算。词表形态下模型点了 recon_draft_rule，
+            // 就把它接到同一条收集路径（defineRule → draftStep）：先问表、再翻列，
+            // 翻不出来的字段点名问，收齐了把骨架摆出来请确认。
+            //
+            // 自由循环里不接：那头是模型自己在收参数（它自己查列、自己问）。
+            // 两条状态机同时跑，实测会互相踩——模型问「资源是哪一列」、收集器同时问
+            // 「左侧用哪张表」，用户看到两个声音；用户回给模型的那句又进不了收集器。
+            if (!mode.loop() && ToolNames.DRAFT_RULE.equals(plan.toolName())) {
+                ChatIntentRouter.Call draft = new ChatIntentRouter.Call(
+                        ChatIntent.DEFINE_RULE, null, null, null, null, null, null);
+                return defineRule(scope, draft, slots, message, tools, sink);
+            }
+            return dispatchTool(plan, slots, tools, sink, confirmed);
+        }
+        if (plan.isReply()) {
+            return Reply.text(plan.reply(), slots);
+        }
+        ChatIntentRouter.Call call = plan.call();
+        // 意图形态的写动作也要停在回执：这里的 execute 分支是"确认之后"才应该走到的地儿。
+        // 与 dispatchTool 里的那道一样，它是防线而不是入口——入口在 handle 里已经拦了，
+        // 但第二步、表单、以及其他调用方都从这里进，漏一个就是"没点头就跑了"。
+        if (!confirmed && writeReady(call)) {
+            log.warn("意图写动作绕过了回执，已拦下 intent={} ruleCode={} jobId={}",
+                    call.intent(), call.ruleCode(), call.jobId());
+            String summary = describeCall(call);
+            return Reply.text(defaultConfirm(summary),
+                    slots.withPending(CONFIRM_ACTION, pendingOf(plan, summary)));
+        }
+        // 执行前的事实复核：把"这是问我、还是要我做"这一步从词表/模型手里拿回来。
+        // 挡在这里是因为它是所有执行路径的唯一收口（主路径、第二步、表单、确认后执行都走它）。
+        String question = io.github.dolow.reconlens.chat.plan.IntentReview.question(message, call.intent());
+        if (question != null) {
+            return Reply.text(question, slots);
+        }
         return switch (call.intent()) {
             case HELP -> Reply.text(helpText(), slots);
             case LIST_RULES -> listRules(slots, tools, sink, message);
@@ -986,6 +1570,84 @@ public class ChatRuntime {
             case TRIAL_STATUS -> trialStatus(call, slots);
             case APPROVE -> Reply.text(approveText(call, slots), slots);
         };
+    }
+
+    /**
+     * 模型直接点名的工具：查名字、执行、把工具原话当正文。
+     *
+     * <p>与各动作分支的区别只有一点：<b>没有中间那层"意图 → 固定实现"的映射</b>。
+     * 分支里每句话都是手写的参数拼装（"用槽位里的 ruleCode 补"之类），工具路径的参数
+     * 全部来自模型，所以这里不做任何补全——它说什么就调什么，剩下的交给工具自己的校验。
+     */
+    private Reply dispatchTool(io.github.dolow.reconlens.chat.plan.ChatPlan plan, ChatSlots slots,
+                               List<String> tools, Consumer<ChatEvent> sink, boolean confirmed) {
+        String name = plan.toolName();
+        java.util.Map<String, String> args = plan.toolArgs();
+        // 防线，不是入口：写动作在 handle 里已经变成回执了。真走到这里，说明有路径漏了闸，
+        // 宁可再要一次确认，也不能在没人点头的时候改数据。
+        if (!confirmed && ToolNames.WRITES.contains(name)) {
+            log.warn("工具写动作绕过了回执，已拦下 tool={} args={}", name, args);
+            String summary = describeTool(plan);
+            sink.accept(ChatEvent.tool(name, "已拦下：写动作要先确认"));
+            return Reply.text(defaultConfirm(summary),
+                    slots.withPending(CONFIRM_ACTION, pendingOf(plan, summary)));
+        }
+        java.util.Optional<io.github.dolow.reconlens.tool.ToolSpec> spec = registry.find(name);
+        if (spec.isEmpty()) {
+            log.warn("模型点了一个不存在的工具 tool={}", name);
+            sink.accept(ChatEvent.tool(name, "没有这个工具"));
+            return Reply.text("模型想调「" + name + "」，但工具清单里没有它，这次没有执行。", slots);
+        }
+        java.util.Map<String, Object> callArgs = new LinkedHashMap<>(args);
+        tools.add(name);
+        ToolOutcome out;
+        try {
+            out = spec.get().invoke(callArgs);
+        } catch (RuntimeException e) {
+            log.warn("模型选的工具执行失败 tool={} args={}", name, args, e);
+            sink.accept(ChatEvent.tool(name, "执行失败"));
+            String reason = e.getMessage() == null || e.getMessage().isBlank()
+                    ? e.getClass().getSimpleName()
+                    : e.getMessage();
+            return Reply.text("「" + name + "」没做成：" + reason, slots);
+        }
+        String firstLine = out.text() == null ? "" : out.text().lines().findFirst().orElse("");
+        sink.accept(ChatEvent.tool(name, firstLine));
+        // 参数里带的焦点写回槽位：下一句「那第 3 条呢」靠它接得上，否则每轮都得重新报 id
+        return Reply.text(out.text(), focusOf(slots, plan));
+    }
+
+    /** 工具参数 → 槽位焦点。只认四个字段，其余参数（limit 之类）不是焦点。 */
+    private static ChatSlots focusOf(ChatSlots slots, io.github.dolow.reconlens.chat.plan.ChatPlan plan) {
+        ChatSlots next = slots;
+        String ruleCode = plan.toolArgs().get("ruleCode");
+        if (ruleCode != null && !ruleCode.isBlank()) {
+            next = next.withRuleCode(ruleCode);
+        }
+        Long jobId = parseId(plan.toolArgs().get("jobId"));
+        if (jobId != null) {
+            next = next.withJobId(jobId);
+        }
+        Long diffId = parseId(plan.toolArgs().get("diffId"));
+        if (diffId != null) {
+            next = next.withDiffId(diffId);
+        }
+        String table = plan.toolArgs().get("table");
+        if (table != null && !table.isBlank()) {
+            next = next.withTable(table);
+        }
+        return next;
+    }
+
+    private static Long parseId(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     /**
@@ -1105,6 +1767,7 @@ public class ChatRuntime {
 
     private Reply defineRule(SessionScope scope, ChatIntentRouter.Call call, ChatSlots slots, String message,
                              List<String> tools, Consumer<ChatEvent> sink) {
+        call = withLocalRuleBody(call, message);
         if (call.ruleBody() == null || call.ruleBody().isBlank()) {
             return draftStep(scope, call, slots, message, tools, sink);
         }
@@ -1114,6 +1777,30 @@ public class ChatRuntime {
         String text = ChatSpeech.defineRule(outcome);
         String code = firstNonNull(call.ruleCode(), codeOfBody(call.ruleBody()));
         return Reply.text(text, code == null ? slots : slots.withRuleCode(code).clearPending());
+    }
+
+    /**
+     * 补回被模型路由丢掉的规则正文。
+     *
+     * <p>为什么放在这里而不是让模型带上：{@code LlmPlanner} 的输出只有意图与槽位，
+     * 它复述 YAML 既没必要（正文本来就在用户消息里）也不可靠（八百行抄一遍必错）。
+     * 词表路由走的是 {@link ChatIntentRouter#ruleBody}，两条路径的正文必须来自<b>同一个</b>确定性提取器，
+     * 否则"用户贴的规则到底有没有被采用"会随路由方式变化——这正是"贴了 YAML 却只回了左右两张表、
+     * 还反问业务键"的成因。
+     *
+     * <p>只在 {@code DEFINE_RULE} 且正文为空时补，已带正文的（比如起草骨架确认那一步）原样不动。
+     */
+    static ChatIntentRouter.Call withLocalRuleBody(ChatIntentRouter.Call call, String message) {
+        if (call == null || call.intent() != ChatIntent.DEFINE_RULE
+                || (call.ruleBody() != null && !call.ruleBody().isBlank())) {
+            return call;
+        }
+        String body = ChatIntentRouter.ruleBody(message);
+        if (body == null || body.isBlank()) {
+            return call;
+        }
+        return new ChatIntentRouter.Call(call.intent(), call.ruleCode(), call.jobId(), call.diffId(),
+                call.diffType(), body, call.table());
     }
 
     /**
@@ -1131,10 +1818,30 @@ public class ChatRuntime {
         List<String> tables = tableNames(listing);
         DraftIntake.Hints prior = DraftIntake.Hints.from(slots.pendingArgs());
         DraftIntake.Hints hints = DraftIntake.parse(message, tables, prior);
+        // 上一轮问过「「日期」在列里没找到，是去掉还是对应哪一列？」：这一句如果点了列名，
+        // 就是那道问的答案，补进维度再往下走——否则用户答了等于没答（实测「就用 updated_at 吧」被无视）。
+        String hinted = slots.pendingArgs().get("hinted");
+        if (hinted != null && !hinted.isBlank() && message != null && !message.isBlank()) {
+            String forTable = hints.left() != null ? hints.left() : prior.left();
+            List<String> cols = forTable == null ? List.of() : columnsOf(forTable, tools);
+            String column = cols.isEmpty() ? null : columnIn(message, cols);
+            if (column != null) {
+                hints = withExtraKey(hints, column);
+                log.info("起草：上一轮问的「{}」对上了列 {}，补进维度", hinted, column);
+            }
+        }
         // 「翻一下顺序」这种话是对调，不是参数；回显要说清楚已经调了，否则看起来像没听见
         boolean swapped = prior.left() != null && prior.right() != null
                 && !prior.left().equals(prior.right())
                 && prior.left().equals(hints.right()) && prior.right().equals(hints.left());
+        // 左侧已经收下、只差右侧时，句子里单说的那张表是"右"，不是"左"。
+        // 解析器不知道上一问问的是哪一边：它一律把第一张表当左，于是「bill_right」会把左覆盖掉，
+        // 最后收出"左 bill_right，右 bill_right"——按同一张表对账，永远 0 差异。
+        boolean noSideWord = message != null && !message.contains("左") && !message.contains("右");
+        if (noSideWord && prior.left() != null && prior.right() == null && hints.right() == null
+                && hints.left() != null && !hints.left().equals(prior.left())) {
+            hints = hints.withSides(prior.left(), hints.left());
+        }
         // 「就这两个吧」：没有表名，指的是上一句刚列的候选。只有在这种指代明确时才替用户选。
         if (hints.left() == null && hints.right() == null && refersToCandidates(message) && tables.size() >= 2) {
             hints = hints.withTables(tables.get(0), tables.get(1));
@@ -1143,7 +1850,33 @@ public class ChatRuntime {
         // 不能只在有 hint 时做——用户也可能直接说「比金额」，那同样需要翻译。
         if (hints.left() != null) {
             hints = hints.resolveFrom(columnsOf(hints.left(), tools));
+            // 点名的字段翻不成列名时**先确认，不静默丢**：用户说"客户、订单、地区"，
+            // 表里没有地区，替他删掉这一维等于改了规则口径，而他毫不知情。
+            if (hints.hint() != null && !hints.hint().isBlank()) {
+                List<String> cols = columnsOf(hints.left(), tools);
+                String ask = "「" + hints.hint() + "」在 " + hints.left() + " 的列里没找到（现有："
+                        + String.join("、", cols) + "）。\n是要去掉这一维，还是它对应哪一列？"
+                        + "\n（你不回的话，这一维就先不写进规则——改主意随时说列名。）";
+                // 这一问也要落进槽位：否则用户下一句「bill_right」会被当成又一句新需求，
+                // 已经收到的左侧表当场丢掉（实测：追问字段之后整段收集从头再来）。
+                // 落进去的那份要**先摘掉认不出的词**，不然下一轮 resolveFrom 会拿它再问一遍。
+                Map<String, String> askPending = new LinkedHashMap<>(hints.withoutHint().toMap());
+                askPending.put("question", ask);
+                // 把认不出的那个词记下来：下一句点列名时才知道它是在回答哪一问
+                askPending.put("hinted", hints.hint());
+                String spokenSoFar = mergeSpoken(slots.pendingArgs().get("spoken"),
+                        DraftIntake.spokenWords(message));
+                if (!spokenSoFar.isBlank()) {
+                    askPending.put("spoken", spokenSoFar);
+                }
+                return Reply.text(ask, slots.withPending(DraftIntake.ACTION, askPending));
+            }
         }
+        // 用户这一路的原话（"订单和状态"、"金额"）每轮都攒进 pending：
+        // 它只在落库后当账本锚点用，不参与 YAML 生成。攒晚了（只在确认那一步攒）
+        // 就会漏掉前面几轮的口述——实测踩过：label 里只剩列名，用户说"那条订单对状态的"永远对不上。
+        String spoken = mergeSpoken(slots.pendingArgs() == null ? null : slots.pendingArgs().get("spoken"),
+                DraftIntake.spokenWords(message));
         // 这一句是不是在回答上一问。顺序：模型先接（「订单和状态」这种说法词表翻不出来），
         // 接不住再用裸值兜底（没 key 的部署、「order_no」这种一个词的回答必须仍能工作）。
         if (slots.hasPending() && !hints.complete()) {
@@ -1153,6 +1886,40 @@ public class ChatRuntime {
                 hints = DraftIntake.answer(message, hints, missing, columnsFor(hints, tools));
             }
         }
+        // 模型补进来的槽位必须"用户自己的话指得到"。它很擅长把"日期"认成 updated_at：
+        // 列是真的，可用户没这么说，写进骨架就是替他改口径——实测里 alice 说的"消费日期"
+        // 被写成 updated_at，下一句纠正也照旧。这里问一句，不静默写。
+        String guessMark = slots.pendingArgs() == null ? null : slots.pendingArgs().get("guessed");
+        boolean guessAccepted = guessMark != null && acceptsGuess(message);
+        if (guessMark != null && !guessAccepted && rejectsGuess(message)) {
+            hints = hints.withoutColumns(java.util.Arrays.asList(guessMark.split("、")));
+            guessAccepted = true;
+        }
+        List<String> fresh = new ArrayList<>(hints.keyColumns());
+        fresh.removeAll(prior.keyColumns());
+        if (hints.compare() != null && !hints.compare().equals(prior.compare())) {
+            fresh.add(hints.compare());
+        }
+        List<String> guessed = guessAccepted
+                ? List.of()
+                : hints.untraceable(fresh, (message == null ? "" : message) + " " + spoken,
+                        columnsFor(hints, tools));
+        if (!guessed.isEmpty()) {
+            List<String> cols = columnsFor(hints, tools);
+            String colHint = cols.isEmpty() ? "" : "（现有：" + String.join("、", cols) + "）";
+            String ask = "「" + String.join("、", guessed) + "」表里是有的，但你刚才那句话里没有能对上它的说法。\n"
+                    + "我准备就按它写；是的话回「是」，不对就说列名" + colHint + "，或者回「去掉」。";
+            // 猜的那几列先留在槽位里，但打个标记：下一轮只有用户点头（或否掉）才往下走，
+            // 这样"是"之后不用把同一句再问一遍，丢掉又捡不回来。
+            Map<String, String> askPending = new LinkedHashMap<>(hints.toMap());
+            askPending.put("guessed", String.join("、", guessed));
+            askPending.put("question", ask);
+            if (!spoken.isBlank()) {
+                askPending.put("spoken", spoken);
+            }
+            log.info("起草：模型补的列用户在话里没提过，先问一句 {}", guessed);
+            return Reply.text(ask, slots.withPending(DraftIntake.ACTION, askPending));
+        }
         // 按 key 比 key 永远 0 差异：这不是“能跑”的规则，是“假成功”。
         // 把比对字段退回去再问一次，并告诉用户为什么——只说“无效”等于没说。
         String overlap = hints.compareInKey();
@@ -1160,10 +1927,7 @@ public class ChatRuntime {
         if (overlap != null) {
             hints = hints.withoutCompare();
         }
-        // 用户这一路的原话（"订单和状态"、"金额"）每轮都攒进 pending：
-        // 它只在落库后当账本锚点用，不参与 YAML 生成。攒晚了（只在确认那一步攒）
-        // 就会漏掉前面几轮的口述——实测踩过：label 里只剩列名，用户说"那条订单对状态的"永远对不上。
-        String spoken = mergeSpoken(slots.pendingArgs().get("spoken"), DraftIntake.spokenWords(message));
+
         if (!hints.complete()) {
             Map<String, String> pendingArgs = new LinkedHashMap<>(hints.toMap());
             if (!spoken.isBlank()) {
@@ -1242,6 +2006,42 @@ public class ChatRuntime {
     }
 
     /**
+     * 用户句子里点到的列名（先看整句里出现没出现，再按分词逐个翻）。
+     *
+     * <p>不能直接把整句丢给 {@code matchColumn}：它按"一个词"翻，
+     * 「就用 updated_at 吧」这种带语气词的句子会被判成翻不出来。
+     */
+    private static String columnIn(String message, List<String> columns) {
+        String lower = message.toLowerCase();
+        for (String column : columns) {
+            if (lower.contains(column.toLowerCase())) {
+                return column;
+            }
+        }
+        for (String token : message.split("\\s*(?:和|与|、|,|，|\\+|\\s|：|:)\\s*")) {
+            String hit = DraftIntake.matchColumn(token, columns);
+            if (hit != null) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    /** 把一道追问的答案（列名）并进维度：已有的不动，重了不加；hint 位清空，不需要再问。 */
+    private static DraftIntake.Hints withExtraKey(DraftIntake.Hints hints, String column) {
+        String key = hints.key();
+        if (key == null || key.isBlank()) {
+            key = column;
+        } else if (key.contains(column)) {
+            return hints;
+        } else {
+            key = key + "和" + column;
+        }
+        return new DraftIntake.Hints(hints.code(), hints.name(), hints.left(), hints.right(), key,
+                hints.compare(), null);
+    }
+
+    /**
      * 让模型回答"上一轮问的那一问"。模型只提值：候选表 / 真实列由 {@link DraftSlotFiller} 校验。
      *
      * @return 补过空位的新参数；模型没配置、或一个都填不上时原样返回
@@ -1284,6 +2084,24 @@ public class ChatRuntime {
     /** 「展示/看看草稿」这类请求：在收参数途中也要能看见全貌。 */
     private static boolean wantsPreview(String message) {
         return message != null && PREVIEW.matcher(message).find();
+    }
+
+    /** 用户认了上一问里"我准备按这一列写"的提议。只在 {@code guessed} 标记还在时被问。 */
+    private static boolean acceptsGuess(String message) {
+        String text = message == null ? "" : message.trim();
+        if (text.isEmpty()) {
+            return false;
+        }
+        if (GUESS_YES.matcher(text).find()) {
+            return true;
+        }
+        return text.contains("就用") || text.contains("按这个") || text.contains("没错");
+    }
+
+    /** 用户否掉了那一列（"去掉""不用它"）。同样只看标记还在的那一轮。 */
+    private static boolean rejectsGuess(String message) {
+        String text = message == null ? "" : message.trim();
+        return text.contains("去掉") || text.contains("不要") || text.contains("不用") || text.contains("不需要");
     }
 
     private static String previewText(DraftIntake.Hints hints) {
