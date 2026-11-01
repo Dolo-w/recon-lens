@@ -52,7 +52,7 @@
          写上 release 后与插值无关，IDE / Eclipse / CI 表现一致；命令行 mvn 行为不变。 -->
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <mcp.sdk.version>2.0.1</mcp.sdk.version>
+    <mcp.sdk.version>2.1.0</mcp.sdk.version>
     <!-- 压测用例（@Tag("bench")）默认不跑：mvn test 保持秒级；要跑见 docs/benchmark.md -->
     <surefire.excludedGroups>bench</surefire.excludedGroups>
     <surefire.argLine>-Dfile.encoding=UTF-8</surefire.argLine>
