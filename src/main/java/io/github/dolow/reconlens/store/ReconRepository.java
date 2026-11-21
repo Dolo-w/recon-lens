@@ -518,6 +518,20 @@ public class ReconRepository implements DiffWriter {
                 jobId, shardId, bizKey);
     }
 
+    /** 整个任务的凭证一次拉齐（证据包导出用，避免逐差异 N 次查询）。 */
+    public List<DiffEvidence> listEvidenceByJob(long jobId) {
+        return jdbc.query("""
+                SELECT job_id, shard_id, side, biz_key, source, row_json
+                FROM recon_diff_evidence
+                WHERE job_id = ?
+                ORDER BY shard_id, biz_key, side, id
+                """, (rs, i) -> new DiffEvidence(
+                rs.getLong("job_id"), rs.getInt("shard_id"),
+                rs.getString("side"), rs.getString("biz_key"),
+                rs.getString("source"), rs.getString("row_json")),
+                jobId);
+    }
+
     /** 按主键取一条差异（差异详情页入口）；不存在返回 null。 */
     public DiffRecord findDiffById(long id) {
         List<DiffRecord> rows = jdbc.query(
