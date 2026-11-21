@@ -384,6 +384,29 @@ public class ReconRepository implements DiffWriter {
                 ShardStatus.FAILED.name(), truncate(errorMsg, 1000), jobId, shardId);
     }
 
+    /**
+     * 启动时回收中断的任务与分片。
+     *
+     * <p>正常路径里任务必然走到 finishJob（成功、部分失败、全失败三态之一）——
+     * 唯一能留下 RUNNING/PENDING 的方式是<b>进程在执行中途挂掉</b>。不回收的话，
+     * 这些孤儿会让"执行中的任务不能重跑"这道闸永远关不上：任务既不是终态、也不会再有人推进它。
+     *
+     * @return 回收的任务数
+     */
+    public int recoverInterruptedJobs() {
+        jdbc.update("""
+                UPDATE recon_shard SET status=?, error_msg=?, finished_at=CURRENT_TIMESTAMP
+                WHERE status = ? AND job_id IN (SELECT id FROM recon_job WHERE status IN (?, ?))
+                """, ShardStatus.FAILED.name(), "进程中断：服务重启时该分片仍在执行，重跑即可恢复",
+                ShardStatus.RUNNING.name(), JobStatus.RUNNING.name(), JobStatus.PENDING.name());
+        return jdbc.update("""
+                UPDATE recon_job SET status=?, error_msg=?,
+                       finished_at=COALESCE(finished_at, CURRENT_TIMESTAMP)
+                WHERE status IN (?, ?)
+                """, JobStatus.FAILED.name(), "进程中断：服务重启时任务仍在执行，可用 retry 重跑失败分片",
+                JobStatus.RUNNING.name(), JobStatus.PENDING.name());
+    }
+
     // ---------------- 差异 ----------------
 
     /** 幂等基石：重跑某个分片前先删掉它上一次的差异，再重新写入。 */
@@ -434,12 +457,24 @@ public class ReconRepository implements DiffWriter {
                 + "，shardId=" + diff.shardId() + "。";
     }
 
+    /**
+     * severity 排序键必须是枚举序不是字典序：severity 存的是字符串，字典序 DESC 会排成
+     * MEDIUM > LOW > HIGH —— 最严重的 HIGH 永远垫底。这里用 CASE 显式映射
+     * {@link Severity} 的声明序（LOW=1, MEDIUM=2, HIGH=3），未知值排最前兜底。
+     */
+    private static final String SEVERITY_ORDER =
+            "CASE severity WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END";
+
     public long countDiffs(Long jobId, String diffType) {
-        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM recon_diff WHERE 1=1");
+        StringBuilder sql = new StringBuilder("SELECT COUNT(*) FROM recon_diff");
         List<Object> args = new java.util.ArrayList<>();
         if (jobId != null) {
-            sql.append(" AND job_id = ?");
+            sql.append(" WHERE job_id = ?");
             args.add(jobId);
+        } else {
+            // 全库汇总与 summaryByType 同口径：排除试算任务（kind='PROD'）。
+            // 不加这层 join，同一接口里 total（含试算）和 byType（不含）对不上。
+            sql.append(" JOIN recon_job j ON j.id = recon_diff.job_id WHERE j.kind = 'PROD'");
         }
         if (diffType != null && !diffType.isBlank()) {
             sql.append(" AND diff_type = ?");
@@ -450,17 +485,20 @@ public class ReconRepository implements DiffWriter {
     }
 
     public List<DiffRecord> listDiffs(Long jobId, String diffType, int offset, int limit) {
-        StringBuilder sql = new StringBuilder("SELECT " + DIFF_COLUMNS + " FROM recon_diff WHERE 1=1");
+        StringBuilder sql = new StringBuilder("SELECT " + DIFF_COLUMNS + " FROM recon_diff");
         List<Object> args = new java.util.ArrayList<>();
         if (jobId != null) {
-            sql.append(" AND job_id = ?");
+            sql.append(" WHERE job_id = ?");
             args.add(jobId);
+        } else {
+            // 与 countDiffs 的全库口径一致：排除试算，任务列表视图与全局视图才说得拢
+            sql.append(" JOIN recon_job j ON j.id = recon_diff.job_id WHERE j.kind = 'PROD'");
         }
         if (diffType != null && !diffType.isBlank()) {
             sql.append(" AND diff_type = ?");
             args.add(diffType);
         }
-        sql.append(" ORDER BY severity DESC, id LIMIT ? OFFSET ?");
+        sql.append(" ORDER BY ").append(SEVERITY_ORDER).append(" DESC, id LIMIT ? OFFSET ?");
         args.add(limit);
         args.add(offset);
         return jdbc.query(sql.toString(), diffMapper(), args.toArray());

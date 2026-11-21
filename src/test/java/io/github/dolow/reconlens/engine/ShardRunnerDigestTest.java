@@ -64,7 +64,7 @@ class ShardRunnerDigestTest {
         Row rightA1 = row("ORD20260001", "10.50", "PAID");
 
         ShardRunner runner = new ShardRunner(
-                new StubCursors(rule, List.of(leftA1, leftA5), List.of(rightA1)), repository, properties);
+                new StubCursors(rule, List.of(leftA1, leftA5), List.of(rightA1)), repository, properties, stubTxManager());
         ShardResult result = runner.run(rule, 1L, new ShardPlan(0, null, null), new DiffCapture());
 
         ArgumentCaptor<List<DiffRecord>> batches = ArgumentCaptor.forClass(List.class);
@@ -74,6 +74,28 @@ class ShardRunnerDigestTest {
     }
 
     private record ShardRun(ShardResult result, List<DiffRecord> written) {
+    }
+
+    /**
+     * 无数据源的桩事务管理器：本测试只验证摘要行为，事务边界由
+     * {@code ShardRunnerTransactionTest}（带真库）覆盖。
+     */
+    private static org.springframework.transaction.PlatformTransactionManager stubTxManager() {
+        return new org.springframework.transaction.PlatformTransactionManager() {
+            @Override
+            public org.springframework.transaction.TransactionStatus getTransaction(
+                    org.springframework.transaction.TransactionDefinition definition) {
+                return new org.springframework.transaction.support.SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(org.springframework.transaction.TransactionStatus status) {
+            }
+
+            @Override
+            public void rollback(org.springframework.transaction.TransactionStatus status) {
+            }
+        };
     }
 
     private static Row row(String orderNo, String amount, String status) {

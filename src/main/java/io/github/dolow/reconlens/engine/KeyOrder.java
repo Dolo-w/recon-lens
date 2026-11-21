@@ -50,10 +50,20 @@ public class KeyOrder {
     /**
      * 生成"与 {@code String#compareTo} 同序"的排序表达式。
      *
-     * @param column 业务键列（或列表达式）
+     * <p>只有<b>字符串键</b>需要转 utf16_bin；数值键必须保留数据库原生数值序 ——
+     * 数值套上 CONVERT 会变成字符串序（{@code '10' < '9'}），而 Java 侧
+     * {@code ValueComparator.compareKeys} 对数值走 {@code BigDecimal#compareTo}，
+     * 两边一错序，归并双指针会把整批数据判成假缺失。
+     *
+     * @param column  业务键列（或列表达式）
+     * @param keyType 业务键声明类型；null 按 STRING 处理（最保守 —— 字符串序错位影响面最大）
      */
-    public String orderKey(String column) {
-        return binary() ? String.format(MYSQL_ORDER, column) : column;
+    public String orderKey(String column, FieldType keyType) {
+        if (!binary() || keyType != FieldType.STRING) {
+            // H2 原生序即与 Java 一致；数值键任何库都不该套 CONVERT（见上）
+            return column;
+        }
+        return String.format(MYSQL_ORDER, column);
     }
 
     /** 当前数据库是否需要显式二进制排序。 */

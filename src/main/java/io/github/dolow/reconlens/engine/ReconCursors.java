@@ -42,6 +42,7 @@ public class ReconCursors {
             log.warn("规则使用自定义 orderBy（{}），MySQL 的排序规则可能与 Java 比较器不一致；"
                     + "建议改用声明式 dimension，由引擎统一按 utf16_bin 排序", side.orderBy());
         }
-        return ShardPlanner.selectSql(side, where, keyOrder.orderKey(SideSpec.KEY_ALIAS));
+        // keyType 必须传：数值键套 utf16 会退化成字符串序（'10' < '9'），归并直接错位
+        return ShardPlanner.selectSql(side, where, keyOrder.orderKey(SideSpec.KEY_ALIAS, side.keyType()));
     }
 }

@@ -45,11 +45,13 @@ public class ReconEngine {
     private final ShardRunner shardRunner;
     private final ReconProperties properties;
     private final DatasetFingerprints fingerprints;
-    private final ExecutorService submitter = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "recon-submit");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /**
+     * 异步提交池。<b>有界</b>（容量 = 引擎并行度）：无界 cachedThreadPool 意味着
+     * 10 个人同时发 10 个大对账就有 10 个任务同时在库里抢连接和 CPU ——
+     * 并发上限必须有个数，排队就是那个数。任务排队时保持 PENDING，
+     * 真正开跑才标 RUNNING（见 {@link #execute}），状态与事实不脱节。
+     */
+    private final ExecutorService submitter;
 
     public ReconEngine(RuleCatalog catalog, ReconRepository repository, ShardRunner shardRunner,
                        ReconProperties properties, DatasetFingerprints fingerprints) {
@@ -58,6 +60,12 @@ public class ReconEngine {
         this.shardRunner = shardRunner;
         this.properties = properties;
         this.fingerprints = fingerprints;
+        this.submitter = Executors.newFixedThreadPool(
+                Math.max(1, properties.getEngine().getParallelism()), runnable -> {
+                    Thread thread = new Thread(runnable, "recon-submit");
+                    thread.setDaemon(true);
+                    return thread;
+                });
     }
 
     /** 同步跑完整个任务（CLI、启动演示、单测用）。 */
@@ -194,7 +202,8 @@ public class ReconEngine {
         long jobId = repository.createJob(rule.code(), resolved.version(), resolved.snapshot(), batchId, remark,
                 shardCount, kind, phase, dataSnapshot);
         repository.createShards(jobId, shardCount);
-        repository.markJobRunning(jobId);
+        // RUNNING 不在这里标：异步路径下任务可能先排队，标了 RUNNING 却没在跑，状态与事实脱节。
+        // 真正开跑时由 execute() 标记。
         log.info("创建对账任务 #{} 规则={} 版本={} 批次={} 分片数={} kind={}{}", jobId, rule.code(),
                 resolved.version() == null ? "内联" : "v" + resolved.version(), batchId, shardCount, kind,
                 phase == null ? "" : " phase=" + phase);
@@ -217,6 +226,9 @@ public class ReconEngine {
     }
 
     private List<ShardResult> execute(RuleSpec rule, long jobId, List<ShardPlan> plans, boolean captureDiffs) {
+        // 真正开跑才标 RUNNING：同步路径等于建任务后立刻执行；异步路径下这里被
+        // 提交池调度到才会走到，排队期间任务保持 PENDING
+        repository.markJobRunning(jobId);
         int parallelism = Math.max(1, Math.min(rule.shard().effectiveParallelism(),
                 Math.max(1, properties.getEngine().getParallelism())));
         ExecutorService pool = Executors.newFixedThreadPool(parallelism, runnable -> {

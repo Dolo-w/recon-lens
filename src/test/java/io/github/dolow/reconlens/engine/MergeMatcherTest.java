@@ -128,7 +128,7 @@ class MergeMatcherTest {
     }
 
     @Test
-    void duplicateKeyIsReportedOnceAndStillCompared() {
+    void duplicateKeyIsReportedOnceAndNotPositionallyPaired() {
         CollectingSink sink = new CollectingSink();
         MatchStats stats = match(
                 List.of(row("A1", "10", "PAID"), row("A1", "99", "PAID")),
@@ -136,10 +136,31 @@ class MergeMatcherTest {
                 sink);
 
         Map<String, Long> byType = countByType(sink.diffs);
-        // 同键多条的差异只报一条（否则差异表会被重复数据淹没），但组内仍然逐条比对
+        // 同键多条的差异只报一条（否则差异表会被重复数据淹没）。
+        // 不再做组内按位配对：组内行序依赖数据库返回顺序（排序键相同时不是确定性的），
+        // 按位凑对会让同一份数据两次跑出不同的字段差异集 —— 幂等被打破。
+        // 重复键本身就是数据问题，先修数据再谈字段比对。
         assertThat(byType).containsEntry("DUPLICATE_KEY", 1L);
-        assertThat(byType).containsEntry("AMOUNT_MISMATCH", 1L);
-        assertThat(stats.matchedRows()).isEqualTo(2);
+        assertThat(byType).doesNotContainKey("AMOUNT_MISMATCH");
+        assertThat(stats.matchedRows()).isZero();
+    }
+
+    @Test
+    void duplicateKeyGroupOrderDoesNotChangeTheResult() {
+        // 顺序无关性验收：游标按键有序是归并的契约，键序打乱不是合法输入；
+        // 能乱的是<b>同一键组内部</b>的行序（SQL 对相同排序键的返回顺序本就不确定）。
+        // 组内顺序打乱后，差异集必须完全一致 —— 这正是"不按位配对"要保证的。
+        CollectingSink first = new CollectingSink();
+        match(List.of(row("A1", "10", "PAID"), row("A1", "99", "PAID"), row("B2", "20", "PAID")),
+                List.of(row("A1", "10", "PAID"), row("A1", "95", "PAID"), row("B2", "20", "PAID")), first);
+        CollectingSink second = new CollectingSink();
+        match(List.of(row("A1", "99", "PAID"), row("A1", "10", "PAID"), row("B2", "20", "PAID")),
+                List.of(row("A1", "95", "PAID"), row("A1", "10", "PAID"), row("B2", "20", "PAID")), second);
+
+        assertThat(second.diffs.size()).isEqualTo(first.diffs.size());
+        assertThat(countByType(second.diffs)).isEqualTo(countByType(first.diffs));
+        assertThat(second.diffs).extracting(DiffRecord::bizKey)
+                .containsExactlyInAnyOrderElementsOf(first.diffs.stream().map(DiffRecord::bizKey).toList());
     }
 
     @Test

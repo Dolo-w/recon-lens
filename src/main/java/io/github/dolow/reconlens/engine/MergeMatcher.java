@@ -11,8 +11,11 @@ import java.util.List;
  * 归并式对账的核心：两侧游标都按业务键升序，双指针推进，只保留"当前同键组"在内存里。
  * <p>四种差异的判定顺序：
  * <ol>
- *   <li>业务键相等 → 取同键组；组内任一侧多于一条 → 重复键差异</li>
- *   <li>组内按位配对，逐字段比对 → 字段值不一致</li>
+ *   <li>业务键相等 → 取同键组；组内任一侧多于一条 → 只报重复键差异，<b>不再配对</b>。
+ *       组内的行序取决于数据库返回顺序（排序键相同时不是确定性的），按位凑对等于把
+ *       "哪行和哪行比"交给数据库的脾气 —— 同一份数据两次跑可能给出不同的字段差异集。
+ *       重复键本身就是数据问题，先修数据再谈字段比对。</li>
+ *   <li>组内两侧各恰好一条 → 逐字段比对 → 字段值不一致</li>
  *   <li>左侧业务键更小 → 这条只有左表有 → 右侧缺失</li>
  *   <li>右侧业务键更小 → 这条只有右表有 → 左侧缺失</li>
  * </ol>
@@ -55,13 +58,13 @@ public final class MergeMatcher {
                 List<Row> leftGroup = drainSameKey(left, leftRow, rule.left().keyType(), leftKeyField);
                 List<Row> rightGroup = drainSameKey(right, rightRow, rule.right().keyType(), rightKeyField);
                 if (leftGroup.size() > 1 || rightGroup.size() > 1) {
+                    // 重复键只报差异不配对：组内行序依赖数据库返回顺序，按位凑对会让
+                    // 同一份数据两次跑出不同的字段差异集（幂等被打破）。修完数据重跑即可。
                     sink.accept(duplicateDiff(leftGroup, rightGroup));
                     diffRows++;
-                }
-                int pairs = Math.min(leftGroup.size(), rightGroup.size());
-                for (int i = 0; i < pairs; i++) {
+                } else {
                     matchedRows++;
-                    diffRows += compareFields(leftGroup.get(i), rightGroup.get(i), sink);
+                    diffRows += compareFields(leftGroup.get(0), rightGroup.get(0), sink);
                 }
             }
             leftRow = left.peek();

@@ -9,6 +9,8 @@ import io.github.dolow.reconlens.store.ReconRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.Locale;
 import java.util.Optional;
@@ -18,6 +20,9 @@ import java.util.Set;
  * 执行一个分片。关键约定：
  * <ol>
  *   <li>先删掉本分片上次的差异再重新对账 —— 重跑天然幂等，不需要"差异去重"的额外逻辑</li>
+ *   <li><b>删 + 写 + 标记成功包在同一个事务里</b>：对账跑到一半挂掉（键为空、下游断连、OOM 逃逸），
+ *       已写的几百条差异会跟着回滚，不会留下"半截差异 + FAILED 分片"这种把人带进沟里的现场；
+ *       失败信息只留在分片记录上，重跑从零开始</li>
  *   <li>失败按 maxAttempts 重试，每次重试都是一次完整的"删+写"</li>
  *   <li>开始扫描前先校验规则字段在结果集里存在，把配置错误变成一条可读的失败原因，而不是跑一半炸掉</li>
  * </ol>
@@ -33,11 +38,14 @@ public class ShardRunner {
     private final ReconCursors cursors;
     private final ReconRepository repository;
     private final ReconProperties properties;
+    private final TransactionTemplate transaction;
 
-    public ShardRunner(ReconCursors cursors, ReconRepository repository, ReconProperties properties) {
+    public ShardRunner(ReconCursors cursors, ReconRepository repository, ReconProperties properties,
+                       PlatformTransactionManager transactionManager) {
         this.cursors = cursors;
         this.repository = repository;
         this.properties = properties;
+        this.transaction = new TransactionTemplate(transactionManager);
     }
 
     public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan) {
@@ -57,34 +65,40 @@ public class ShardRunner {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             repository.markShardRunning(jobId, plan.shardId(), attempt);
             try {
-                repository.deleteShardDiffs(jobId, plan.shardId());
-                try (RowCursor left = cursors.open(rule.left(), plan.whereLeft());
-                     RowCursor right = cursors.open(rule.right(), plan.whereRight())) {
-                    validateFields(rule, left.columns(), true);
-                    validateFields(rule, right.columns(), false);
-                    // 摘要与落库共用一条出口：算的就是"这次到底写出了什么"，不是另跑一遍。
-                    // 只有试算才包摘要层：生产路径省掉每条差异的哈希与收集。
-                    DiffSink outlet;
-                    DigestingDiffSink sink = null;
-                    if (digestWanted) {
-                        sink = new DigestingDiffSink(
-                                new BatchDiffSink(repository, DIFF_BATCH_SIZE),
-                                DiffSetDigest.accumulator(rule.left().keyType(),
-                                        properties.getEngine().getDiffDigestMaxKeys()));
-                        outlet = new CapturingDiffSink(sink, capture);
-                    } else {
-                        outlet = new BatchDiffSink(repository, DIFF_BATCH_SIZE);
+                // 删 + 对账 + 写 + 标记成功在同一事务里：中途失败整体回滚，
+                // 绝不让"半截差异"和"FAILED 分片"同时出现在库里误导排障
+                ShardOutcome outcome = transaction.execute(status -> {
+                    repository.deleteShardDiffs(jobId, plan.shardId());
+                    try (RowCursor left = cursors.open(rule.left(), plan.whereLeft());
+                         RowCursor right = cursors.open(rule.right(), plan.whereRight())) {
+                        validateFields(rule, left.columns(), true);
+                        validateFields(rule, right.columns(), false);
+                        // 摘要与落库共用一条出口：算的就是"这次到底写出了什么"，不是另跑一遍。
+                        // 只有试算才包摘要层：生产路径省掉每条差异的哈希与收集。
+                        DiffSink outlet;
+                        DigestingDiffSink sink = null;
+                        if (digestWanted) {
+                            sink = new DigestingDiffSink(
+                                    new BatchDiffSink(repository, DIFF_BATCH_SIZE),
+                                    DiffSetDigest.accumulator(rule.left().keyType(),
+                                            properties.getEngine().getDiffDigestMaxKeys()));
+                            outlet = new CapturingDiffSink(sink, capture);
+                        } else {
+                            outlet = new BatchDiffSink(repository, DIFF_BATCH_SIZE);
+                        }
+                        MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, outlet);
+                        repository.markShardSuccess(jobId, plan.shardId(), stats);
+                        return new ShardOutcome(stats, sink == null ? null : summarize(plan.shardId(), sink),
+                                sink != null && sink.digest().isEmpty(),
+                                capture == null ? java.util.List.of() : capture.snapshot());
                     }
-                    MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, outlet);
-                    repository.markShardSuccess(jobId, plan.shardId(), stats);
-                    DiffSetDigest digest = sink == null ? null : summarize(plan.shardId(), sink);
-                    // digest == null 是"算不出摘要"（超上限），不是"没有差异"：必须带到上层，
-                    // 否则两次都溢出的试算会拿两张空表做相等比较，把"无法判断"判成 PASS。
-                    // 生产路径（sink == null）不算摘要，"没有摘要"不等于"溢出"。
-                    return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, stats, digest,
-                            sink != null && digest == null, null,
-                            capture == null ? java.util.List.of() : capture.snapshot());
-                }
+                });
+                DiffSetDigest digest = outcome.digest();
+                // digest == null 是"算不出摘要"（超上限），不是"没有差异"：必须带到上层，
+                // 否则两次都溢出的试算会拿两张空表做相等比较，把"无法判断"判成 PASS。
+                // 生产路径（sink == null）不算摘要，"没有摘要"不等于"溢出"。
+                return new ShardResult(plan.shardId(), ShardStatus.SUCCESS, attempt, outcome.stats(), digest,
+                        outcome.digestOverflowed(), null, outcome.captured());
             } catch (Exception e) {
                 lastError = Errors.describe(e);
                 log.warn("分片 {} 第 {}/{} 次执行失败: {}", plan.shardId(), attempt, maxAttempts, lastError);
@@ -112,6 +126,11 @@ public class ShardRunner {
         log.info("分片 {} 差异摘要 sha256={} 共 {} 条 byType={} byField={}",
                 shardId, value.shortSha(), value.count(), value.byType(), value.byField());
         return value;
+    }
+
+    /** 事务内产出的分片结果：统计 + 摘要 + 溢出标记 + （试算时）差异明细。 */
+    private record ShardOutcome(MatchStats stats, DiffSetDigest digest, boolean digestOverflowed,
+                                java.util.List<io.github.dolow.reconlens.domain.DiffRecord> captured) {
     }
 
     private void validateFields(RuleSpec rule, Set<String> columns, boolean leftSide) {
