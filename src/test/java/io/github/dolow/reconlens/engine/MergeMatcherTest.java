@@ -22,10 +22,12 @@ class MergeMatcherTest {
     /** 收集差异的测试出口 */
     private static final class CollectingSink implements DiffSink {
         private final List<DiffRecord> diffs = new ArrayList<>();
+        private final java.util.List<io.github.dolow.reconlens.domain.DiffEvidence> evidences = new ArrayList<>();
 
         @Override
-        public void accept(DiffRecord diff) {
+        public void accept(DiffRecord diff, java.util.List<io.github.dolow.reconlens.domain.DiffEvidence> evidence) {
             diffs.add(diff);
+            evidences.addAll(evidence);
         }
 
         @Override
@@ -82,6 +84,58 @@ class MergeMatcherTest {
         assertThat(diff.rightValue()).isEqualTo("2999");
         assertThat(diff.deltaValue()).isEqualByComparingTo("1");
         assertThat(diff.severity()).isEqualTo(io.github.dolow.reconlens.domain.Severity.HIGH);
+    }
+
+    @Test
+    void fieldDiffCarriesBothSidesEvidenceAndDedupesAcrossFields() {
+        CollectingSink sink = new CollectingSink();
+        // 两个字段都不同 → 2 条差异；同一条左行的凭证只存一份（side|bizKey 去重）
+        match(List.of(row("A1", "3000", "PAID")), List.of(row("A1", "2999", "REFUNDED")), sink);
+
+        assertThat(sink.diffs).hasSize(2);
+        // 匹配器层每条字段差异都带两侧凭证；同键去重在 BatchDiffSink 做（见它的专属测试）
+        var left = sink.evidences.stream().filter(e -> e.side().equals("LEFT")).toList();
+        var right = sink.evidences.stream().filter(e -> e.side().equals("RIGHT")).toList();
+        assertThat(left).hasSize(2);
+        assertThat(right).hasSize(2);
+        assertThat(left.get(0).bizKey()).isEqualTo("A1");
+        assertThat(left.get(0).source()).contains("bill_left");
+        // 凭证是整行快照：不参与比对的列也在里面
+        assertThat(left.get(0).rowJson()).contains("\"order_no\":\"A1\"").contains("\"amount\":\"3000\"");
+        assertThat(right.get(0).rowJson()).contains("\"status\":\"REFUNDED\"");
+    }
+
+    @Test
+    void missingDiffCarriesOnlyThePresentSideEvidence() {
+        CollectingSink sink = new CollectingSink();
+        match(List.of(row("A1", "10", "PAID")), List.of(), sink);
+        assertThat(sink.diffs).hasSize(1);
+        assertThat(sink.evidences).hasSize(1);
+        assertThat(sink.evidences.get(0).side()).isEqualTo("LEFT");
+
+        CollectingSink sink2 = new CollectingSink();
+        match(List.of(), List.of(row("B1", "10", "PAID")), sink2);
+        assertThat(sink2.evidences).hasSize(1);
+        assertThat(sink2.evidences.get(0).side()).isEqualTo("RIGHT");
+        assertThat(sink2.evidences.get(0).bizKey()).isEqualTo("B1");
+    }
+
+    @Test
+    void duplicateDiffCarriesFirstRowOfEachSideAsEvidence() {
+        CollectingSink sink = new CollectingSink();
+        match(List.of(row("A1", "10", "PAID"), row("A1", "11", "PAID")),
+              List.of(row("A1", "10", "PAID")), sink);
+        assertThat(sink.diffs.get(0).diffType()).isEqualTo("DUPLICATE_KEY");
+        var sides = sink.evidences.stream().map(e -> e.side()).toList();
+        assertThat(sides).containsExactly("LEFT", "RIGHT");
+    }
+
+    @Test
+    void equalKeysProduceNoEvidence() {
+        CollectingSink sink = new CollectingSink();
+        match(List.of(row("A1", "10.00", "PAID")), List.of(row("A1", "10.00", "paid")), sink);
+        assertThat(sink.diffs).isEmpty();
+        assertThat(sink.evidences).isEmpty();
     }
 
     @Test

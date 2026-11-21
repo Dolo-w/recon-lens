@@ -76,6 +76,7 @@ public class ShardRunner {
                 // 绝不让"半截差异"和"FAILED 分片"同时出现在库里误导排障
                 ShardOutcome outcome = transaction.execute(status -> {
                     repository.deleteShardDiffs(jobId, plan.shardId());
+                    repository.deleteShardEvidence(jobId, plan.shardId());
                     try (RowCursor left = cursors.open(rule.left(), plan.whereLeft());
                          RowCursor right = cursors.open(rule.right(), plan.whereRight())) {
                         validateFields(rule, left.columns(), true);

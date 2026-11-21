@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.engine;
 
+import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffRecord;
 
 import java.util.List;
@@ -11,4 +12,7 @@ import java.util.List;
 public interface DiffWriter {
 
     void insertDiffs(List<DiffRecord> diffs);
+
+    /** 批量写入差异原始行凭证（同分片同侧同键已去重）。 */
+    void insertEvidence(List<DiffEvidence> evidence);
 }

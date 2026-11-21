@@ -1,6 +1,9 @@
 package io.github.dolow.reconlens.engine;
 
+import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffRecord;
+
+import java.util.List;
 
 /**
  * 把差异同时交给下游（落库 + 摘要）并留一份到 {@link DiffCapture}。
@@ -20,8 +23,8 @@ final class CapturingDiffSink implements DiffSink {
     }
 
     @Override
-    public void accept(DiffRecord diff) {
-        delegate.accept(diff);
+    public void accept(DiffRecord diff, List<DiffEvidence> evidence) {
+        delegate.accept(diff, evidence);
         capture.add(diff);
     }
 

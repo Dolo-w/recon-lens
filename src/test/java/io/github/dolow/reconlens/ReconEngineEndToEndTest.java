@@ -9,6 +9,7 @@ import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.explain.ExplainService;
 import io.github.dolow.reconlens.store.ReconRepository;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -28,6 +29,8 @@ class ReconEngineEndToEndTest {
 
     @Autowired
     private ReconEngine engine;
+    @Autowired
+    private JdbcTemplate jdbc;
     @Autowired
     private ReconRepository repository;
     @Autowired
@@ -64,6 +67,30 @@ class ReconEngineEndToEndTest {
         assertThat(repository.listShards(job.id()))
                 .extracting(ReconShard::status)
                 .containsOnly(ShardStatus.SUCCESS);
+    }
+
+    @Test
+    void everyDiffLandsRowEvidenceAndRetryDoesNotDuplicateIt() {
+        ReconJob job = engine.run("BILL_VS_SETTLE", "it-evidence", "凭证集成测试");
+        assertThat(job.status()).isEqualTo(JobStatus.SUCCESS);
+
+        // 4 条差异（金额/右缺失/左缺失/重复键）涉及的 (side, bizKey) 组合恰好 6 份：
+        // 金额差异 L+R、右缺失只有 L、左缺失只有 R、重复键 L+R
+        List<Map<String, Object>> evidence = jdbc.queryForList(
+                "SELECT side, biz_key, source, row_json FROM recon_diff_evidence WHERE job_id = ? ORDER BY id", job.id());
+        assertThat(evidence).hasSize(6);
+        assertThat(evidence).extracting("side")
+                .containsExactly("LEFT", "RIGHT", "LEFT", "RIGHT", "LEFT", "RIGHT");
+        // 凭证是整行快照：非比对列也在
+        assertThat((String) evidence.get(0).get("row_json")).contains("order_no");
+        assertThat((String) evidence.get(0).get("source")).isNotBlank();
+
+        // 重跑：deleteShardEvidence 与 deleteShardDiffs 同事务，凭证不翻倍
+        ReconJob rerun = engine.retry(job.id(), false);
+        assertThat(rerun.status()).isEqualTo(JobStatus.SUCCESS);
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM recon_diff_evidence WHERE job_id = ?", Integer.class, job.id());
+        assertThat(count).isEqualTo(6);
     }
 
     @Test

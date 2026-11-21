@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.web;
 
+import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.lifecycle.DiffLifecycleService;
 import io.github.dolow.reconlens.recall.RecallAugmenter;
@@ -7,7 +8,9 @@ import io.github.dolow.reconlens.explain.DiffKnowledgeBase;
 import io.github.dolow.reconlens.explain.ExplainService;
 import io.github.dolow.reconlens.store.DiffLifecycleRepository;
 import io.github.dolow.reconlens.store.ReconRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -232,6 +235,41 @@ public class DiffController {
         body.put("hitRate", snapshot.hitRate());
         body.put("summary", snapshot.describe());
         body.put("recent", explainService.recentKnowledge(Math.min(Math.max(limit, 1), MAX_LIMIT)));
+        return body;
+    }
+
+    /**
+     * 单条差异详情：差异本体 + 两侧原始行凭证。凭证是差异落库时刻的整行快照，
+     * 源表后来变了也不影响复盘口径；该行没有凭证（如试算旧数据）时为空列表。
+     */
+    @GetMapping("/{id}")
+    public Map<String, Object> detail(@PathVariable long id) {
+        DiffRecord diff = repository.findDiffById(id);
+        if (diff == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "差异不存在: id=" + id);
+        }
+        List<DiffEvidence> evidence = repository.listEvidence(diff.jobId(), diff.shardId(), diff.bizKey());
+        Map<String, Object> left = new LinkedHashMap<>();
+        Map<String, Object> right = new LinkedHashMap<>();
+        for (DiffEvidence e : evidence) {
+            Map<String, Object> target = DiffEvidence.LEFT.equals(e.side()) ? left : right;
+            target.put("source", e.source());
+            target.put("rowJson", e.rowJson());
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", diff.id());
+        body.put("jobId", diff.jobId());
+        body.put("shardId", diff.shardId());
+        body.put("diffType", diff.diffType());
+        body.put("severity", diff.severity());
+        body.put("bizKey", diff.bizKey());
+        body.put("field", diff.field());
+        body.put("leftValue", diff.leftValue());
+        body.put("rightValue", diff.rightValue());
+        body.put("deltaValue", diff.deltaValue());
+        body.put("deltaRatio", diff.deltaRatio());
+        body.put("explanation", diff.explanation());
+        body.put("evidence", Map.of("left", left, "right", right));
         return body;
     }
 

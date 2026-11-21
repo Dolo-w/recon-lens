@@ -204,7 +204,7 @@ class DiffSetDigestTest {
         private int flushes;
 
         @Override
-        public void accept(DiffRecord diff) {
+        public void accept(DiffRecord diff, java.util.List<io.github.dolow.reconlens.domain.DiffEvidence> evidence) {
             accepted.add(diff);
         }
 

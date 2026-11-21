@@ -1,7 +1,9 @@
 package io.github.dolow.reconlens.engine;
 
+import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffRecord;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -26,8 +28,8 @@ public final class DigestingDiffSink implements DiffSink {
     }
 
     @Override
-    public void accept(DiffRecord diff) {
-        delegate.accept(diff);
+    public void accept(DiffRecord diff, List<DiffEvidence> evidence) {
+        delegate.accept(diff, evidence);
         accumulator.accept(diff);
     }
 

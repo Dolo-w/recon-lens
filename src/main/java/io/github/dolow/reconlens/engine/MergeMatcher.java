@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.engine;
 
+import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.dsl.FieldRule;
 import io.github.dolow.reconlens.dsl.RuleSpec;
@@ -24,6 +25,9 @@ import java.util.List;
 public final class MergeMatcher {
 
     private static final int MAX_IDS_IN_SUMMARY = 5;
+
+    /** 单侧凭证 JSON 的字符上限：凭证是给人复盘的，宽行截断比把库顶爆重要。 */
+    static final int EVIDENCE_MAX_CHARS = 4000;
 
     /** 水位未就绪时缺失差异的类型后缀：语义是"可能尚未到达"，不是终判。 */
     static final String PENDING_SUFFIX = "_PENDING";
@@ -69,7 +73,8 @@ public final class MergeMatcher {
                 if (leftGroup.size() > 1 || rightGroup.size() > 1) {
                     // 重复键只报差异不配对：组内行序依赖数据库返回顺序，按位凑对会让
                     // 同一份数据两次跑出不同的字段差异集（幂等被打破）。修完数据重跑即可。
-                    sink.accept(duplicateDiff(leftGroup, rightGroup));
+                    sink.accept(duplicateDiff(leftGroup, rightGroup),
+                            duplicateEvidence(leftGroup, rightGroup));
                     diffRows++;
                 } else {
                     matchedRows++;
@@ -117,7 +122,9 @@ public final class MergeMatcher {
             if (result.different()) {
                 sink.accept(DiffRecord.of(jobId, shardId, fieldRule.diffType(), fieldRule.severity(), bizKey,
                         fieldRule.field(), Row.render(leftValue), Row.render(rightValue),
-                        result.delta(), result.ratio()));
+                        result.delta(), result.ratio()),
+                        List.of(evidence(DiffEvidence.LEFT, bizKey, leftRow),
+                                evidence(DiffEvidence.RIGHT, bizKey, rightRow)));
                 diffs++;
             }
         }
@@ -133,7 +140,8 @@ public final class MergeMatcher {
         String type = rule.missing().rightMissingDiffType() + (pending ? PENDING_SUFFIX : "");
         sink.accept(DiffRecord.of(jobId, shardId, type, rule.missing().severity(),
                 Row.render(leftRow.get(leftKeyField)), "", describe(leftRow), null, null, null)
-                .withExplanation(pending ? pendingNote("右侧", readiness.rightWatermark(), readiness.deadline()) : null));
+                .withExplanation(pending ? pendingNote("右侧", readiness.rightWatermark(), readiness.deadline()) : null),
+                List.of(evidence(DiffEvidence.LEFT, Row.render(leftRow.get(leftKeyField)), leftRow)));
         return 1;
     }
 
@@ -145,7 +153,8 @@ public final class MergeMatcher {
         String type = rule.missing().leftMissingDiffType() + (pending ? PENDING_SUFFIX : "");
         sink.accept(DiffRecord.of(jobId, shardId, type, rule.missing().severity(),
                 Row.render(rightRow.get(rightKeyField)), "", null, describe(rightRow), null, null)
-                .withExplanation(pending ? pendingNote("左侧", readiness.leftWatermark(), readiness.deadline()) : null));
+                .withExplanation(pending ? pendingNote("左侧", readiness.leftWatermark(), readiness.deadline()) : null),
+                List.of(evidence(DiffEvidence.RIGHT, Row.render(rightRow.get(rightKeyField)), rightRow)));
         return 1;
     }
 
@@ -204,6 +213,23 @@ public final class MergeMatcher {
             }
         }
         return List.copyOf(columns);
+    }
+
+    /** 原始行凭证：整行 JSON 快照（超长截断），来源描述用 SideSpec.describe() 的同一口径。 */
+    private DiffEvidence evidence(String side, String bizKey, Row row) {
+        return new DiffEvidence(jobId, shardId, side, bizKey,
+                side.equals(DiffEvidence.LEFT) ? rule.left().describe() : rule.right().describe(),
+                row.toJson(EVIDENCE_MAX_CHARS));
+    }
+
+    /** 重复键差异的凭证：两侧各取组内第一行做代表 —— 重复键本身就是要人去修的数据问题。 */
+    private List<DiffEvidence> duplicateEvidence(List<Row> leftGroup, List<Row> rightGroup) {
+        String bizKey = firstNonNull(Row.render(leftGroup.get(0).get(leftKeyField)),
+                Row.render(rightGroup.get(0).get(rightKeyField)));
+        List<DiffEvidence> evidence = new ArrayList<>(2);
+        evidence.add(evidence(DiffEvidence.LEFT, bizKey, leftGroup.get(0)));
+        evidence.add(evidence(DiffEvidence.RIGHT, bizKey, rightGroup.get(0)));
+        return evidence;
     }
 
     private String bizKeyOf(Row leftRow, Row rightRow) {

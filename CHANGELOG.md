@@ -4,6 +4,17 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 下午：差异原始行凭证）
+
+- 每条差异落库时在同一事务里快照两侧整行 JSON 进 `recon_diff_evidence`（append-only，
+  唯一键 job+shard+side+biz_key），源表后来变了不影响复盘口径
+- 凭证按自然键关联不存 diff_id：同一行左表产出 3 个字段差异，凭证只存一份；
+  宽行超 4000 字符截断带标记，凭证是给人复盘的不是无损备份
+- `GET /api/diffs/{id}` 详情端点带 `evidence.left/right`；列表端点不带凭证（口径不变）
+- 缺失差异只挂在场一侧的凭证；重复键差异两侧各取组内第一行做代表
+- 重跑分片时 `deleteShardEvidence` 与 `deleteShardDiffs` 同一事务，凭证不翻倍
+
+
 ### 新增（2026-11-21：差异生命周期 / 豁免台账）
 
 - **状态机 + append-only 台账**：新表 `recon_diff_lifecycle`（只有 INSERT，处置历史即审计线索，

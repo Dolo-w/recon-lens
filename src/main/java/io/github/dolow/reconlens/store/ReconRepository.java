@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.store;
 
+import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.domain.JobKind;
 import io.github.dolow.reconlens.domain.JobStatus;
@@ -477,6 +478,51 @@ public class ReconRepository implements DiffWriter {
             ps.setBigDecimal(10, diff.deltaRatio());
             ps.setString(11, truncate(diff.explanation(), 1000));
         });
+    }
+
+    /** 批量写差异原始行凭证。同分片同侧同键由 sink 去重过，唯一索引兜底防重复导入路径。 */
+    @Override
+    public void insertEvidence(List<DiffEvidence> evidence) {
+        if (evidence == null || evidence.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("""
+                INSERT INTO recon_diff_evidence (job_id, shard_id, side, biz_key, source, row_json)
+                VALUES (?,?,?,?,?,?)
+                """, evidence, evidence.size(), (ps, e) -> {
+            ps.setLong(1, e.jobId());
+            ps.setInt(2, e.shardId());
+            ps.setString(3, e.side());
+            ps.setString(4, truncate(e.bizKey(), 128));
+            ps.setString(5, truncate(e.source(), 255));
+            ps.setString(6, e.rowJson());
+        });
+    }
+
+    /** 重跑分片前清掉上一次的凭证，与 deleteShardDiffs 同一事务、同一口径。 */
+    public void deleteShardEvidence(long jobId, int shardId) {
+        jdbc.update("DELETE FROM recon_diff_evidence WHERE job_id=? AND shard_id=?", jobId, shardId);
+    }
+
+    /** 一条差异的两侧原始行凭证，按自然键 (job, shard, biz_key) 关联，不存 diff_id。 */
+    public List<DiffEvidence> listEvidence(long jobId, int shardId, String bizKey) {
+        return jdbc.query("""
+                SELECT job_id, shard_id, side, biz_key, source, row_json
+                FROM recon_diff_evidence
+                WHERE job_id = ? AND shard_id = ? AND biz_key = ?
+                ORDER BY side, id
+                """, (rs, i) -> new DiffEvidence(
+                rs.getLong("job_id"), rs.getInt("shard_id"),
+                rs.getString("side"), rs.getString("biz_key"),
+                rs.getString("source"), rs.getString("row_json")),
+                jobId, shardId, bizKey);
+    }
+
+    /** 按主键取一条差异（差异详情页入口）；不存在返回 null。 */
+    public DiffRecord findDiffById(long id) {
+        List<DiffRecord> rows = jdbc.query(
+                "SELECT " + DIFF_COLUMNS + " FROM recon_diff WHERE id = ?", diffMapper(), id);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     /** 业务键为 NULL 时的可定位提示：说清成因、怎么查、怎么修，别只留一句数据库约束报错。 */

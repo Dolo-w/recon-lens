@@ -65,6 +65,24 @@ CREATE INDEX IF NOT EXISTS idx_diff_job_type ON recon_diff (job_id, diff_type);
 -- 试算的 diffsInWindow(jobId, lo, hi) 按 job_id + biz_key 范围扫；没有这条索引就是整段差异全表扫
 CREATE INDEX IF NOT EXISTS idx_diff_job_key ON recon_diff (job_id, biz_key);
 
+-- 差异原始行凭证：差异落库时刻两侧整行的 JSON 快照。不存 diff_id，按自然键
+-- (job_id, shard_id, biz_key) 关联 —— 同一行左侧产出 3 个字段差异，凭证只存一份。
+-- 为什么是快照不是回源表查：源表会变（补数/重跑/归档），等财务来对质时可能查不回
+-- 当时的样子；凭证在差异写出的同一事务里落库，之后源表怎么变都不影响复盘口径。
+-- 宽行 JSON 在引擎侧已按 4000 字符截断并带标记，凭证是给人复盘的不是无损备份。
+CREATE TABLE IF NOT EXISTS recon_diff_evidence (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  job_id     BIGINT       NOT NULL,
+  shard_id   INT          NOT NULL,
+  side       VARCHAR(8)   NOT NULL,
+  biz_key    VARCHAR(128) NOT NULL,
+  source     VARCHAR(255) NOT NULL,
+  row_json   MEDIUMTEXT   NOT NULL,
+  created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_evidence_key ON recon_diff_evidence (job_id, shard_id, side, biz_key);
+CREATE INDEX IF NOT EXISTS idx_evidence_job_key ON recon_diff_evidence (job_id, biz_key);
+
 -- 差异生命周期台账（豁免台账）：append-only，只有 INSERT 没有改写 ——
 -- recon_diff 是对账结论快照谁都不能动；处置动作逐条留痕（谁、何时、依据）。
 -- 当前状态 = MAX(id) 那条动作的 status；没有记录 = OPEN。

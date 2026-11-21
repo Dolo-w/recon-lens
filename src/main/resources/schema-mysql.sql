@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS recon_diff (
   KEY idx_diff_job_key (job_id, biz_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 差异原始行凭证（快照语义，见 schema.sql 同名表注释）
+CREATE TABLE IF NOT EXISTS recon_diff_evidence (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  job_id     BIGINT       NOT NULL,
+  shard_id   INT          NOT NULL,
+  side       VARCHAR(8)   NOT NULL,
+  biz_key    VARCHAR(128) NOT NULL,
+  source     VARCHAR(255) NOT NULL,
+  row_json   MEDIUMTEXT   NOT NULL,
+  created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_evidence_key (job_id, shard_id, side, biz_key),
+  KEY idx_evidence_job_key (job_id, biz_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 差异生命周期台账（豁免台账）：append-only，只有 INSERT 没有改写 ——
 -- recon_diff 是对账结论快照谁都不能动；处置动作逐条留痕（谁、何时、依据）。
 -- 当前状态 = MAX(id) 那条动作的 status；没有记录 = OPEN。
