@@ -23,6 +23,7 @@ public class ReconProperties {
     private final Rules rules = new Rules();
     private final Security security = new Security();
     private final Model model = new Model();
+    private final Connector connector = new Connector();
 
     public String getRulesLocation() {
         return rulesLocation;
@@ -70,6 +71,97 @@ public class ReconProperties {
 
     public Model getModel() {
         return model;
+    }
+
+    public Connector getConnector() {
+        return connector;
+    }
+
+    /**
+     * 厂商 API 连接器配置（Phase 2 第三步）。v1 只接 Lago：填 API key 即可拉厂商账单，
+     * 走与文件导入完全相同的 profile 归一/建表/白名单管道。
+     */
+    public static class Connector {
+
+        private final Lago lago = new Lago();
+
+        public Lago getLago() {
+            return lago;
+        }
+
+        public static class Lago {
+
+            /** Lago API key（Bearer）；留空 = 连接器不可用，sync 调用直接报错说人话。 */
+            private String apiKey = "";
+
+            /** API 根地址；自托管 Lago 换成自己的地址。 */
+            private String baseUrl = "https://api.getlago.com/api/v1";
+
+            /** 每页行数（Lago 上限 100）。 */
+            private int pageSize = 100;
+
+            /** 分页保险丝：最多拉多少页，防止误配死循环。 */
+            private int maxPages = 100;
+
+            /** 单次 HTTP 超时（秒）。 */
+            private int timeoutSeconds = 30;
+
+            /**
+             * 拉取结果落盘目录（CSV，留作原始凭证 + 导入管道的输入）。
+             * 默认与 agent 文件导入目录相同：导入工具只接受导入目录内的相对路径，
+             * 两边同一个目录时拉完即可一键导入；改成别的目录就得开
+             * {@code recon.agent.file-import.allow-absolute-paths} 或手动挪文件。
+             */
+            private String dir = "./data/import";
+
+            public String getDir() {
+                return dir;
+            }
+
+            public void setDir(String dir) {
+                this.dir = dir;
+            }
+
+            public String getApiKey() {
+                return apiKey;
+            }
+
+            public void setApiKey(String apiKey) {
+                this.apiKey = apiKey;
+            }
+
+            public String getBaseUrl() {
+                return baseUrl;
+            }
+
+            public void setBaseUrl(String baseUrl) {
+                this.baseUrl = baseUrl;
+            }
+
+            public int getPageSize() {
+                return pageSize;
+            }
+
+            public void setPageSize(int pageSize) {
+                this.pageSize = pageSize;
+            }
+
+            public int getMaxPages() {
+                return maxPages;
+            }
+
+            public void setMaxPages(int maxPages) {
+                this.maxPages = maxPages;
+            }
+
+            public int getTimeoutSeconds() {
+                return timeoutSeconds;
+            }
+
+            public void setTimeoutSeconds(int timeoutSeconds) {
+                this.timeoutSeconds = timeoutSeconds;
+            }
+        }
     }
 
     /**

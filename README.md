@@ -32,6 +32,7 @@ recon-lens 把这件事拆成四件确定的事：
 - **规则 DSL**：`keyField` 逐笔 / `dimension` 复合维度 / `measures` 聚合 / 自定义 SQL；分片支持取模与 `rangeKey` 范围切分
 - **金额归一导入**：CSV 里的 `¥1,234.50` / `(1,234.50)` / `1.234.567,89` 这类脏金额自动归一成 DECIMAL，币种提示单独摘出、原始值留档 `__raw_*` 旁列——对账引擎能直接比，差异复盘能回看原文
 - **厂商导出 profile**：`recon_import_file` 传 `profile=lago-invoice-fees` / `lago-invoices`，按厂商导出表头重命名列、`_cents` 分单位自动换算成元、强制列类型；表头不匹配直接报错（带期望表头），表尾可选列照走通用推断。profile 是配置不是代码路径——接新厂商 = 加一份映射 + 一组按真实表头写的测试
+- **原生 Lago API 连接器**：填 `recon.connector.lago.api-key` 即可拉厂商账单（`POST /api/connectors/lago/sync {resource: fees|invoices}`），按 profile 表头映射落盘 CSV（原始凭证），分页拉全、跨资源 join 发票号、401/限流说人话；导入走 `recon_import_file` 既有管道——拉取与导入分离是刻意的（agent 包可选退场的架构边界，映射口径只有一份）
 - **计量漂移归因（少收的钱）**：`POST /api/prices/impact` 把 job 全部可计价差异 × 价格汇总成金额——"severity 是工程师的口径，金额是财务的口径"这道翻译在这里做；`POST /api/diffs/{id}/price-impact` 单条计价并带回命中价格条目。状态类差异没有金额语义，汇总跳过并如实计数、单条 400
 - **争议证据包一键导出**：`GET /api/jobs/{id}/evidence-pack.csv`（可选 `priceCode/model/tokenType/at`）出一份可直接发客户/财务的 CSV——逐条差异 + 当时两侧整行 JSON 凭证 + 适用价格与生效窗 + 生命周期状态一应俱全；全字段引号转义 + UTF-8 BOM（Excel 中文环境不乱码），公式注入前缀（`=`/`+`/`@`）已钳掉。不带 priceCode 只出差异+凭证，可计价差异乘价出"金额影响（负=少收）"
 - **token 感知价格规则表**：`price_code × model × token_type × 时间窗 × 阶梯` 五维价格表（`POST /api/prices` 录入，重叠窗录入时就拒），`POST /api/prices/resolve` 按请求时间戳试算——月中调价回溯匹配旧价、cache write/read 分价、阶梯按本次请求量落档、BigDecimal 全程。比对内核不知道 1M tokens 值多少钱，这张表知道：计量漂移归因（我方 token × 单价 vs 厂商账单）从这里出数
@@ -49,7 +50,7 @@ recon-lens 把这件事拆成四件确定的事：
 定位是**架构原型 / 单机工具**，不是生产级平台。以下能力明确**没有**，评估时别按平台预期：
 
 - **单机单库**：元数据存 H2 或单个 MySQL；没有分布式执行与高可用，进程挂了靠启动自检标 FAILED 后人工重跑
-- **取数靠 SQL**：数据必须能被一条 SELECT 睹到 —— 没有 Lago/Stripe 式 API 连接器，不支持跨库取数
+- **取数靠 SQL 或已接的厂商**：数据要么能被一条 SELECT 睹到，要么是 Lago（文件导出 / API 连接器）；Stripe 等其他厂商 API 按 profile 逐个接，还没有通用 API 连接器框架
 - **快照是"指纹"不是"冻结"**：任务记录建任务时的行数/校验和指纹与水位判定，能回答"读的是哪份数据、当时两侧是否就绪"，但不冻结数据本身
 - **鉴权是单密钥**：写接口靠 `X-Api-Key` 常量时间比较，没有用户体系/角色/审计日志
 - **ChatRuntime 偏重**：会话/记忆/规划与引擎同进程，`recon.agent.enabled=false` 可关掉纯引擎跑
@@ -168,6 +169,7 @@ curl "http://localhost:8080/api/diffs/summary?jobId=1"
 | GET | `/api/jobs/{id}/evidence-pack.csv` | 争议证据包导出（差异+凭证+价格，CSV） |
 | POST | `/api/prices` / `/api/prices/impact` | token 价格表 / 计量漂移归因（少收的钱） |
 | POST | `/api/diffs/{id}/lifecycle` | 差异认领/核销/豁免（append-only 台账） |
+| GET | `/api/connectors` / `POST /api/connectors/lago/sync` | 连接器目录 / 拉 Lago 账单落盘（需 X-Api-Key） |
 | GET | `/api/rules` / `POST /api/rules` | 规则库 / 提交新版本（运维直写通路，默认关闭，见下） |
 | POST | `/api/models/{ruleCode}?shards=4` | 大表按规则粒度物化成模型表（默认草稿，需审批） |
 

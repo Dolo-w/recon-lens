@@ -4,6 +4,23 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 下午：原生 Lago API 连接器，杀手级需求①）
+
+- `POST /api/connectors/lago/sync {resource: fees|invoices}`：填
+  `recon.connector.lago.api-key` 即可拉厂商账单；`GET /api/connectors` 出目录
+  （资源/profile/是否已配 key，只报布尔不回显 key）
+- 落盘 CSV（`recon.connector.lago.dir`，默认与导入目录同处）留作原始凭证，
+  导入走 `recon_import_file` 既有管道——**拉取与导入分离是刻意的**：
+  agent 包是可选子系统（`recon.agent.enabled=false` 必须等于"回到引入之前"，
+  ArchUnit 硬边界），且 profile 归一口径只能有一份
+- 端点/字段全按本地 Lago 源码核证：列表分页 meta（pagination.rb）、
+  fee/invoice JSON 与 CSV 导出同构（同一套 V1 serializer）；
+  fees 跨资源 join invoices 补发票号；`subscription_plan_code` API 不返回如实留空
+- fail-loud：401 说"key 无效"、429 带 Retry-After、max-pages 保险丝防误配死循环、
+  空数据不落盘；分页响应半截不进目录（临时文件 + 原子改名）
+- 测试用 JDK HttpServer 伪装 Lago（零新依赖），全链路钉住：拉取→落盘→导入→
+  分换元→白名单注册；LagoConnectorApiTest(5)，全量 956 绿（含 ArchUnit 边界）
+
 ### 新增（2026-11-21 下午：争议证据包一键导出，杀手级需求③）
 
 - `GET /api/jobs/{id}/evidence-pack.csv`（可选 `priceCode/model/tokenType/at`）：
