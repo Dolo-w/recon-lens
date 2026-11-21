@@ -1,0 +1,10 @@
+.git
+.github
+.run
+target
+dist
+work
+logs
+go-worker/go-worker.exe
+*.md
+!README.md

@@ -97,15 +97,89 @@ public class ReconProperties {
     }
 
     /**
-     * 厂商 API 连接器配置（Phase 2 第三步）。v1 只接 Lago：填 API key 即可拉厂商账单，
-     * 走与文件导入完全相同的 profile 归一/建表/白名单管道。
+     * 厂商 API 连接器配置（v3 扩展架构 §三多厂商化）：每个厂商一个配置块
+     * （key / base-url / 分页 / 保险丝 / 落盘目录），字段语义与 Lago 块一致。
      */
     public static class Connector {
 
         private final Lago lago = new Lago();
+        private final Orb orb = new Orb();
 
         public Lago getLago() {
             return lago;
+        }
+
+        public Orb getOrb() {
+            return orb;
+        }
+
+        public static class Orb {
+
+            /** Orb API key（Bearer）；留空 = 连接器不可用，sync 调用直接报错说人话。 */
+            private String apiKey = "";
+
+            /** API 根地址；测试/代理可改。 */
+            private String baseUrl = "https://api.withorb.com/v1";
+
+            /** 每页行数（Orb 上限 100，默认 20）。 */
+            private int pageSize = 100;
+
+            /** 分页保险丝：最多拉多少页，防止误配死循环。 */
+            private int maxPages = 100;
+
+            /** 单次 HTTP 超时（秒）。 */
+            private int timeoutSeconds = 30;
+
+            /** 拉取结果落盘目录（与 Lago 同语义，见 Lago.dir 注释）。 */
+            private String dir = "./data/import";
+
+            public String getApiKey() {
+                return apiKey;
+            }
+
+            public void setApiKey(String apiKey) {
+                this.apiKey = apiKey;
+            }
+
+            public String getBaseUrl() {
+                return baseUrl;
+            }
+
+            public void setBaseUrl(String baseUrl) {
+                this.baseUrl = baseUrl;
+            }
+
+            public int getPageSize() {
+                return pageSize;
+            }
+
+            public void setPageSize(int pageSize) {
+                this.pageSize = pageSize;
+            }
+
+            public int getMaxPages() {
+                return maxPages;
+            }
+
+            public void setMaxPages(int maxPages) {
+                this.maxPages = maxPages;
+            }
+
+            public int getTimeoutSeconds() {
+                return timeoutSeconds;
+            }
+
+            public void setTimeoutSeconds(int timeoutSeconds) {
+                this.timeoutSeconds = timeoutSeconds;
+            }
+
+            public String getDir() {
+                return dir;
+            }
+
+            public void setDir(String dir) {
+                this.dir = dir;
+            }
         }
 
         public static class Lago {

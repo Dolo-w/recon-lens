@@ -1,0 +1,40 @@
+# recon-lens 演示部署：一条 docker compose up 起全套。
+# 账号密码是演示库明文（开箱即见差异），生产请按 application-mysql.yml 注释自己管凭证与建表。
+services:
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: recon_demo_root
+      MYSQL_DATABASE: recon_lens
+      MYSQL_USER: recon
+      MYSQL_PASSWORD: recon_demo
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 建表 + 演示数据：直接挂仓库权威文件，不拷贝不漂移；initdb 只在空数据目录时执行
+      - ./src/main/resources/schema-mysql.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./src/main/resources/data-demo-mysql.sql:/docker-entrypoint-initdb.d/02-demo-data.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-precon_demo_root"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  recon:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: mysql
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/recon_lens?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useCursorFetch=true&rewriteBatchedStatements=true&allowPublicKeyRetrieval=true&useSSL=false
+      MYSQL_USER: recon
+      MYSQL_PASSWORD: recon_demo
+      # 演示种子在非 H2 数据源上默认会被 DemoRunner 拦下（防演示数据混进真实库）；
+      # 这里是演示库所以显式放行：启动即自动跑一遍 BILL_VS_SETTLE，日志里直接有差异报告
+      RECON_ENGINE_RUNDEMOONSTARTUP: "true"
+      RECON_ENGINE_DEMOALLOWEXTERNALDB: "true"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-data:

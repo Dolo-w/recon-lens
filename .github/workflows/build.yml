@@ -33,3 +33,38 @@ jobs:
         run: |
           ./mvnw -B --no-transfer-progress -DskipTests package
           node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar
+
+  go-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go（版本跟 go-worker/go.mod 走）
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-worker/go.mod
+
+      - name: 静态检查
+        working-directory: go-worker
+        run: go vet ./...
+
+      - name: 测试（含竞态检测 -race，本地机器没 gcc 跑不了，CI 补上）
+        working-directory: go-worker
+        run: go test -race ./...
+
+      - name: 构建
+        working-directory: go-worker
+        run: go build ./...
+
+  docker-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 校验 Dockerfile 引用的文件齐全 + compose 语法（本机无 docker，CI 兜底）
+        run: |
+          docker compose config -q
+          test -f src/main/resources/schema-mysql.sql
+          test -f src/main/resources/data-demo-mysql.sql
+          test -d src/main/resources/rules
+          test -f go-worker/go.mod

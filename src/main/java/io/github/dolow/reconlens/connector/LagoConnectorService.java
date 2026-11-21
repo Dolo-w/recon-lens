@@ -8,20 +8,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedWriter;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Lago 连接器服务（连接器层第三步）：填 API key 拉厂商账单，落盘成可导入的 CSV。
@@ -38,7 +29,8 @@ import java.util.UUID;
  *
  * <p>落盘目录默认与 agent 导入目录相同（{@code recon.connector.lago.dir}），拉完即可
  * {@code recon_import_file(file=<csvFile>, table=..., profile=<resource 对应 profile>)} 一键导入；
- * 拉下来的 CSV 本身就是原始凭证，留在导入目录里可复跑可审计。
+ * 拉下来的 CSV 本身就是原始凭证，留在导入目录里可复跑可审计。CSV 落盘口径（RFC4180 + 原子改名）
+ * 已抽到 {@link ConnectorCsvWriter}，第二家厂商进来直接复用，不各自长落盘逻辑。
  *
  * <p><b>字段映射口径（全部核证自 Lago 源码）</b>：CSV 导出内部用的就是 V1 serializer
  * （REST API 同款），所以 API JSON → CSV 列的映射可以直接从
@@ -52,10 +44,9 @@ import java.util.UUID;
  * </ul>
  */
 @Service
-public class LagoConnectorService {
+public class LagoConnectorService implements BillingConnector {
 
     private static final Logger log = LoggerFactory.getLogger(LagoConnectorService.class);
-    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC);
 
     private final LagoApiClient client;
     private final ReconProperties properties;
@@ -82,15 +73,34 @@ public class LagoConnectorService {
             }
             throw new IllegalArgumentException("未知资源: " + id + "，可用: " + FEES.id() + ", " + INVOICES.id());
         }
+
+        ConnectorResource descriptor() {
+            return new ConnectorResource(id(), profileId(), description());
+        }
     }
 
-    /** 同步结果：落盘文件 + 拉取侧说明 + 下一步导入怎么做（说人话，不让人猜）。 */
-    public record SyncResult(String resource, String csvFile, long apiRows,
-                             List<String> notes, Map<String, String> importHint) {
+    @Override
+    public String name() {
+        return "lago";
     }
 
-    public SyncResult sync(String resourceId) {
+    @Override
+    public boolean configured() {
+        return client.isConfigured();
+    }
+
+    @Override
+    public List<ConnectorResource> resources() {
+        return List.of(Resource.FEES.descriptor(), Resource.INVOICES.descriptor());
+    }
+
+    @Override
+    public SyncOutcome sync(String resourceId) {
         Resource resource = Resource.resolve(resourceId);
+        if (!configured()) {
+            throw new IllegalStateException("Lago 连接器未配置 API key"
+                    + "（recon.connector.lago.api-key）——先填 key 再同步");
+        }
         List<JsonNode> rows = client.fetchAll(resource.id());
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("Lago API 返回 0 行 " + resource.id()
@@ -99,9 +109,10 @@ public class LagoConnectorService {
         List<String> headers = ColumnProfiles.resolve(resource.profileId()).requiredHeaders();
         List<List<String>> records = resource.id().equals(Resource.FEES.id())
                 ? mapFees(rows) : mapInvoices(rows);
-        String csvFile = writeCsv(resource.id(), headers, records);
+        Path dir = Path.of(properties.getConnector().getLago().getDir());
+        String csvFile = ConnectorCsvWriter.write(name(), resource.id(), dir, headers, records);
         log.info("Lago 连接器同步完成: resource={} apiRows={} csv={}", resource.id(), rows.size(), csvFile);
-        return new SyncResult(resource.id(), csvFile, rows.size(), prepareNotes(resource, records),
+        return new SyncOutcome(resource.id(), csvFile, rows.size(), prepareNotes(resource, records),
                 Map.of("tool", "recon_import_file",
                         "args", "file=" + csvFile + ", table=<自取表名>, profile=" + resource.profileId(),
                         "note", "导入走 agent 侧管道（profile 归一/分换元/白名单注册都在那一步），"
@@ -195,42 +206,5 @@ public class LagoConnectorService {
         }
         notes.add("映射口径核证自 Lago 源码 data_exports/csv/*.rb（CSV 导出与 REST API 同用 V1 serializer）");
         return notes;
-    }
-
-    // ------------------------------------------------------------------
-    // CSV 落盘：RFC4180 引号转义；先写临时文件再原子改名，半截响应不落目录
-
-    private String writeCsv(String resource, List<String> headers, List<List<String>> records) {
-        Path dir = Path.of(properties.getConnector().getLago().getDir()).toAbsolutePath().normalize();
-        try {
-            Files.createDirectories(dir);
-            String name = "lago-" + resource + "-" + TS.format(Instant.now()) + "-"
-                    + UUID.randomUUID().toString().substring(0, 8) + ".csv";
-            Path tmp = dir.resolve(name + ".tmp");
-            Path target = dir.resolve(name);
-            try (BufferedWriter w = Files.newBufferedWriter(tmp, StandardCharsets.UTF_8)) {
-                w.write(csvLine(headers));
-                w.write("\r\n");
-                for (List<String> record : records) {
-                    w.write(csvLine(record));
-                    w.write("\r\n");
-                }
-            }
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            return name;
-        } catch (IOException e) {
-            throw new IllegalStateException("拉取结果写盘失败（目录 " + dir + "）：" + e.getMessage(), e);
-        }
-    }
-
-    private static String csvLine(List<String> cells) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < cells.size(); i++) {
-            if (i > 0) {
-                sb.append(',');
-            }
-            sb.append('"').append(cells.get(i).replace("\"", "\"\"")).append('"');
-        }
-        return sb.toString();
     }
 }

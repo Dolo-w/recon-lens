@@ -29,3 +29,4 @@ docs/backlog.md
 # IDE 运行配置（每个人不同）
 .run/
 go-worker/go-worker.exe
+dist/

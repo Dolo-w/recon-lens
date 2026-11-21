@@ -165,6 +165,117 @@ public final class ColumnProfiles {
         }
     });
 
+    /** Orb 发票汇总：一行 = 一张发票（字段核证自 docs.withorb.com list-invoices，2026-11）。 */
+    public static final ColumnProfile ORB_INVOICES = register(new ColumnProfile() {
+        @Override
+        public String id() {
+            return "orb-invoices";
+        }
+
+        @Override
+        public String description() {
+            return "Orb 发票汇总导出（一行=一张发票），字段核证自 docs.withorb.com list-invoices；"
+                    + "Orb 金额是字符串十进制元（如 \"8.00\"），按 DECIMAL 直接入库，不走分换算；"
+                    + "日期列存 ISO 8601 原文（字符串可比，排序即时间序）";
+        }
+
+        @Override
+        public List<String> requiredHeaders() {
+            return List.of(
+                    "orb_id",
+                    "invoice_number",
+                    "invoice_source",
+                    "status",
+                    "currency",
+                    "customer_orb_id",
+                    "customer_external_id",
+                    "subscription_orb_id",
+                    "subtotal",
+                    "total",
+                    "amount_due",
+                    "invoice_date",
+                    "due_date",
+                    "service_period_start",
+                    "service_period_end",
+                    "paid_at",
+                    "voided_at",
+                    "memo",
+                    "created_at");
+        }
+
+        @Override
+        public Map<String, ColumnProfile.ColumnSpec> specs() {
+            Map<String, ColumnProfile.ColumnSpec> m = new LinkedHashMap<>();
+            m.put("orb_id", ColumnProfile.ColumnSpec.of("orb_id", "VARCHAR(64)"));
+            m.put("invoice_number", ColumnProfile.ColumnSpec.of("invoice_number", "VARCHAR(128)"));
+            m.put("invoice_source", ColumnProfile.ColumnSpec.of("invoice_source", "VARCHAR(64)"));
+            m.put("status", ColumnProfile.ColumnSpec.of("status", "VARCHAR(32)"));
+            m.put("currency", ColumnProfile.ColumnSpec.of("currency", "VARCHAR(8)"));
+            m.put("customer_orb_id", ColumnProfile.ColumnSpec.of("orb_customer_id", "VARCHAR(64)"));
+            m.put("customer_external_id", ColumnProfile.ColumnSpec.of("customer_external_id", "VARCHAR(128)"));
+            m.put("subscription_orb_id", ColumnProfile.ColumnSpec.of("orb_subscription_id", "VARCHAR(64)"));
+            m.put("subtotal", ColumnProfile.ColumnSpec.of("subtotal", "DECIMAL(24,6)"));
+            m.put("total", ColumnProfile.ColumnSpec.of("total_amount", "DECIMAL(24,6)"));
+            m.put("amount_due", ColumnProfile.ColumnSpec.of("amount_due", "DECIMAL(24,6)"));
+            m.put("invoice_date", ColumnProfile.ColumnSpec.of("invoice_date", "VARCHAR(64)"));
+            m.put("due_date", ColumnProfile.ColumnSpec.of("due_date", "VARCHAR(64)"));
+            m.put("service_period_start", ColumnProfile.ColumnSpec.of("service_period_start", "VARCHAR(64)"));
+            m.put("service_period_end", ColumnProfile.ColumnSpec.of("service_period_end", "VARCHAR(64)"));
+            m.put("paid_at", ColumnProfile.ColumnSpec.of("paid_at", "VARCHAR(64)"));
+            m.put("voided_at", ColumnProfile.ColumnSpec.of("voided_at", "VARCHAR(64)"));
+            m.put("memo", ColumnProfile.ColumnSpec.of("memo", "VARCHAR(1024)"));
+            m.put("created_at", ColumnProfile.ColumnSpec.of("created_at", "VARCHAR(64)"));
+            return m;
+        }
+    });
+
+    /** Orb 订阅摘要：一行 = 一个订阅（summary 端点，快且字段足够对账）。 */
+    public static final ColumnProfile ORB_SUBSCRIPTIONS = register(new ColumnProfile() {
+        @Override
+        public String id() {
+            return "orb-subscriptions";
+        }
+
+        @Override
+        public String description() {
+            return "Orb 订阅摘要导出（一行=一个订阅，GET /subscriptions/summary），"
+                    + "字段核证自 docs.withorb.com；日期列存 ISO 8601 原文";
+        }
+
+        @Override
+        public List<String> requiredHeaders() {
+            return List.of(
+                    "orb_id",
+                    "status",
+                    "name",
+                    "plan_orb_id",
+                    "plan_external_id",
+                    "plan_name",
+                    "customer_orb_id",
+                    "customer_external_id",
+                    "start_date",
+                    "end_date",
+                    "created_at");
+        }
+
+        @Override
+        public Map<String, ColumnProfile.ColumnSpec> specs() {
+            Map<String, ColumnProfile.ColumnSpec> m = new LinkedHashMap<>();
+            m.put("orb_id", ColumnProfile.ColumnSpec.of("orb_id", "VARCHAR(64)"));
+            m.put("status", ColumnProfile.ColumnSpec.of("status", "VARCHAR(32)"));
+            m.put("name", ColumnProfile.ColumnSpec.of("name", "VARCHAR(256)"));
+            m.put("plan_orb_id", ColumnProfile.ColumnSpec.of("orb_plan_id", "VARCHAR(64)"));
+            m.put("plan_external_id", ColumnProfile.ColumnSpec.of("plan_external_id", "VARCHAR(128)"));
+            m.put("plan_name", ColumnProfile.ColumnSpec.of("plan_name", "VARCHAR(256)"));
+            m.put("customer_orb_id", ColumnProfile.ColumnSpec.of("orb_customer_id", "VARCHAR(64)"));
+            m.put("customer_external_id", ColumnProfile.ColumnSpec.of("customer_external_id", "VARCHAR(128)"));
+            m.put("start_date", ColumnProfile.ColumnSpec.of("start_date", "VARCHAR(64)"));
+            m.put("end_date", ColumnProfile.ColumnSpec.of("end_date", "VARCHAR(64)"));
+            m.put("created_at", ColumnProfile.ColumnSpec.of("created_at", "VARCHAR(64)"));
+            return m;
+        }
+    });
+
     static {
         // 保险丝：requiredHeaders 与 specs 必须一一对应，构造期就炸出来，不等第一次导入
         for (ColumnProfile profile : BY_ID.values()) {

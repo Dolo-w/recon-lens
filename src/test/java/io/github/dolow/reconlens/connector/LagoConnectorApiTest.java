@@ -267,4 +267,22 @@ class LagoConnectorApiTest {
                 .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
         assertThat(json.readTree(body).get("error").asText()).contains("fees, invoices");
     }
+
+    @Test
+    @DisplayName("SPI_未知连接器400_目录多厂商结构")
+    void spiUnknownConnectorAndCatalogShape() throws Exception {
+        // SPI 化后的新行为：POST 到不存在的厂商段，400 说人话列出已注册连接器
+        String body = mvc.perform(post("/api/connectors/stripe/sync")
+                        .contentType("application/json").content("{\"resource\":\"invoices\"}"))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertThat(json.readTree(body).get("error").asText()).contains("lago");
+
+        // 目录：lago 段保持原有结构（configured 只报布尔 + resources 带 profileId + sync 提示路径）
+        String catalog = mvc.perform(get("/api/connectors"))
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertThat(catalog).contains("\"lago\"")
+                .contains("\"profileId\":\"lago-invoice-fees\"")
+                .contains("POST /api/connectors/lago/sync")
+                .doesNotContain("test-key");
+    }
 }

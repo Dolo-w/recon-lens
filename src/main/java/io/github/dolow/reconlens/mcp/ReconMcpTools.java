@@ -1,6 +1,7 @@
 package io.github.dolow.reconlens.mcp;
 
 import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.connector.BillingConnector;
 import io.github.dolow.reconlens.connector.LagoConnectorService;
 import io.github.dolow.reconlens.domain.DiffLifecycle;
 import io.github.dolow.reconlens.domain.DiffRecord;
@@ -596,7 +597,7 @@ public class ReconMcpTools {
 
     /** Lago 连接器：拉厂商账单落盘 CSV，提示接着用 recon_import_file 导入（agent 模式）。 */
     public String lagoSync(String resource) {
-        LagoConnectorService.SyncResult result = lagoConnector.sync(blankToNull(resource));
+        BillingConnector.SyncOutcome result = lagoConnector.sync(blankToNull(resource));
         StringBuilder sb = new StringBuilder("Lago 账单拉取完成：resource=").append(result.resource())
                 .append("，").append(result.apiRows()).append(" 行，已落盘 ")
                 .append(result.csvFile()).append('\n');

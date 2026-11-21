@@ -379,3 +379,10 @@
 - 启动预检：列存在性校验（对齐 ShardRunner.validateFields）+ 两侧键序预检（乱序拒绝，不提交未校验数据）
 - 零第三方依赖（纯标准库），goroutine 分片并发比对、committer 按序提交；10 万×2 行实测 0.75 秒
 - 测试：decimal/value/端到端（差异/缺失/重复键/事件时间/PENDING/resume 幂等与增量/CSV BOM+分号+引号/数值键/CSV 输出）全绿
+
+## 新增（2026-11-21 傍晚：v3 扩展架构第一批 —— CI 补 Go / Docker / 连接器 SPI / Orb 第二连接器）
+
+- **CI 补 Go**（build.yml）：`go-worker` job 并行跑 `go vet` + `go test -race`（本地无 gcc 跑不了的竞态检测由 CI 兜底）+ 构建；新增 `docker-config` job 校验 compose 语法与 Dockerfile 引用文件齐全。release.yml 加三平台 worker 二进制（linux-amd64 / darwin-arm64+amd64 / windows-amd64.exe，CGO_ENABLED=0 静态链接）随 GitHub Release 发布
+- **Docker 部署形态**：多阶段 Dockerfile（golang 静态编 worker + maven 打 jar + temurin-jre 运行层，worker 与规则目录钉死在镜像内）+ docker-compose（recon + mysql:8，建表与演示数据直接挂仓库权威文件零拷贝，演示库显式放行启动演示=开箱即见差异）。演示凭证仅演示用，见 docker-compose.yml 注释
+- **BillingConnector SPI**：连接器抽象接口（name/configured/resources/sync），契约钉死"拉取与导入分离 / fail-loud / 不回显凭证 / 落盘即凭证"；CSV 落盘口径抽 ConnectorCsvWriter 公共设施；ConnectorController 多厂商化（实现 Bean 注册即收，`POST /api/connectors/{name}/sync` 向后兼容原 `/lago/sync`）
+- **Orb 第二连接器**：usage-based 计费厂商（AI 公司主流），`invoices`（GET /invoices，一行=一张发票）+ `subscriptions`（GET /subscriptions/summary，一行=一个订阅）；cursor 分页（pagination_metadata.has_more/next_cursor）逐字核证自官方文档；与 Lago 的关键差异如实落档——金额是字符串十进制元按 DECIMAL 直入（无分换算），日期列存 ISO 原文（字符串可比）；orb-invoices / orb-subscriptions 两个 profile；端到端测试（伪 Orb + cursor 翻页 + 导入链路 + 多厂商目录）3 例全绿
