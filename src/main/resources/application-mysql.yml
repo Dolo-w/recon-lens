@@ -41,6 +41,8 @@ recon:
     timeout-seconds: 30
     batch-limit: 50
   agent:
+    # 生产档默认关闭：会话/记忆/规划是可选子系统，要开必须显式声明（含表白名单）。
+    enabled: false
     schema:
       # 生产档故意留空：闸门 1 是 fail-closed 的，要放行哪些表必须由部署方显式配置
       # （或用 recon_register_table 动态注册）。写在这里的默认值只服务 H2 演示库。

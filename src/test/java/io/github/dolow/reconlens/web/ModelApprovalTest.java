@@ -29,6 +29,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest(properties = {
         "recon.engine.run-demo-on-startup=false",
+        "recon.agent.enabled=false",
         "spring.datasource.url=jdbc:h2:mem:model_approval;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE"
 })
 class ModelApprovalTest {

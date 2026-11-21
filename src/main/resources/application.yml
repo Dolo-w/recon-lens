@@ -77,6 +77,10 @@ recon:
       # 没有 api-key 时这一层自动空转，行为与 P1 一致。
       summarize: true
   agent:
+    # 演示档默认开启：首页控制台（static/index.html）的会话接口全挂在 agent 装配下，
+    # 关掉时页面还在、后端退场，一打开就是一排 404 —— "clone 下来 30 秒跑起来"
+    # 应该看到全功能。生产档（application-mysql.yml）显式关闭，按需打开。
+    enabled: true
     schema:
       # 闸门 1 的表白名单，fail-closed：没列出来的表，起草的规则一律被拒。
       # 这里只放**演示库**里那两张账单表，目的是让「clone 下来 → 起草一条规则 → 试算」
