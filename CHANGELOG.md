@@ -4,6 +4,20 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 深夜：财务可读报告 + 知识层 ROI 报表 —— 出口层收口）
+
+- **财务可读报告**：`GET /api/reports/finance?days=30&priceCode=&model=&tokenType=` ——
+  一页内联样式中文 HTML（浏览器直接打开/打印/转发）。六段：概览卡片（任务数/扫描行数/一致行/差异总数/闭环率）
+  → 差异分类（类型+严重级别）→ 金额影响（带 priceCode 才出账：合计 + 少收 TOP10，负红正绿；
+  不带则如实标注缺席，不出误导性报告）→ 闭环台账（生命周期四态 + 闭环率口径）→
+  知识层省钱账 → 口径说明（PENDING≠MISSING、豁免语义、机器联想 vs 人工确认、月中调价计价时点）。
+  动态文本全量 HTML 转义，业务键里的 `<script>` 进不了页面
+- **知识层 ROI 报表**：`GET /api/knowledge/roi` —— v4 验收口径第 1 条「越用越准可量化」落地。
+  ExplainService 补 L0/L2/L3 三层命中计数（L1 在知识库原有计数器），拼成一张账：
+  lookups / L1 命中 / L0 联想 / L2 模型调用 / L3 模板兜底 / **llmCallsSaved（L1+L0，没发生的模型调用数）** /
+  kbBySource（HUMAN vs LLM 知识配比）。note 明写「进程累计、重启归零」—— 指标不诚实比没有指标更糟
+- 全量 1017 绿（1007 → 1017，+10：FinanceReportApiTest 7 + KnowledgeRoiApiTest 3）
+
 ### 新增（2026-11-21 晚：知识层 K1→K4 全部落地 —— 归因从「猜一次」变成「越用越准」）
 
 - **K1 人工闭环回流**：`recon_diff_lifecycle` 的 RESOLVE/EXEMPT 支持可选 `reasonId`（差异原因分类），

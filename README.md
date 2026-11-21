@@ -170,6 +170,8 @@ curl "http://localhost:8080/api/diffs/summary?jobId=1"
 | GET | `/api/jobs/{id}` / `/api/diffs` / `/api/diffs/summary` | 任务详情 / 差异分页 / 分类汇总 |
 | POST | `/api/diffs/{id}/explain` | 差异归因（模板 / LLM） |
 | GET | `/api/jobs/{id}/evidence-pack.csv` | 争议证据包导出（差异+凭证+价格，CSV） |
+| GET | `/api/reports/finance?days=30&priceCode=` | 财务可读报告（一页中文 HTML：概览/分类/金额影响 TOP/闭环台账/知识层省钱账/口径说明；带 priceCode 才出金额段） |
+| GET | `/api/knowledge/roi` | 知识层 ROI（四层归因命中计数 + llmCallsSaved + 人机知识配比；进程累计、重启归零） |
 | POST | `/api/prices` / `/api/prices/impact` | token 价格表 / 计量漂移归因（少收的钱） |
 | POST | `/api/diffs/{id}/lifecycle` | 差异认领/核销/豁免（append-only 台账） |
 | GET | `/api/connectors` / `POST /api/connectors/{name}/sync` | 连接器目录（多厂商）/ 拉厂商账单落盘（需 X-Api-Key，name = lago / orb） |

@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -158,6 +159,16 @@ public class DiffKnowledgeBase {
 
     public List<Entry> recent(int limit) {
         return repository.recent(limit);
+    }
+
+    /** 知识库条目按来源统计（HUMAN / LLM）——ROI 报表看"人机知识配比"。失败返回空 map，报表不炸主链路。 */
+    public Map<String, Long> sourceCounts() {
+        try {
+            return repository.countBySource();
+        } catch (RuntimeException e) {
+            log.warn("知识库来源统计失败（不影响主链路）：{}", e.toString());
+            return Map.of();
+        }
     }
 
     /** 命中率快照。{@code absent} 与 {@code lowConfidence} 分开记，因为它们要补的东西完全不同。 */

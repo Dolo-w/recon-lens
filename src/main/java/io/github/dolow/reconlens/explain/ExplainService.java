@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 归因入口：单条解释 + 按任务批量补齐。
@@ -64,6 +65,11 @@ public class ExplainService {
     private final ReconEngine engine;
     private final ReconRepository repository;
 
+    /** 分层命中计数（进程生命周期内累计，重启归零）：ROI 报表的原始数据。知识库命中计数在 {@link DiffKnowledgeBase}。 */
+    private final AtomicLong patternHits = new AtomicLong();
+    private final AtomicLong llmExplained = new AtomicLong();
+    private final AtomicLong templateFallbacks = new AtomicLong();
+
     public ExplainService(RuleBasedExplainer ruleBased, LlmDiffExplainer llm, DiffKnowledgeBase knowledge,
                           PatternLibrary patterns, ReconEngine engine, ReconRepository repository) {
         this.ruleBased = ruleBased;
@@ -110,6 +116,7 @@ public class ExplainService {
             if (pattern.isPresent()) {
                 settled.put(diff.id(), patternText(pattern.get()));
                 fromPatterns++;
+                patternHits.incrementAndGet();
             } else {
                 needLlm.add(diff);
             }
@@ -129,6 +136,7 @@ public class ExplainService {
                 if (generated != null && !generated.isBlank()) {
                     text = generated;
                     fromModel++;
+                    llmExplained.incrementAndGet();
                     // 写回知识库：下一批同类差异就不用再问模型了（验收 A6）
                     knowledge.remember(job.ruleCode(), diff, generated);
                 } else {
@@ -136,6 +144,7 @@ public class ExplainService {
                     // 一旦缓存进库，这个形状就永久停在模板水平 —— 模型再也不会被问到，
                     // 等于用"省一次不花钱的计算"换掉了"以后所有同类差异都只有模板质量"。
                     text = ruleBased.explain(rule, diff);
+                    templateFallbacks.incrementAndGet();
                 }
             }
             // 大模型没覆盖到的（没配 key、请求失败、漏答）统一用模板兜底，保证不留空
@@ -160,6 +169,15 @@ public class ExplainService {
     /** 知识库当前状态，给指标/界面用。 */
     public DiffKnowledgeBase.Snapshot knowledgeSnapshot() {
         return knowledge.snapshot();
+    }
+
+    /** 归因分层的四层命中计数（进程生命周期内累计，重启归零）：ROI 报表用。 */
+    public record LayerCounters(long knowledgeHits, long patternHits, long llmExplained, long templateFallbacks) {
+    }
+
+    public LayerCounters layerCounters() {
+        return new LayerCounters(knowledge.snapshot().hits(), patternHits.get(),
+                llmExplained.get(), templateFallbacks.get());
     }
 
     /** 知识库最近条目，给运营看"学到了什么"。 */
@@ -197,8 +215,15 @@ public class ExplainService {
     public String cheapExplain(RuleSpec rule, String ruleCode, DiffRecord diff) {
         return knowledge.lookup(ruleCode, diff)
                 .map(Entry::render)
-                .orElseGet(() -> matchPattern(diff).map(this::patternText)
-                        .orElseGet(() -> ruleBased.explain(rule, diff)));
+                .orElseGet(() -> matchPattern(diff)
+                        .map(p -> {
+                            patternHits.incrementAndGet();
+                            return patternText(p);
+                        })
+                        .orElseGet(() -> {
+                            templateFallbacks.incrementAndGet();
+                            return ruleBased.explain(rule, diff);
+                        }));
     }
 
     /** 分层归因，返回文本、来源层与模式 ID —— 调用方需要知道这次省没省下模型调用。 */
@@ -209,15 +234,18 @@ public class ExplainService {
         }
         Optional<DiffPattern> pattern = matchPattern(diff);
         if (pattern.isPresent()) {
+            patternHits.incrementAndGet();
             return new Attribution(patternText(pattern.get()), Layer.PATTERN, pattern.get().id());
         }
         if (llm.available()) {
             String text = llm.explain(rule, diff);
             if (text != null && !text.isBlank()) {
+                llmExplained.incrementAndGet();
                 knowledge.remember(ruleCode, diff, text);
                 return new Attribution(text, Layer.LLM);
             }
         }
+        templateFallbacks.incrementAndGet();
         return new Attribution(ruleBased.explain(rule, diff), Layer.TEMPLATE);
     }
 
