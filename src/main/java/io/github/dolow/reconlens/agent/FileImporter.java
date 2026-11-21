@@ -1,5 +1,7 @@
 package io.github.dolow.reconlens.agent;
 
+import io.github.dolow.reconlens.connector.AmountNormalizer;
+
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
 import org.apache.poi.ss.usermodel.DateUtil;
@@ -28,8 +30,10 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -101,10 +105,22 @@ public class FileImporter {
      * 一次导入预览/确认的结果。{@code error} 非空表示没有任何变更（与注册器同语义）。
      * {@code columns} 是<b>规范化后</b>的列名（进 DDL 的就是它们），
      * {@code originalHeaders} 保留文件里的原始表头，方便人对照确认。
+     *
+     * <p>{@code amountColumns} 是被判定为"脏金额列"的列号 → 是否欧式分隔（列级证据），
+     * 这些列导入时归一成 DECIMAL、原始值留档 {@code __raw_*} 旁列（见 {@link AmountNormalizer}）；
+     * {@code notes} 是给人看的归一说明（列名、目标类型、旁列名）。
      */
     public record ImportPreview(String file, String table, List<String> columns,
                                 List<String> originalHeaders, List<String> columnTypes,
-                                Long rows, String error) {
+                                Long rows, String error,
+                                List<String> notes, Map<Integer, Boolean> amountColumns) {
+
+        /** 兼容旧签名的便捷构造（无归一信息）。 */
+        public ImportPreview(String file, String table, List<String> columns,
+                             List<String> originalHeaders, List<String> columnTypes,
+                             Long rows, String error) {
+            this(file, table, columns, originalHeaders, columnTypes, rows, error, List.of(), Map.of());
+        }
     }
 
     /** 只读预览：解析文件头与采样行，推断列类型与总行数。不改任何状态。 */
@@ -122,6 +138,8 @@ public class FileImporter {
         List<String> normalized;
         List<String> types;
         long rowCount;
+        List<String> notes = List.of();
+        Map<Integer, Boolean> amountColumns = Map.of();
         try {
             Path path = resolve(file);
             try (ParsedFile parsed = open(path, sheet)) {
@@ -144,12 +162,78 @@ public class FileImporter {
                 }
                 normalized = normalizeColumns(headers);
                 types = inferTypes(sample, headers.size());
+                amountColumns = detectAmountColumns(sample, headers.size(), types);
+                if (!amountColumns.isEmpty()) {
+                    List<String> upgraded = new ArrayList<>(types);
+                    for (int idx : amountColumns.keySet()) {
+                        upgraded.set(idx, "DECIMAL(24,6)");
+                    }
+                    types = upgraded;
+                }
+                notes = buildAmountNotes(normalized, headers, amountColumns);
             }
         } catch (IOException e) {
             return new ImportPreview(file, null, List.of(), List.of(), List.of(), null,
                     "读不了文件：" + e.getMessage());
         }
-        return new ImportPreview(file, null, normalized, headers, types, rowCount, null);
+        return new ImportPreview(file, null, normalized, headers, types, rowCount, null, notes, amountColumns);
+    }
+
+    /**
+     * 金额列探测（连接器层第一步，{@link AmountNormalizer}）：在类型推断判成 VARCHAR 的列里找
+     * "脏金额"列 —— 采样内<b>全部</b>非空值都能归一、且至少一条不是纯数字（带货币符号/千分位/会计括号）。
+     * 全部可归一是硬条件：导入是 fail-loud 的，列里只要有一个解析不了的值就不选它，
+     * 否则采样外的坏值会把整次导入炸掉。
+     *
+     * @return 列号 → 是否欧式分隔（列级证据，见 {@link AmountNormalizer#hasEuEvidence}）
+     */
+    static Map<Integer, Boolean> detectAmountColumns(List<List<String>> sample, int columnCount, List<String> types) {
+        Map<Integer, Boolean> out = new LinkedHashMap<>();
+        for (int col = 0; col < columnCount; col++) {
+            if (!types.get(col).startsWith("VARCHAR")) {
+                continue; // 纯数字已经走 BIGINT/DECIMAL；TEXT 太宽，不碰
+            }
+            List<String> values = new ArrayList<>();
+            for (List<String> row : sample) {
+                String v = col < row.size() ? row.get(col) : "";
+                if (v != null && !v.isBlank() && !isNullLiteral(v)) {
+                    values.add(v);
+                }
+            }
+            if (values.size() < 2) {
+                continue; // 一两个值构不成证据
+            }
+            boolean euGroups = AmountNormalizer.hasEuEvidence(values);
+            int nonPlain = 0;
+            for (String v : values) {
+                if (AmountNormalizer.parse(v, euGroups) == null) {
+                    nonPlain = -1; // 有一个解析不了 → 整列放弃，fail-loud 的前提是探测足够保守
+                    break;
+                }
+                if (!AmountNormalizer.isPlainNumeric(v.trim())) {
+                    nonPlain++;
+                }
+            }
+            if (nonPlain > 0) {
+                out.put(col, euGroups);
+            }
+        }
+        return out;
+    }
+
+    /** 归一说明：写清哪列被归一、原始值去了哪，让人不用猜 {@code __raw_*} 是什么。 */
+    private static List<String> buildAmountNotes(List<String> columns, List<String> originalHeaders,
+                                                 Map<Integer, Boolean> amountColumns) {
+        if (amountColumns.isEmpty()) {
+            return List.of();
+        }
+        List<String> notes = new ArrayList<>();
+        for (int idx : amountColumns.keySet()) {
+            String origin = idx < originalHeaders.size() ? originalHeaders.get(idx) : columns.get(idx);
+            notes.add("列 " + columns.get(idx) + "（原表头: " + origin + "）检测到货币符号/千分位等金额写法，"
+                    + "导入时归一为 DECIMAL(24,6)，原始值保留在旁列 __raw_" + columns.get(idx));
+        }
+        return notes;
     }
 
     /**
@@ -178,6 +262,21 @@ public class FileImporter {
         }
         List<String> columns = p.columns();
         List<String> types = p.columnTypes();
+        // 金额列归一（连接器层）：类型已升级为 DECIMAL；每列追加一个 __raw_* 旁列存原始值，
+        // 差异复盘要能回看 "¥1,234.50" 这种原文，而不是只剩归一后的数字
+        Map<Integer, Boolean> amountCols = p.amountColumns();
+        int baseCount = columns.size();
+        Map<Integer, String> rawCols = new LinkedHashMap<>();
+        if (!amountCols.isEmpty()) {
+            columns = new ArrayList<>(columns);
+            types = new ArrayList<>(types);
+            for (int idx : amountCols.keySet()) {
+                String raw = uniqueColumn(columns, "__raw_" + columns.get(idx));
+                columns.add(raw);
+                types.add("VARCHAR(128)");
+                rawCols.put(idx, raw);
+            }
+        }
         StringBuilder ddl = new StringBuilder("CREATE TABLE ").append(tableName).append(" (");
         for (int i = 0; i < columns.size(); i++) {
             if (i > 0) {
@@ -190,24 +289,37 @@ public class FileImporter {
             jdbc.execute(ddl.toString());
         } catch (RuntimeException e) {
             return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, p.rows(),
-                    "建表失败：" + rootMessage(e));
+                    "建表失败：" + rootMessage(e), p.notes(), p.amountColumns());
         }
         long inserted;
         try {
-            inserted = loadRows(resolve(file), tableName, columns, types, sheet);
+            inserted = loadRows(resolve(file), tableName, columns, types, sheet,
+                    baseCount, amountCols, rawCols);
         } catch (Exception e) {
             safeDrop(tableName);
             return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, p.rows(),
-                    "灌数失败（已回滚删除新建表，可换表名重试）：" + rootMessage(e));
+                    "灌数失败（已回滚删除新建表，可换表名重试）：" + rootMessage(e), p.notes(), p.amountColumns());
         }
         TableRegistrar.Preview registered = registrar.confirm(tableName, operator);
         if (registered.error() != null) {
             safeDrop(tableName);
             return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, inserted,
-                    "数据已导入但注册白名单失败（表已回滚删除）：" + registered.error());
+                    "数据已导入但注册白名单失败（表已回滚删除）：" + registered.error(), p.notes(), p.amountColumns());
         }
-        log.info("文件导入完成: file={} -> table={} rows={} columns={}", file, tableName, inserted, columns.size());
-        return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, inserted, null);
+        log.info("文件导入完成: file={} -> table={} rows={} columns={} amountNormalized={}", file, tableName,
+                inserted, columns.size(), amountCols.size());
+        return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, inserted, null,
+                p.notes(), p.amountColumns());
+    }
+
+    /** 生成不与现有列名冲突的旁列名（文件里真有一列叫 __raw_amount 时加序号，绝不悄悄覆盖）。 */
+    private static String uniqueColumn(List<String> existing, String base) {
+        String candidate = base;
+        int suffix = 2;
+        while (existing.contains(candidate)) {
+            candidate = base + "_" + suffix++;
+        }
+        return candidate;
     }
 
     // ------------------------------------------------------------------
@@ -714,7 +826,14 @@ public class FileImporter {
     // ------------------------------------------------------------------
     // 灌数：值全部走 PreparedStatement，标识符已从严校验
 
-    private long loadRows(Path path, String table, List<String> columns, List<String> types, String sheet) throws IOException {
+    /**
+     * @param baseCount  原始列数（{@code __raw_*} 旁列不算）—— 行列数校验和报错口径都按它
+     * @param amountCols 金额归一列号 → 是否欧式分隔；这些列不走普通 convert，走 {@link AmountNormalizer}
+     * @param rawCols    金额归一列号 → 原始值旁列名
+     */
+    private long loadRows(Path path, String table, List<String> columns, List<String> types, String sheet,
+                          int baseCount, Map<Integer, Boolean> amountCols, Map<Integer, String> rawCols)
+            throws IOException {
         String placeholders = String.join(", ", Collections.nCopies(columns.size(), "?"));
         String sql = "INSERT INTO " + table + " (" + String.join(", ", columns) + ") VALUES (" + placeholders + ")";
         long inserted = 0;
@@ -730,16 +849,29 @@ public class FileImporter {
                     List<String> row = rows.get(idx);
                     // 多余的列说明分隔符出现在不该出现的地方（未转义的逗号/分号是最常见的）。
                     // 以前这里是 i < columns.size() 的静默截断：数据少了一截，任务照样 SUCCESS。
-                    if (row.size() > columns.size()) {
+                    if (row.size() > baseCount) {
                         throw new IOException("第 " + (inserted + idx + 1) + " 行有 " + row.size()
-                                + " 列，表头只有 " + columns.size() + " 列：多半是某个字段里出现了未转义的"
+                                + " 列，表头只有 " + baseCount + " 列：多半是某个字段里出现了未转义的"
                                 + "分隔符，或文件被手工改过。请检查该行；字段里有逗号时要用双引号包起来");
                     }
                     Object[] one = new Object[columns.size()];
-                    for (int i = 0; i < columns.size() && i < types.size(); i++) {
+                    for (int i = 0; i < baseCount && i < types.size(); i++) {
                         String v = i < row.size() ? row.get(i) : "";
                         if (v == null || v.isBlank() || isNullLiteral(v)) {
                             one[i] = null;
+                            continue;
+                        }
+                        if (amountCols.containsKey(i)) {
+                            AmountNormalizer.ParsedAmount parsedAmount = AmountNormalizer.parse(v, amountCols.get(i));
+                            if (parsedAmount == null) {
+                                throw new IOException("第 " + (inserted + idx + 1) + " 行第 " + (i + 1) + " 列（"
+                                        + columns.get(i) + "）的值 \"" + abbreviate(v) + "\" 无法按金额归一："
+                                        + "该列被判定为金额列（前 " + properties.getFileImport().getInferenceSampleRows()
+                                        + " 行都是可解析的金额写法），但这一个值解析不了。修掉该值或调大/调小采样窗口"
+                                        + "（recon.agent.file-import.inference-sample-rows）后重试");
+                            }
+                            one[i] = parsedAmount.value();
+                            one[columns.indexOf(rawCols.get(i))] = v;
                             continue;
                         }
                         try {

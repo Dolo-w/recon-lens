@@ -328,6 +328,9 @@ public class AgentMcpTools {
         McpToolFactory.put(structured, "originalHeaders", p.originalHeaders());
         McpToolFactory.put(structured, "columnTypes", p.columnTypes());
         McpToolFactory.put(structured, "rows", p.rows());
+        if (!p.notes().isEmpty()) {
+            McpToolFactory.put(structured, "notes", p.notes());
+        }
 
         StringBuilder sb = new StringBuilder();
         if (p.error() != null) {
@@ -344,6 +347,9 @@ public class AgentMcpTools {
                 }
             }
             sb.append("\n现在可以用 recon_draft_rule 针对这张表起草规则了。");
+            for (String note : p.notes()) {
+                sb.append('\n').append(note);
+            }
         } else {
             sb.append("文件 ").append(p.file()).append(" 预览：")
                     .append(p.rows()).append(" 行数据 × ").append(p.columns().size()).append(" 列。\n");
@@ -353,6 +359,9 @@ public class AgentMcpTools {
                     sb.append("（原表头: ").append(p.originalHeaders().get(i)).append('）');
                 }
                 sb.append('\n');
+            }
+            for (String note : p.notes()) {
+                sb.append("- ").append(note).append('\n');
             }
             sb.append("确认无误后再次调用本工具（action=confirm，并传 table 指定目标表名）完成导入 —— ")
                     .append("导入会建新表并放宽安全边界，必须先经用户确认。");
