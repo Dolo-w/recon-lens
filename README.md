@@ -2,7 +2,6 @@
 
 <p>
   <a href="https://github.com/Dolo-w/recon-lens/actions/workflows/build.yml"><img alt="build" src="https://github.com/Dolo-w/recon-lens/actions/workflows/build.yml/badge.svg"></a>
-  <a href="https://github.com/Dolo-w/recon-lens/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.1.0-blue"></a>
   <img alt="java" src="https://img.shields.io/badge/Java-17-orange">
   <img alt="spring boot" src="https://img.shields.io/badge/Spring%20Boot-3.3-6db33f">
   <img alt="mcp" src="https://img.shields.io/badge/MCP-stdio-6f42c1">
@@ -10,225 +9,71 @@
 </p>
 
 **配置化的对账引擎 + 可对话的对账 Agent。**
-规则即数据：用 YAML 描述"对账维度 + 要比的字段"（复合键、聚合口径、分片策略都是声明式的），提交即生效；
-引擎按业务键流式归并对账，分片并行、断点重跑、差异自动分类归因；
-同时是一个 MCP server —— 18 个工具把全部能力暴露给 Agent，Agent 还能**听懂一句业务描述就起草新规则、影子试算、交人审批**。
 
----
-
-## 目录
-
-- [项目介绍](#项目介绍)
-- [三种使用方式（P0 / P1 / P2）](#三种使用方式p0--p1--p2)
-- [引擎使用指导](#引擎使用指导)
-- [Agent 对接指导](#agent-对接指导)
-- [文档索引](#文档索引)
-
-# 项目介绍
+规则即数据：用 YAML 声明"对账维度 + 比对字段"，提交经影子试算与人工审批后生效；
+引擎按业务键流式归并对账，分片并行、断点重跑、水位判定区分"真缺失"与"未到达"、差异自动分类归因；
+同时是一个 MCP server —— 18 个工具把全部能力暴露给 Agent，一句业务描述就能起草规则。
 
 ## 它解决什么问题
 
 线上对账脚本通常长这样：一段硬编码 SQL + 一堆 `if`，跑出几万条差异丢给运营，然后运营来问"为什么差"。
-真出事的时候更麻烦 —— 脚本跑到一半挂了只能整批重来；数据涨到千万级直接 OOM；每接一个新系统都要再写一版脚本。
-
 recon-lens 把这件事拆成四件确定的事：
 
 | 传统脚本 | recon-lens |
 | --- | --- |
-| 对账逻辑写在代码里，改规则要发版 | 规则即数据：维度与比对字段声明式描述，提交新版本经影子试算与人工审批后生效，落库前先被 DSL 校验拦一遍 |
+| 对账逻辑写在代码里，改规则要发版 | 规则即数据：声明式 DSL，提交新版本经试算与审批后生效 |
 | 全量 `SELECT` 进内存再比对 | 按业务键升序流式取数 + 双指针归并，内存与数据量无关 |
 | 失败只能整批重跑 | 按分片记录进度，只重跑失败分片，重跑天然幂等 |
-| 只给差异数量，原因靠人猜 | 差异自动分类 + 两级归因（离线模板兜底，可接大模型） |
-| 接入新系统要再写一版脚本 | Agent 对表结构零假设：导入文件或注册表之后，一句业务描述就能起草规则 |
+| 只给差异数量，原因靠人猜 | 差异四分类 + 两级归因（离线模板兜底，可接大模型） |
+| 数据没到齐就敢报"缺失" | 配置水位（cut-off）：未就绪侧缺失标 `*_PENDING`，等数据到齐重跑出终判 |
 
 ## 核心能力
 
-- **规则 DSL**：`keyField` 逐笔对 / `dimension` 复合维度 / `measures` 聚合口径 / 自定义 SQL，分片策略支持取模与数值范围（`rangeKey`）
-- **归并式对账**：两侧按业务键升序流式游标 + 双指针归并，千万级数据堆内存恒定（实测 `-Xmx256m` 跑 200 万×2，0 次 Full GC）
-- **分片并行 + 断点重跑**：分片是并行与重试的单位，每次执行前先清本分片旧差异，幂等
-- **差异分类 + 归因**：`VALUE_MISMATCH` / `MISSING_LEFT` / `MISSING_RIGHT` / `DUPLICATE_KEY` 四类语义，归因两级（规则模板 / OpenAI 兼容 LLM，LLM 失败安静降级）
-- **规则库版本化**：同一个 `code` 多版本共存，任务钉住当时的规则快照，改规则不影响历史任务重跑
-- **对账 Agent**（MCP）：起草规则 → 安全闸门 → 影子试算 → 人工审批 → 生效实跑，全程对话式；文件导入、动态表注册、审批代办都有工具
+- **规则 DSL**：`keyField` 逐笔 / `dimension` 复合维度 / `measures` 聚合 / 自定义 SQL；分片支持取模与 `rangeKey` 范围切分
+- **归并式对账**：两侧流式游标 + 双指针归并，实测 `-Xmx256m` 跑 200 万×2 行 0 次 Full GC
+- **分片并行 + 断点重跑**：重跑前先清本分片旧差异，幂等
+- **水位/cut-off**：按规则配置两侧水位列，建任务时探测 `MAX(水位列)`；未就绪侧的单边缺失标 `*_PENDING` 而非冒充真缺失——`MISSING ≠ NOT_YET_ARRIVED`
+- **差异分类 + 归因**：`VALUE_MISMATCH` / `MISSING_LEFT` / `MISSING_RIGHT` / `DUPLICATE_KEY` 四类语义；模板归因永远可用，LLM 失败安静降级
+- **规则库版本化**：同一 `code` 多版本共存，任务钉住当时的规则快照，改规则不影响历史任务
+- **对账 Agent**（MCP）：起草规则 → 安全闸门 → 影子试算 → 人工审批 → 生效实跑，全程对话式
 
 ## 当前能力边界（诚实版）
 
 定位是**架构原型 / 单机工具**，不是生产级平台。以下能力明确**没有**，评估时别按平台预期：
 
-- **单机单库**：任务/差异元数据存 H2 或单个 MySQL；没有分布式执行、没有高可用部署，进程挂了靠启动自检把中断任务标 FAILED 后人工重跑；
-- **取数靠 SQL**：数据必须能被一条 SELECT 睹到 —— 没有 Lago/Stripe 式 API 连接器，也没有跨库（一侧 MySQL 一侧 ClickHouse）取数；
-- **快照是"指纹"不是"冻结"**：任务记录建任务时的行数/校验和指纹，能回答"读的是哪份数据"，但不冻结数据本身 —— 取数窗口之外新写入的数据属于下一轮；
-- **差异生命周期只到"归因"**：有豁免性质的说明字段与知识库，但没有"认领 → 处理 → 核销"的闭环台账；
-- **鉴权是单密钥**：写接口靠 `X-Api-Key` 常量时间比较，没有用户体系/角色/审计日志；
-- **ChatRuntime 偏重**：会话/记忆/规划那一坨和引擎在同一进程里，`recon.agent.enabled=false` 可以关掉纯引擎跑。
-
-## 架构总览
-
-```mermaid
-flowchart LR
-    R[rules/*.yml] -->|RuleParser 校验| CAT[(recon_rule<br/>规则库 / 版本 / 快照)]
-    API[REST /api/**] --> CAT
-    AGENT[Agent / MCP 客户端] -->|stdio JSON-RPC| MCP[MCP server<br/>18 个工具]
-    MCP --> CAT
-    MCP --> ENG
-    MCP --> DB
-    CAT --> ENG[ReconEngine<br/>ShardPlanner 分片计划]
-    ENG --> POOL[分片并行线程池]
-    POOL --> RUN[ShardRunner<br/>流式游标 + 双指针归并]
-    RUN --> DB[(recon_job / recon_shard / recon_diff)]
-    RUN --> MM[MergeMatcher<br/>差异四分类]
-    DB --> EXP[ExplainService<br/>模板归因 + LLM 归因]
-    EXP --> API2[差异查询 / 补归因 / 重试]
-    AGENT -.->|起草→试算→审批| LLM[OpenAI 兼容 LLM<br/>规则起草]
-```
-
-# 三种使用方式（P0 / P1 / P2）
-
-同一个 jar，按环境里有什么自动分三档，能力只增不减：P1 包含 P0，P2 包含 P1。
-
-| 档位 | 环境要求 | 谁在听人话 | 额外得到 | 典型用途 |
-| --- | --- | --- | --- | --- |
-| **P0** 零依赖 | JDK 17，一个进程 | 关键词词表（确定性、毫秒级、0 成本） | 引擎 + REST + 18 个 MCP 工具 + 表单/词表会话 + 审批面板 | 单机、内网、断网环境；只想要一个会跑的引擎 |
-| **P1** 有记忆 | P0 实例持续跑，不用改配置 | 仍是词表 | 滚动摘要、轮次分页、案例记忆、口径检索（关键词；接 bge-m3 则为向量） | 会话很长；要回答"上次为什么差" |
-| **P2** 有模型 | P1 + `DEEPSEEK_API_KEY` | 模型优先，词表只做快路径与降级 | 口语化意图、多轮指代、槽位填充、规则起名、人话回执、摘要归纳、差异归因 | 运营用大白话直接问账 |
-
-三条边界在所有档位都一样，不因有没有模型而改变：
-
-- **模型只建议，不落库**：输出经白名单解析与事实校验，写库的永远是代码；
-- **写动作先回执，后执行**：改规则、跑对账都要用户明确确认；
-- **规则生效必须人批**：草稿 → 影子试算 → 人工批准 → ACTIVE，聊天里说"批准"不算数。
-
-没配 key 时 P2 的路径自动空转（`GET /api/chat/planner` 返回 `modelEnabled=false`），行为与 P1 完全一致——**key 不是启动前提**。
-
-## P0：无模型、无宿主，只用浏览器
-
-```bash
-java -jar target/recon-lens-0.1.0.jar \
-  --server.port=18080 \
-  --recon.agent.enabled=true \
-  --recon.review.api-key=<审批密钥>
-```
-
-- `--recon.agent.enabled=true` 才会注册 Agent 的 6 个 MCP 工具与会话接口（`/api/chat/**`）；关掉就是纯引擎；
-- `--recon.review.api-key` 是审批通道的口令，**不配则审批接口一律 403**（fail-closed）。口令自己定，页面"审批密钥"里填同一个值。
-
-打开 `http://localhost:18080/` 就能完成整条闭环：输入"跑一下 BILL_VS_SETTLE"、点 15 个表单按钮、起草、取审批票、批准。
-
-P0 能做到的：
-
-- 对账全流程：起草 → 试算 → 看差异 → 审批 → 生效实跑，全程不离页面；
-- 词表能听懂的句子：`有哪些规则`、`跑一下 <规则编码>`、`看差异 / 为什么差 / 重跑失败分片`、`查任务 #N`、`有哪些表 / <表名> 有哪些字段`、`起草个规则`；
-- 同样的能力走 REST（`/api/rules`、`/api/jobs`、`/api/diffs?jobId=N` ...）和 MCP stdio（12 个基础工具）；
-- 规则起草走模板骨架：能落库、能跑通，但命名是 `AUTO_` 前缀、不会追问业务语义。
-
-P0 的边界：复杂口语、多轮指代、"这两张表按订单和状态对"这类一句话多参数会触发澄清；回执是模板句，不会归纳。
-
-## P1：同一个实例，自动获得记忆
-
-P0 的实例跑起来之后，不需要任何新配置就会多出这些能力（数据在会话语义里累积）：
-
-- **滚动摘要**：每轮把"任务号 / 规则编码 / 差异 top 坐标"做成坐标行；窗口用到 55% 自动把旧轮折成摘要（`recon.chat.window-tokens`，默认 8000）。可用 `GET /api/chat/sessions/{id}/summary` 查看；
-- **轮次分页**：`GET /api/chat/sessions/{id}?before=<seq>`，长会话不用整段重放；
-- **案例记忆**：`POST /api/cases` 落一条"任务 → 结论"，下次同一数据指纹/规则命中时自动带进上下文（`recon_case_memory`）；
-- **口径检索**：`POST /api/docs` 导入口径文档，`GET /api/docs/search?q=...` 按关键词召回（`recon_doc_chunk` 的全文索引兜底）；会话里（`GET /api/chat/recall`）会把命中的口径带进提问。
-
-想要语义检索再开向量（可选）：
-
-```bash
---recon.recall.embedding.url=http://127.0.0.1:11434/v1/embeddings \
---recon.recall.embedding.model=bge-m3 \
---recon.recall.embedding.dim=1024
-```
-
-没配就按关键词；配了但服务连不上会**降级并标注 `degraded`**，不会丢结果。
-
-## P2：配一把 key，模型接管"听懂"
-
-```bash
-$env:DEEPSEEK_API_KEY="sk-..."
-java -jar target/recon-lens-0.1.0.jar \
-  --server.port=18080 \
-  --recon.agent.enabled=true \
-  --recon.review.api-key=<审批密钥>
-```
-
-模型（默认 `deepseek-chat`，任何 OpenAI 兼容端点都行，`recon.chat.llm.*` 可改）负责：
-
-| 环节 | 模型做什么 | 代码兜什么底 |
-| --- | --- | --- |
-| 意图路由 | 判断这一句是查规则、跑对账、看差异还是起草规则 | 12 字以内的纯查询走词表快路径；模型失败/超时熔断后整段退回词表 |
-| 多轮指代 | 把"这两个"、"就这两张"接到上一问的候选上 | 挂起问题随每轮带给模型；回答不上时按候选做确定性兜底 |
-| 槽位填充 | 把"用订单和状态对金额"拆成左右表/业务键/比对字段 | 候选列白名单校验，值必须来自真实列名 |
-| 规则起名 | 给草稿起 `ORDER_STATUS_RECON` 这类业务名 | 名字格式/唯一性由代码校验，不合格退回 `AUTO_` |
-| 回执与摘要 | 把工具结果翻成人话、把长会话折成几句 | 坐标行（任务号/规则编码/差异 key）由代码写死，不交给模型 |
-| 差异归因 | 解释"差在哪、像什么原因" | 模板归因永远可用；LLM 失败安静降级 |
-
-保护措施（不依赖模型自觉）：
-
-- 模型输出先过白名单/枚举/正则校验，动作不在表里就是 `HELP`；
-- 规则体（YAML/SQL）由确定性模板生成，模型只填参数，不改结构；
-- 连续失败 3 次熔断 5 分钟，期间全部走词表；
-- 写动作（跑对账、改规则）一律先给回执，等"确认"；
-- 审批只认控制台/接口里的人工确认，会话里说"批准"不生效。
-
-注意两套 LLM 配置是分开的：会话路由/回执用 `recon.chat.llm.*`（默认开）；差异归因用 `recon.llm.*`（默认 `enabled=false`，要归因时单独开）。
-
-验证当前档位：
-
-```bash
-curl -s http://localhost:18080/api/chat/planner
-# {"planner":"词表路由（确定性，0 成本） → 模型路由：...（正常）","modelEnabled":true}
-```
-
-## 怎么选
-
-- 只要"规则化、可重跑、能审批"的对账引擎：**P0**，一个进程、零外联；
-- 想让系统自己沉淀"上次怎么差的、口径是什么"：**P1**，什么都不用加，跑起来就有；
-- 想让运营不学任何编码、用大白话直接问账：**P2**，一把 key。
-
-三档共用同一份数据模型与同一套工具实现——切换档位不改代码，只改环境。
-
-# 引擎使用指导
+- **单机单库**：元数据存 H2 或单个 MySQL；没有分布式执行与高可用，进程挂了靠启动自检标 FAILED 后人工重跑
+- **取数靠 SQL**：数据必须能被一条 SELECT 睹到 —— 没有 Lago/Stripe 式 API 连接器，不支持跨库取数
+- **快照是"指纹"不是"冻结"**：任务记录建任务时的行数/校验和指纹与水位判定，能回答"读的是哪份数据、当时两侧是否就绪"，但不冻结数据本身
+- **差异生命周期只到"归因"**：有豁免性质的说明字段，没有"认领 → 处理 → 核销"的闭环台账
+- **鉴权是单密钥**：写接口靠 `X-Api-Key` 常量时间比较，没有用户体系/角色/审计日志
+- **ChatRuntime 偏重**：会话/记忆/规划与引擎同进程，`recon.agent.enabled=false` 可关掉纯引擎跑
 
 ## 30 秒跑起来
 
-需要 JDK 17+。没装 Maven 就用仓库自带的 wrapper（Windows 用 `mvnw.cmd`）：
+需要 JDK 17+，没装 Maven 就用自带 wrapper：
 
 ```bash
-./mvnw spring-boot:run          # 或 mvn spring-boot:run
+./mvnw spring-boot:run        # Windows 用 mvnw.cmd
 ```
 
-默认 H2 内存库自带演示数据（`bill_left` 账单 / `bill_right` 结算各 10 条，埋了 4 条差异：
-金额超差、两侧重复、单边缺失各一，另有一条容差内的故意不报）和 3 条演示规则，
-启动日志直接打出一份演示对账报告：
+默认 H2 内存库自带演示数据（两表各 10 行、埋 4 条差异）和 3 条演示规则，启动日志直接打出演示对账报告：
 
 ```
 ================ recon-lens 启动演示 ================
 任务 #1 状态=SUCCESS 分片=2
 扫描行数: 左侧 10 / 右侧 10，匹配 9，差异 4 条
 差异分类: {AMOUNT_MISMATCH=1, DUPLICATE_KEY=1, MISSING_LEFT=1, MISSING_RIGHT=1}
-----------------------------------------------------
-[MEDIUM] DUPLICATE_KEY key=C005|ORD20260006 账单 2 条(id=6/9) -> 结算 2 条(id=6/9)
-    归因: 业务键 C005|ORD20260006 出现重复记录（账单 2 条(id=6/9) / 结算 2 条(id=6/9)）。常见原因：重复入账或消息重放，需要按幂等键去重后重跑本分片。
-[HIGH] AMOUNT_MISMATCH key=C002|ORD20260003 field=amount 1500 -> 1500.3
-    归因: 账单 与 结算 的 amount 不一致：左侧 1500，右侧 1500.3，相差 -0.3（相对 0.02%）。常见原因：入账时点不同、手续费/汇率进位、撤单退单未同步、数据被人工修改。
-[HIGH] MISSING_RIGHT key=C008|ORD20260009 __biz_key=C008|ORD20260009, amount=780 -> （无）
-    归因: 业务键 C008|ORD20260009 在结算侧没有记录，只有账单侧有。常见原因：对方延迟入账或推送失败、我方已受理但未落库、批次边界跨天。
-[HIGH] MISSING_LEFT key=C010|ORD20260011 （无） -> __biz_key=C010|ORD20260011, amount=500
-    归因: 业务键 C010|ORD20260011 在账单侧没有记录，只有结算侧有。常见原因：两侧对账时间窗不一致、我方补单/同步任务漏推、对方提前入账。
-----------------------------------------------------
 试一下: curl http://localhost:8080/api/jobs/1
 ====================================================
 ```
 
 ```bash
-./mvnw test     # 全量测试（真 H2、真 SQL、真并发）
+./mvnw test        # 全量测试（真 H2、真 SQL、真并发）
 ```
 
 ## 写一条对账规则
 
-完整 DSL 见 [docs/rule-dsl.md](docs/rule-dsl.md)，这里是最常用的三种形态：
-
-**① 复合维度对账**（`src/main/resources/rules/bill-recon.yml`，即演示规则）：
+完整 DSL 见 [docs/rule-dsl.md](docs/rule-dsl.md)。最常用的复合维度形态（`src/main/resources/rules/bill-recon.yml`，即演示规则）：
 
 ```yaml
 code: BILL_VS_SETTLE
@@ -237,7 +82,7 @@ left:
   label: 账单
   table: bill_left
   keyType: STRING
-  dimension: [customer_id, order_no]     # 引擎生成 CONCAT(customer_id,'|',order_no) AS __biz_key
+  dimension: [customer_id, order_no]     # 引擎生成 CONCAT(...) AS __biz_key 并按它归并
 right:
   label: 结算
   table: bill_right
@@ -266,46 +111,39 @@ duplicate: { diffType: DUPLICATE_KEY, severity: MEDIUM }
 options:   { maxAttempts: 2 }
 ```
 
-**② 声明式维度**（不写 SQL、不写 orderBy，示例：按客户+状态聚合）：
-
-```yaml
-left:
-  table: bill_left
-  keyType: STRING
-  dimension: [customer_id, status]       # 引擎生成 CONCAT(customer_id,'|',status) AS __biz_key，按它升序
-# 加 measures 即聚合维度：
-#   measures: { amount: "SUM(amount)", order_count: "COUNT(*)" }
-```
-
-**③ 范围分片**（数值主键大表走索引的推荐切法）：
-
-```yaml
-shard:
-  count: 8
-  rangeKey: biz_id       # 仅数值列；引擎探两侧 MIN/MAX 生成 col >= lo AND col < hi 半开区间，末段 <= hi
-```
-
 关键约束：
 
-- `dimension` 与 `keyField` 二选一；配了 `measures` 就必须聚合比对，`compare` 字段必须是 `measures` 别名
-- 两侧分片口径必须按**同一业务键**切，不能各按自己的代理主键切（否则同一笔业务劈到不同分片，凭空多出假缺失）
-- 分片谓词里的函数会被校验：`HASH()` 这类 MySQL 不存在的函数在提交时直接拒绝（`NON_PORTABLE_FUNCTION`），改用 `MOD(CRC32(...), {shards})`
-- 容差 `tolerance` 是绝对值，`tolerancePercent` 是**小数比率**（0.001 = 0.1%）
+- `dimension` 与 `keyField` 二选一；配了 `measures` 就必须聚合比对
+- 两侧分片口径必须按**同一业务键**切，否则同一笔业务劈进不同分片，凭空多出假缺失
+- 分片谓词里的函数会被校验：`HASH()` 这类 MySQL 没有的函数提交时直接拒绝，改用 `MOD(CRC32(...), {shards})`
+- 容差 `tolerance` 是绝对值，`tolerancePercent` 是**小数比率**
 
-## 提交规则与发起对账（REST）
+## 水位/cut-off：区分"真缺失"与"未到达"
+
+应用配置里按规则配水位列（只支持表取数侧；不配置则行为与老版本完全一致）：
+
+```yaml
+recon:
+  engine:
+    watermarks:
+      BILL_VS_SETTLE:
+        left: updated_at
+        right: updated_at
+        lag-seconds: 300        # 水位 >= now-lag 即算就绪
+```
+
+建任务时探测两侧 `MAX(水位列)`，晚于 `now-lag` 判"未就绪"；未就绪侧的单边缺失标
+`MISSING_LEFT_PENDING` / `MISSING_RIGHT_PENDING`，并附水位归因说明。
+数据到齐后重跑（`POST /api/jobs/{id}/retry`）会重新探测水位，PENDING 自动变终判。
+探测失败 fail-loud（列名不合法、水位列不是时间型都直接拒绝），绝不给一份没验过水位的报告。
+
+## 发起对账（REST）
 
 ```bash
-# 提交一版新规则（code 相同=升级版本）
-# 注意：这是运维 legacy 直写通路 —— 默认关闭，需开 recon.rules.legacy-define-enabled 并带
-# X-Api-Key，提交即生效（跳过审批）；MCP 的 recon_define_rule 则一律落草稿 + 试算 + 审批
-curl -X POST http://localhost:8080/api/rules \
-     -H 'Content-Type: application/yaml' -H 'X-Operator: alice' -H 'X-Api-Key: <review.api-key>' \
-     --data-binary @src/main/resources/rules/bill-recon.yml
-
 # 发起对账（sync=true 同步等结果）
 curl -X POST http://localhost:8080/api/jobs \
      -H 'Content-Type: application/json' \
-     -d '{"ruleCode":"BILL_VS_SETTLE","batchId":"2026-10-17","sync":true}'
+     -d '{"ruleCode":"BILL_VS_SETTLE","batchId":"2026-11-21","sync":true}'
 
 # 查结果
 curl http://localhost:8080/api/jobs/1
@@ -313,70 +151,47 @@ curl "http://localhost:8080/api/diffs?jobId=1&limit=50"
 curl "http://localhost:8080/api/diffs/summary?jobId=1"
 ```
 
+常用端点：
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/api/jobs` | 发起对账；也可带 `rule` / `ruleYaml` 内联一份不落库的规则试算 |
-| GET | `/api/jobs` / `/api/jobs/{id}` | 任务列表 / 详情（分片状态 + 差异分类汇总） |
-| POST | `/api/jobs/{id}/retry?onlyFailed=true` | 断点续跑（按任务自带的规则快照） |
-| GET | `/api/diffs` / `/api/diffs/summary` | 差异分页 / 汇总 |
-| POST | `/api/diffs/{id}/explain`、`/api/diffs/explain?jobId=1` | 单条 / 批量归因 |
-| GET | `/api/rules`、`/api/rules/{code}` | 规则库列表 / 版本历史 |
-| POST | `/api/rules` | 提交一版新规则（`X-Operator` 记操作人） |
-| DELETE | `/api/rules/{code}` | 停用规则（版本保留，历史任务仍可按快照重跑） |
-| POST | `/api/models/{ruleCode}?shards=4` | 预处理物化：大表按规则粒度算成模型表并注册 `<CODE>__MODEL` 规则（默认草稿，需审批；`recon.model.require-approval` 默认 true） |
-| GET | `/api/models` | 已物化的模型表清单 |
+| POST | `/api/jobs` | 发起对账；也可带 `ruleYaml` 内联规则（按试算处理，不绕审批） |
+| POST | `/api/jobs/{id}/retry?onlyFailed=true` | 断点续跑（按任务自带的规则快照，重探水位） |
+| GET | `/api/jobs/{id}` / `/api/diffs` / `/api/diffs/summary` | 任务详情 / 差异分页 / 分类汇总 |
+| POST | `/api/diffs/{id}/explain` | 差异归因（模板 / LLM） |
+| GET | `/api/rules` / `POST /api/rules` | 规则库 / 提交新版本（运维直写通路，默认关闭，见下） |
+| POST | `/api/models/{ruleCode}?shards=4` | 大表按规则粒度物化成模型表（默认草稿，需审批） |
 
-> 提示：运行时提交规则 = 运行时改 SQL，生产上这个入口要挂在网关鉴权后面。
+> `POST /api/rules` 是运维 legacy 直写通路：默认关闭，需开 `recon.rules.legacy-define-enabled` 并带 `X-Api-Key`，提交即生效。生产上要挂在网关鉴权后面；Agent 通道的规则一律走审批。
 
 ## 生产部署（MySQL）
 
-复用你已有的 MySQL 8 实例即可（本项目对实例无特殊要求），不用新装数据库：
+复用已有 MySQL 8 实例即可：
 
 ```bash
-# 1. 建库 + 建表（在已有实例上执行）
-mysql -h <你的实例> -u <用户名> -p -e "CREATE DATABASE IF NOT EXISTS recon_demo DEFAULT CHARSET utf8mb4"
-mysql -h <你的实例> -u <用户名> -p recon_demo < src/main/resources/schema-mysql.sql
+# 1. 建库 + 建表（schema 给 DBA 执行）
+mysql -h <实例> -u <用户名> -p -e "CREATE DATABASE IF NOT EXISTS recon_demo DEFAULT CHARSET utf8mb4"
+mysql -h <实例> -u <用户名> -p recon_demo < src/main/resources/schema-mysql.sql
 
-# 2. 启动，连接参数指向你的实例
+# 2. 启动
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=mysql \
-  --spring.datasource.url="jdbc:mysql://<你的实例>:3306/recon_demo?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useCursorFetch=true&rewriteBatchedStatements=true&useSSL=false" \
+  --spring.datasource.url="jdbc:mysql://<实例>:3306/recon_demo?serverTimezone=Asia/Shanghai&useCursorFetch=true&rewriteBatchedStatements=true&useSSL=false" \
   --spring.datasource.username=<用户名> --spring.datasource.password=<密码>
 ```
 
-- 表结构给 DBA 执行 `src/main/resources/schema-mysql.sql`（MySQL 8.0.29 空库连跑两遍验证通过）
-- 连接参数已带 `useCursorFetch=true`（否则驱动会把结果集整体拉进内存，流式取数形同虚设）与 `rewriteBatchedStatements=true`
-- 连接池默认 24：每个分片同时持左右两个游标，池子至少要 `2 × recon.engine.parallelism`，否则会出现"全在等连接"的假慢（实测慢 6~11 倍）
-- 大表灌数用 `tools/parallel-load.mjs`（N 并发 + 先灌数后建索引，200 万行实测 168.7s）
-- 规则目录可挂 `file:./rules/` 当种子来源；`recon.seed-rules: false` 可关
-- **业务键排序口径自动对齐**：MySQL 的 `utf8mb4_general_ci` 是大小写不敏感排序（`apple < Zebra`），而 Java 按码元比较（`Zebra < apple`）。
-  归并式对账要求两者一致，否则同一条记录会被两侧各报一次缺失。引擎会自动把业务键包装成
-  `CONVERT(... USING utf16) COLLATE utf16_bin`（与 Java 逐码元严格等价），启动日志会打
-  `业务键排序口径：MySQL：…`。**只有用声明式 `dimension` 的规则才受保护**；写法里自带 `orderBy` 的旧规则会打印一条 WARN，
-  引擎无法替规则作者决定排序语义，请改成声明式维度。
+实测踩过的坑，四个关键点：
 
-性能数字（百万级 H2 一键复现 + 独立 MySQL 2M×2 真机、`-Xmx256m`）与调优结论见 [docs/benchmark.md](docs/benchmark.md)，
-一句话版：**分片只影响耗时，不影响结果**；函数谓词切分每片全表扫，把分片桶做成索引列（或用 `rangeKey` 范围分片）才能真提速。
+- `useCursorFetch=true` 必须带，否则驱动把结果集整体拉进内存，流式取数形同虚设
+- 连接池默认 24：每个分片同时持左右两个游标，池子至少 `2 × recon.engine.parallelism`，否则出现"全在等连接"的假慢（实测慢 6~11 倍）
+- 业务键排序口径自动对齐：MySQL `utf8mb4_general_ci` 大小写不敏感排序与 Java 码元序不一致会导致假缺失，引擎自动把业务键包成 `CONVERT(... USING utf16) COLLATE utf16_bin`（仅声明式 `dimension` 受保护）
+- 大表灌数用 `tools/parallel-load.mjs`（N 并发 + 先灌数后建索引，2×200 万行实测 168.7s）
 
-# Agent 对接指导
+压测方法与调优结论见 [docs/benchmark.md](docs/benchmark.md)。一句话版：**分片只影响耗时，不影响结果**；把分片桶做成索引列（或用 `rangeKey`）才能真提速。
 
-把 recon-lens 接进你的 AI 助手（Claude Desktop / Cursor / Cherry Studio / 任何支持 stdio MCP 的宿主），
-就能对话式完成：**导入数据 → 起草规则 → 影子试算 → 人工审批 → 生效实跑 → 差异归因**。
+## 对账 Agent（MCP）
 
-Agent 是两层 LLM 分工：宿主的大模型负责"听懂需求 + 组织工具调用"，recon-lens 内置的 LLM（任意 OpenAI 兼容端点）负责"起草规则 JSON"。
-Agent 对表结构零假设 —— 全部结构信息来自表白名单 + 数据库元数据，规则落库前要过安全闸门和影子试算。
-
-## 第 0 步：准备
-
-| 组件 | 说明 |
-|---|---|
-| JDK 17+ | 打包与运行 |
-| MySQL 8 | **直接复用已有实例，不要新装**。只需：① 建一个空库（如 `CREATE DATABASE recon_demo`）；② 执行 `src/main/resources/schema-mysql.sql`。没有 MySQL 才需要装一个；没有库表也可以直接用文件导入（见第 3 步） |
-| 打包 | `mvn -DskipTests package` → `target/recon-lens-0.1.0.jar` |
-| LLM 端点 | ① 任意 OpenAI 兼容端点（DeepSeek / OpenAI / 本地 vLLM）；② 本地 Mock 验链路：`node tools/mock-llm.mjs 8123` |
-
-## 第 1 步：注册 MCP 连接器
-
-在你的 MCP 客户端配置里加（以 Web 实例 + MCP stdio 双进程、共享同一个库为例）：
+接进任何支持 stdio MCP 的宿主（Claude Desktop / Cursor / Cherry Studio…），就能对话式完成
+**导入数据 → 起草规则 → 影子试算 → 人工审批 → 生效实跑 → 差异归因**。
 
 ```json
 {
@@ -387,203 +202,74 @@ Agent 对表结构零假设 —— 全部结构信息来自表白名单 + 数据
         "-jar", "/绝对路径/recon-lens-0.1.0.jar",
         "--spring.profiles.active=mcp",
         "--recon.agent.enabled=true",
-        "--recon.llm.enabled=true",
-        "--recon.llm.base-url=https://api.deepseek.com/v1",
-        "--recon.llm.api-key=<你的 key>",
-        "--recon.llm.model=deepseek-chat",
-        "--recon.review.api-key=<审批接口密钥>",
-        "--recon.review.token-secret=<审批令牌密钥>",
-        "--recon.agent.schema.tables=bill_left,bill_right"
-      ],
-      "env": {
-        "RECON_SQL_INIT": "never",
-        "SPRING_DATASOURCE_URL": "jdbc:mysql://127.0.0.1:3307/recon_agent_verify?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useCursorFetch=true&rewriteBatchedStatements=true&allowPublicKeyRetrieval=true&useSSL=false",
-        "SPRING_DATASOURCE_USERNAME": "root",
-        "SPRING_DATASOURCE_PASSWORD": "",
-        "SPRING_DATASOURCE_DRIVER_CLASS_NAME": "com.mysql.cj.jdbc.Driver"
-      }
+        "--recon.agent.schema.tables=bill_left,bill_right",
+        "--recon.review.api-key=<审批密钥>"
+      ]
     }
   }
 }
 ```
 
-参数语义（都是实测踩过的坑）：
+- 12 个基础工具（跑对账 / 看差异 / 归因 / 表结构探查）始终可用；`recon.agent.enabled=true` 额外开放 6 个 Agent 工具（起草、试算轮询、表注册、文件导入、审批代办）
+- **表白名单 fail-closed**：`--recon.agent.schema.tables` 不配等于拒绝所有规则
+- **审批铁律**：规则生效必须人批 —— 草稿 → 影子试算 → 人工批准 → ACTIVE，会话里说"批准"不算数
+- 要起草规则再配 `--recon.llm.enabled=true` + OpenAI 兼容端点；不配也能跑，起草降级为模板骨架
 
-- **`SPRING_DATASOURCE_URL/USERNAME/PASSWORD` 换成你已有 MySQL 实例的连接信息**——示例里的 `127.0.0.1:3307/recon_agent_verify` + root 空密码只是文档作者开发机的环境，照抄连不上不代表需要新装数据库；
-- `--recon.agent.enabled=true`：不开则起草链路整个不存在，只有基础工具；
-- `--recon.agent.schema.tables`：**表白名单，fail-closed** —— 不配等于拒绝所有规则；后续可用工具动态注册，不必重启；
-- `--recon.llm.enabled=true` + api-key：只配 base-url 不开 enabled 会被判"LLM 未配置"直接转人工；
-- `--recon.review.api-key` + `token-secret`：审批接口密钥，**不配就一律 403**（fail-closed）；
-- `RECON_SQL_INIT=never` 必须设（schema.sql 是 H2 方言）；`DRIVER_CLASS_NAME` 必须显式给；
-- MCP 进程与 Web 实例要连**同一个库** —— 草稿、试算结论、审批全靠共享数据库状态。
+完整流程（含每步提示词与返回）见 [docs/agent-quickstart.md](docs/agent-quickstart.md)，
+工具入参/返回与动态表注册见 [docs/mcp.md](docs/mcp.md)。
 
-## 第 2 步：认识 18 个 MCP 工具
-
-基础工具（始终可用）：
-
-| 工具 | 用途 |
-|---|---|
-| `recon_list_rules` | 列出规则库（版本、两侧数据源、维度、比对字段） |
-| `recon_list_tables` | 看数据：规则正在用的表 + 通过对话注册过的表（列、行数、结构哈希、登记人） |
-| `recon_describe_table` | 看字段：列名/类型/可空/主键/行数（`sample=true` 才采样且样例默认脱敏；`advice=true` 给维度与比对字段候选 + 可粘贴骨架） |
-| `recon_define_rule` | 提交规则体（JSON/YAML）落库为**草稿**并自动跑影子试算，经 `recon_submit_approval` 审批后才生效 |
-| `recon_run` | 同步跑一次对账（支持内联 `ruleJson` 试算） |
-| `recon_build_model` | 大表按规则粒度物化成模型表，每轮只读模型表（生成的 `<CODE>__MODEL` 规则默认是**草稿**，试算+审批后才生效；`recon.model.require-approval=false` 可退回直写 ACTIVE） |
-| `recon_job_summary` | 任务状态 / 分片完成度 / 差异分类 / 错误原因 |
-| `recon_list_diffs` | 差异明细（业务键、字段、左右值、相对偏差） |
-| `recon_explain_diff` / `recon_explain_job` | 单条 / 批量差异归因 |
-| `recon_diagnose` | 引擎巡检与按需诊断 |
-
-Agent 工具（`recon.agent.enabled=true` 后额外暴露）：
-
-| 工具 | 用途 |
-|---|---|
-| `recon_draft_rule` | **起草**：一句结构化业务描述 → 后台 LLM 起草 + 闸门校验 + 影子试算，返回会话号 |
-| `recon_trial_status` | **试算**：轮询进度与结论（逐项检查、覆盖等级、可批性） |
-| `recon_register_table` | 动态注册业务表进白名单（preview 看结构 → 人确认 → confirm 生效） |
-| `recon_import_file` | 文件导入：CSV/Excel → 建表灌数 → 注册白名单（preview → confirm 两段式） |
-| `recon_submit_approval` | **审批代办**：把 REST 三步（submit → 领令牌 → approve）封装成一次调用 |
-
-工具返回的是给人看的中文文本，Agent 拿到就能直接转述给运营。
-
-## 第 3 步：把数据交给 Agent
-
-**方式 A：只有 CSV/Excel 文件** —— `recon_import_file` 一条龙：
-
-```
-你：帮我把 D:/mydata/账单.xlsx 预览导入
-Agent（recon_import_file preview）→ 返回规范化列名 + 推断类型 + 行数
-你：列没问题，导入成表 recon_bills
-Agent（recon_import_file confirm）→ 建表灌数 + 注册白名单，立即生效
-```
-
-护栏：默认只接受导入目录（`recon.agent.file-import.dir`，默认 `./data/import`）内的相对路径；
-本地自用想直接给绝对路径，加 `--recon.agent.file-import.allow-absolute-paths=true`（MCP 对外场景保持关闭）；
-绝不覆盖已有表，灌数失败自动删回，上限 10 万行 / 200 列 / 512 MB；非 UTF-8 直接报错（不再静默乱码），
-单字段超 1M 字符或某行比表头多列都会给出可照着修的错误。
-
-**方式 C：百万行级大数据** —— 走 `tools/parallel-load.mjs` 并行灌数，别让 Agent 自己写脚本：
-
-`recon_import_file` 单线程且有 10 万行上限，只适合中小文件；百万/千万行级请用并行灌数脚本
-（N 并发 LOAD DATA + 先灌数后建索引，2×200 万行实测 168.7s、千万行约 3 分钟）：
+冒烟验证：
 
 ```bash
-# 数据源：分片 CSV（bill_left_shard*.csv / bill_right_shard*.csv，首行表头）
-# 可用 tools/gen_bill_data.sql 造数后按主键范围切分，或自己把大 CSV 切片
-node tools/parallel-load.mjs <数据目录> <host> <port> <库名> [并发数，默认 4]
+node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟
+node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项断言
 ```
 
-灌完表已带主键与索引，直接 `recon_register_table` 注册进白名单即可进入起草流程。
+## 三种使用方式（P0 / P1 / P2）
 
-**方式 B：数据已在数据库里** —— `recon_register_table` 两段式：
+同一个 jar，按环境里有什么自动分三档，能力只增不减：
 
-```
-recon_register_table {table: "t_order"}                                    # preview：只读列清单+行数
-人确认列没问题 → recon_register_table {table: "t_order", action: "confirm", operator: "alice"}
-```
+| 档位 | 环境要求 | 得到什么 | 典型用途 |
+| --- | --- | --- | --- |
+| **P0** 零依赖 | JDK 17，一个进程 | 引擎 + REST + MCP + 词表会话 + 审批面板 | 单机、内网、断网环境 |
+| **P1** 有记忆 | P0 实例持续跑 | 滚动摘要、案例记忆、口径检索 | 会话很长；要回答"上次为什么差" |
+| **P2** 有模型 | P1 + `DEEPSEEK_API_KEY` | 口语化意图、多轮指代、规则起名、差异归因 | 运营用大白话直接问账 |
 
-两侧字段不同名（如 `pay_amt` vs `settle_amt`）时，规则里用 `sql:` 别名对齐。
-
-## 第 4 步：对账全流程（起草 → 试算 → 审批 → 实跑）
-
-给 Agent 的起草描述要**结构化**（键、字段与类型、diffType、容差、表名写全），口语化描述容易被安全闸门拦截：
-
-```
-你：用 recon-lens 起草一条对账规则：
-    按 customer_id + order_no 复合维度逐笔比对 bill_left（账单）和 bill_right（结算）的金额，
-    金额相对偏差超过 0.01% 记 AMOUNT_MISMATCH，单边缺失分别记 MISSING_LEFT/MISSING_RIGHT
-
-Agent（recon_draft_rule）→ 返回会话号，后台开始起草 + 影子试算
-你：试算结果怎么样了？
-Agent（recon_trial_status 轮询）→ 逐项检查 + 覆盖等级 + 可批性，讲给你听
-你：试算通过了，批准生效
-Agent（recon_submit_approval {ruleCode, version, decision: "APPROVED", confirmedBy: "你的标识"}）
-   → REST 三步审批封装，审批审计记 confirmedBy
-你：跑一遍试试
-Agent（recon_run）→ 任务号 + 差异分类；追问差异就 recon_list_diffs / recon_explain_job
-```
-
-**审批铁律**：决策权在人 —— Agent 必须先把试算结论讲给你听、得到明确表态才能调 `recon_submit_approval`；
-api-key 未配置时该工具 fail-closed 拒绝。
-
-**审批兜底（REST 三步）**：也可以不用 Agent 代办，手工调 Web 实例：
-
-```bash
-KEY=<审批密钥>; CODE=AGENT_BILL_CHECK; VER=1
-curl -X POST "http://127.0.0.1:18080/api/rule-reviews/$CODE/$VER/submit" -H "X-Api-Key: $KEY" -H "X-Operator: wang"
-curl -X POST "http://127.0.0.1:18080/api/rule-reviews/$CODE/$VER/token"  -H "X-Api-Key: $KEY" -H "X-Operator: wang"
-curl -X POST "http://127.0.0.1:18080/api/rule-reviews/$CODE/$VER/approve" \
-  -H "X-Api-Key: $KEY" -H "X-Operator: wang" -H "Content-Type: application/json" \
-  -d '{"token":"<上一步返回的 approvalToken>","note":"试算通过，批准"}'
-```
-
-审批通过后规则 ACTIVE，直接 `POST /api/jobs` 就能跑。
-
-## 接入不同的 MCP 宿主
-
-第 1 步的 JSON 是标准 MCP stdio 配置，所有支持 MCP 的客户端都通用，差别只在配置文件的存放位置：
-
-| 宿主 | 配置位置 |
-| --- | --- |
-| Claude Desktop | `claude_desktop_config.json`（设置 → 开发者 → 编辑配置） |
-| Cursor | 项目根目录 `.cursor/mcp.json` 或全局 `~/.cursor/mcp.json` |
-| Cline / Cherry Studio 等 | 各自的 MCP 服务器设置界面，粘贴同构 JSON 即可 |
-| 命令行 / 脚本 | 不用客户端也能验证：`node tools/mcp-smoke.mjs <jar>`（见下节） |
-
-通用注意事项：
-
-- 配置保存后按宿主提示**重载 / 重启**才会生效（多数宿主不会自动激活新连接器，需要在 MCP 管理界面确认启用）；
-- `args` 里 LLM 的 api-key 是明文，注意配置文件的存放权限，别提交到仓库；
-- 两层 LLM 各司其职：宿主自己的大模型负责"听懂你的需求 + 组织工具调用"，recon-lens 内部的 LLM 只负责"起草规则 JSON"——宿主侧模型不需要了解对账细节；
-- 宿主与 MCP 进程连**同一个库**即可获得完整体验；没有常驻 Web 实例时审批走 `recon_submit_approval` 对话代办，
-  REST 手工审批需要另起 Web 实例（见第 4 步）。
-
-## 冒烟验证
-
-```bash
-node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 协议级冒烟（基础工具）
-node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项断言：
-                                                        # 起草 → 闸门 → 影子试算 → 审批 → 实跑 → 一致性
-                                                        # 依赖：mock-llm 已启动、Web 实例已启动、库里有演示数据
-```
+三条边界在所有档位都一样：**模型只建议不落库**（输出过白名单校验，写库的永远是代码）、
+**写动作先回执后执行**、**规则生效必须人批**。没配 key 时 P2 自动空转，行为与 P1 一致——key 不是启动前提。
+逐档深拆见 [docs/deep-dive-p0.md](docs/deep-dive-p0.md) / [deep-dive-p1.md](docs/deep-dive-p1.md) / [deep-dive-p2.md](docs/deep-dive-p2.md)。
 
 ## 排障速查
 
 | 症状 | 原因与解法 |
 |---|---|
+| 差异类型带 `_PENDING` 后缀 | 水位未就绪，属预期而非 bug；数据到齐后重跑即出终判 |
 | 起草 BLOCKED"大模型未启用" | 漏了 `--recon.llm.enabled=true`（或 api-key 为空） |
-| 起草 BLOCKED"闸门 1 拒绝（表不在白名单）" | `recon.agent.schema.tables` 没包含规则用到的表 → 用 `recon_register_table` 注册 |
+| 起草 BLOCKED"闸门 1 拒绝（表不在白名单）" | `recon.agent.schema.tables` 没含规则用到的表 → `recon_register_table` 注册 |
 | 审批 403 | 没配 `recon.review.api-key`，或 X-Api-Key 不对 |
 | MCP 连 MySQL 启动崩 | 设 `RECON_SQL_INIT=never` + 显式 `DRIVER_CLASS_NAME` |
-| 会话有结论但库里查不到 | MCP 进程写进了 H2 内存库 —— 检查 env 数据源四个变量是否都给全 |
-| 规则提交报 NON_PORTABLE_FUNCTION | 分片/维度里用了 `HASH()` 等 MySQL 不存在的函数，改用 `MOD(CRC32(...), {shards})` |
-| 巡检没跑 | `perception-interval-ms=0` 的语义是关闭定时（只留按需诊断），设正值才轮询 |
+| 会话有结论但库里查不到 | MCP 进程写进了 H2 内存库 —— 检查数据源四个 env 变量 |
+| 规则提交报 NON_PORTABLE_FUNCTION | 分片/维度里用了 `HASH()` 等 MySQL 没有的函数，改 `MOD(CRC32(...), {shards})` |
 
-更多细节：完整走查（含每一步提示词与返回）见 [docs/agent-quickstart.md](docs/agent-quickstart.md)，
-工具入参/返回见 [docs/mcp.md](docs/mcp.md)。
-
-# 文档索引
+## 文档索引
 
 | 文档 | 内容 |
 | --- | --- |
 | [docs/rule-dsl.md](docs/rule-dsl.md) | 规则 DSL 完整手册（维度 / 聚合 / 分片 / 容差 / 校验规则） |
 | [docs/agent-quickstart.md](docs/agent-quickstart.md) | Agent 本地运行与对接全流程实测指南 |
-| [docs/mcp.md](docs/mcp.md) | MCP 接入：18 个工具入参/返回、动态表注册、文件导入、stdio 坑位 |
+| [docs/mcp.md](docs/mcp.md) | MCP 接入：18 个工具入参/返回、动态表注册、文件导入 |
 | [docs/architecture.md](docs/architecture.md) | 架构说明 |
-| [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字（文首有结论速览） |
-| [tools/mysql-bench/](tools/mysql-bench/) | 压测装置（SQL / 脚本 / 规则） |
+| [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字 |
 
 ## 开发与贡献
 
 ```bash
 ./mvnw test                                             # 全量测试
 ./mvnw -DskipTests package                              # 产出 target/recon-lens-0.1.0.jar
-node tools/mcp-smoke.mjs target/recon-lens-0.1.0.jar    # MCP 冒烟（Node 18+）
 ```
 
-CI（[build.yml](.github/workflows/build.yml)）在每次 push / PR 上跑测试 + MCP 冒烟；推一个 `v*` tag 会触发
-[release.yml](.github/workflows/release.yml) 自动发 Release 并附上可执行 jar。改动记录见
-[CHANGELOG.md](CHANGELOG.md)，提 PR 前请读一下 [CONTRIBUTING.md](CONTRIBUTING.md)。
+CI 在每次 push / PR 上跑测试 + MCP 冒烟；推 `v*` tag 自动发 Release。改动记录见
+[CHANGELOG.md](CHANGELOG.md)，提 PR 前请读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 
