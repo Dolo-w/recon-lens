@@ -370,3 +370,12 @@
 - MCP 冒烟：`initialize` → `tools/list`（6 个）→ 跑对账 → 查差异 → 批量归因，stdout 噪声 0 行，关闭 stdin 后进程 exit 0
 
 [0.1.0]: https://github.com/Dolo-w/recon-lens/releases/tag/v0.1.0
+
+## [2026-11-21] Go worker：大批量比对执行器（单二进制）
+
+- `go-worker/` 新增 Go 实现的比对执行器：两侧升序 CSV + 规格 JSON → 差异 JSONL/CSV + 统计 + checkpoint
+- 比对语义与 Java 引擎逐条对齐：精确十进制（对齐 BigDecimal 的比较/减法/HALF_UP 比例/stripTrailingZeros 渲染）、重复键只报不配对、null 空语义、Boolean.parseBoolean、事件时间左优先、水位 PENDING
+- 提交语义学 Lago events-processor：按 shard 顺序提交、checkpoint 记录输出偏移与末键、`--resume` 截断回边界后从断点续跑，不变式「输出文件 = 已提交前缀」
+- 启动预检：列存在性校验（对齐 ShardRunner.validateFields）+ 两侧键序预检（乱序拒绝，不提交未校验数据）
+- 零第三方依赖（纯标准库），goroutine 分片并发比对、committer 按序提交；10 万×2 行实测 0.75 秒
+- 测试：decimal/value/端到端（差异/缺失/重复键/事件时间/PENDING/resume 幂等与增量/CSV BOM+分号+引号/数值键/CSV 输出）全绿

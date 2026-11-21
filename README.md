@@ -40,6 +40,7 @@ recon-lens 把这件事拆成四件确定的事：
 - **差异原始行凭证**：每条差异自动挂两侧整行 JSON 快照（差异落库同一事务落库，源表后来变了也不影响复盘），宽行超 4000 字符截断带标记；`GET /api/diffs/{id}` 详情带证据，列表不带（响应不爆炸）。同一行多字段差异凭证只存一份
 - **差异生命周期（豁免台账）**：`POST /api/diffs/{id}/lifecycle` 认领 / 核销 / 豁免 / 撤销豁免，append-only 台账逐条留痕（谁、何时、依据），`GET /api/diffs/lifecycle/summary` 出闭环率；`GET /api/diffs?withStatus=true` 列表逐条带处置状态。差异本身不可改写，RESOLVED/EXEMPT 必须写依据——报出来一百条、闭环了几条，才是"少收的钱"还在不在的真相
 - **归并式对账**：两侧流式游标 + 双指针归并，实测 `-Xmx256m` 跑 200 万×2 行 0 次 Full GC
+- **Go worker（大批量比对执行器，单二进制）**：`go-worker/` 一个 exe 扔进去就跑——两侧升序 CSV + 规格 JSON 出差异文件；比对语义与 Java `MergeMatcher`/`ValueComparator` 逐条对齐（精确十进制/重复键不配对/事件时间/水位 PENDING 全部同口径），分片顺序提交 + checkpoint 断点续跑（学 Lago events-processor 的最大可提交前缀），10 万×2 行实测 0.75 秒。分工：规则引擎/取数/编排留 Java，worker 只管比——部署形态从"JVM 宠物"变"扔进去就跑"（[go-worker/README.md](go-worker/README.md)）
 - **分片并行 + 断点重跑**：重跑前先清本分片旧差异，幂等
 - **水位/cut-off**：按规则配置两侧水位列，建任务时探测 `MAX(水位列)`；未就绪侧的单边缺失标 `*_PENDING` 而非冒充真缺失——`MISSING ≠ NOT_YET_ARRIVED`
 - **差异分类 + 归因**：`VALUE_MISMATCH` / `MISSING_LEFT` / `MISSING_RIGHT` / `DUPLICATE_KEY` 四类语义；模板归因永远可用，LLM 失败安静降级
@@ -273,6 +274,7 @@ node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项
 | [docs/mcp.md](docs/mcp.md) | MCP 接入：23 个工具入参/返回、动态表注册、文件导入 |
 | [docs/architecture.md](docs/architecture.md) | 架构说明 |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字 |
+| [go-worker/README.md](go-worker/README.md) | Go 单二进制大批量比对执行器（提交语义/断点续跑/语义对齐清单） |
 
 ## 开发与贡献
 
