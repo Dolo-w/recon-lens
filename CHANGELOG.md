@@ -4,6 +4,20 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 下午：计量漂移归因 —— 出"少收的钱"）
+
+- `PriceImpactService` + `POST /api/prices/impact`（job 级汇总）与
+  `POST /api/diffs/{id}/price-impact`（单条计价）
+- 语义：impact = left(我方账单口径) - right(对方口径)，负数=少收/正数=多收；
+  两侧 tokens 各自 resolve（阶梯下可落不同档），命中价格条目作为证据带回
+- 诚实边界写死在文档：recon_diff 无事件时间列，价格匹配 at 用任务完成时刻
+  近似，请求显式传 at 可覆盖；事件级精细归因是 P3 的事
+- 状态类/文本类差异没有金额语义：汇总跳过并如实计数（80/100 能算先出 80 条
+  的账），单条计价 fail-loud 400 说明白
+- 新增 PriceImpactApiTest(4)；修复凭证端到端测试的顺序 flaky 断言（分片并行
+  落库顺序不固定，改 containsExactlyInAnyOrder）；全量 946 绿
+
+
 ### 新增（2026-11-21 下午：token 感知价格规则表，Phase 2.5）
 
 - 新表 `recon_price_entry`：`price_code × model × token_type × 时间窗 × tier` 五维价格，

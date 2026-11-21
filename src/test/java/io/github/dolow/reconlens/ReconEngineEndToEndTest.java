@@ -79,8 +79,9 @@ class ReconEngineEndToEndTest {
         List<Map<String, Object>> evidence = jdbc.queryForList(
                 "SELECT side, biz_key, source, row_json FROM recon_diff_evidence WHERE job_id = ? ORDER BY id", job.id());
         assertThat(evidence).hasSize(6);
+        // 分片并行写库，跨分片的凭证落库顺序不固定 —— 断数量与配比，不钉顺序
         assertThat(evidence).extracting("side")
-                .containsExactly("LEFT", "RIGHT", "LEFT", "RIGHT", "LEFT", "RIGHT");
+                .containsExactlyInAnyOrder("LEFT", "RIGHT", "LEFT", "RIGHT", "LEFT", "RIGHT");
         // 凭证是整行快照：非比对列也在
         assertThat((String) evidence.get(0).get("row_json")).contains("order_no");
         assertThat((String) evidence.get(0).get("source")).isNotBlank();

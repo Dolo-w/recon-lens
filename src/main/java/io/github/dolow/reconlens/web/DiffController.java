@@ -1,6 +1,7 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.domain.DiffEvidence;
+import io.github.dolow.reconlens.pricing.PriceImpactService;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.lifecycle.DiffLifecycleService;
 import io.github.dolow.reconlens.recall.RecallAugmenter;
@@ -35,13 +36,16 @@ public class DiffController {
     private final RecallAugmenter recall;
     private final DiffLifecycleService lifecycleService;
     private final DiffLifecycleRepository lifecycleRepository;
+    private final PriceImpactService priceImpact;
 
     public DiffController(ReconRepository repository, ExplainService explainService, RecallAugmenter recall,
-                          DiffLifecycleService lifecycleService, DiffLifecycleRepository lifecycleRepository) {
+                          DiffLifecycleService lifecycleService, DiffLifecycleRepository lifecycleRepository,
+                          PriceImpactService priceImpact) {
         this.repository = repository;
         this.explainService = explainService;
         this.recall = recall;
         this.lifecycleService = lifecycleService;
+        this.priceImpact = priceImpact;
         this.lifecycleRepository = lifecycleRepository;
     }
 
@@ -98,6 +102,46 @@ public class DiffController {
 
     // ------------------------------------------------------------------
     // 差异生命周期（豁免台账）：claim / release / resolve / exempt / unexempt
+
+    /**
+     * 单条差异计价：差异 × 价格 = 金额影响。状态类/文本类差异没有金额语义，直接 400。
+     */
+    @PostMapping("/{id}/price-impact")
+    public Map<String, Object> priceImpact(@PathVariable long id,
+                                           @RequestBody PriceImpactRequest request) {
+        DiffRecord diff = repository.findDiffById(id);
+        if (diff == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "差异不存在: id=" + id);
+        }
+        java.time.Instant at;
+        try {
+            at = request.at() == null || request.at().isBlank()
+                    ? null : java.time.Instant.parse(request.at().trim());
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("at 必须是 ISO-8601 UTC 时间（如 2026-11-15T00:00:00Z）");
+        }
+        PriceImpactService.PriceImpact impact = priceImpact.impactOf(
+                diff, request.priceCode(), request.model(), request.tokenType(), at);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("diffId", impact.diffId());
+        body.put("diffType", impact.diffType());
+        body.put("bizKey", impact.bizKey());
+        body.put("leftTokens", impact.leftTokens().toPlainString());
+        body.put("rightTokens", impact.rightTokens().toPlainString());
+        body.put("leftAmount", impact.leftAmount().toPlainString());
+        body.put("rightAmount", impact.rightAmount().toPlainString());
+        body.put("impact", impact.impact().toPlainString());
+        body.put("impactNote", "impact = left(我方账单口径) - right(对方口径)；负数=少收，正数=多收");
+        body.put("currency", impact.currency());
+        body.put("unitPricePerMillion", impact.unitPricePerMillion());
+        body.put("effectiveFrom", impact.effectiveFrom());
+        body.put("effectiveTo", impact.effectiveTo());
+        return body;
+    }
+
+    /** 纯参数载体：归因请求体（at 可空，缺省用任务完成时刻）。 */
+    public record PriceImpactRequest(String priceCode, String model, String tokenType, String at) {
+    }
 
     /** 执行一次处置动作。RESOLVE 与 EXEMPT 必须带 note（核销原因 / 豁免依据）。 */
     @PostMapping("/{id}/lifecycle")

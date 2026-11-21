@@ -2,6 +2,7 @@ package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.domain.PriceEntry;
 import io.github.dolow.reconlens.pricing.PriceCatalogService;
+import io.github.dolow.reconlens.pricing.PriceImpactService;
 import io.github.dolow.reconlens.pricing.PriceNotResolvedException;
 import io.github.dolow.reconlens.pricing.PriceQuote;
 import org.springframework.http.HttpStatus;
@@ -31,6 +32,8 @@ import java.util.Map;
  *   <li>DELETE /api/prices/{id}</li>
  *   <li>POST /api/prices/resolve —— 单笔试算：给定请求时间戳与 tokens，返回命中的
  *       单价与金额（月中调价回溯、cache 分价、阶梯价都在这一步裁决）</li>
+ *   <li>POST /api/prices/impact —— 计量漂移归因：job 全部可计价差异 × 价格，
+ *       汇总出"少收的钱"（severity 是工程师的口径，金额是财务的口径）</li>
  * </ul>
  */
 @RestController
@@ -38,9 +41,11 @@ import java.util.Map;
 public class PriceController {
 
     private final PriceCatalogService service;
+    private final PriceImpactService impactService;
 
-    public PriceController(PriceCatalogService service) {
+    public PriceController(PriceCatalogService service, PriceImpactService impactService) {
         this.service = service;
+        this.impactService = impactService;
     }
 
     public record CreateRequest(String priceCode, String model, String tokenType,
@@ -51,6 +56,10 @@ public class PriceController {
 
     public record ResolveRequest(String priceCode, String model, String tokenType,
                                  String at, BigDecimal tokens) {
+    }
+
+    /** 计量漂移归因：job 全部可计价差异 × 价格 = "少收的钱"。 */
+    public record ImpactRequest(long jobId, String priceCode, String model, String tokenType, String at) {
     }
 
     @GetMapping
@@ -97,6 +106,12 @@ public class PriceController {
         body.put("effectiveTo", quote.entry().effectiveTo() == null
                 ? null : quote.entry().effectiveTo().toString());
         return body;
+    }
+
+    @PostMapping("/impact")
+    public Map<String, Object> impact(@RequestBody ImpactRequest request) {
+        return impactService.summarizeJob(request.jobId(), request.priceCode(), request.model(),
+                request.tokenType(), parseTime(request.at(), "at"));
     }
 
     /** 校验/解析错误统一 400，message 直接可读（解析失败异常已带可用窗列表）。 */
