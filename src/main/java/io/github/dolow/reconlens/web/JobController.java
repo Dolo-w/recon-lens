@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.web;
 
+import io.github.dolow.reconlens.domain.JobKind;
 import io.github.dolow.reconlens.domain.JobStatus;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
@@ -63,10 +64,13 @@ public class JobController {
                                                       @RequestHeader(value = "X-Api-Key", required = false) String apiKey) {
         security.requireWrite(apiKey, "发起对账任务");
         RuleCatalog.Resolved resolved = resolveRule(request);
+        // 内联规则没过审批流（起草 → 试算 → 审批 → 生效），以 PROD 实跑等于绕过闸门 1。
+        // README 对这个入口的承诺本来就是"内联一份不落库的规则试算" —— 现在行为与文档对齐。
+        JobKind kind = request.inline() ? JobKind.TRIAL : JobKind.PROD;
         String batchId = normalizeBatchId(request.batchId());
         Map<String, Object> body = new LinkedHashMap<>();
         if (Boolean.TRUE.equals(request.sync())) {
-            ReconJob job = engine.run(resolved, batchId, request.remark());
+            ReconJob job = engine.run(resolved, batchId, request.remark(), kind);
             body.put("jobId", job.id());
             body.put("ruleCode", job.ruleCode());
             body.put("ruleVersion", resolved.version());
@@ -79,7 +83,7 @@ public class JobController {
             }
             return ResponseEntity.ok(body);
         }
-        long jobId = engine.runAsync(resolved, batchId, request.remark());
+        long jobId = engine.runAsync(resolved, batchId, request.remark(), kind);
         body.put("jobId", jobId);
         body.put("ruleCode", resolved.spec().code());
         body.put("ruleVersion", resolved.version());

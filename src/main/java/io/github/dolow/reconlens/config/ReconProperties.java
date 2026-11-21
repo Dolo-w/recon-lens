@@ -407,6 +407,68 @@ public class ReconProperties {
             this.fetchSize = fetchSize;
         }
 
+        /**
+         * 水位（cut-off）配置，key = 规则 code。这是「MISSING ≠ NOT_YET_ARRIVED」的落地：
+         * <pre>
+         * recon:
+         *   engine:
+         *     watermarks:
+         *       BILL_VS_SETTLE:
+         *         left: updated_at
+         *         right: updated_at
+         *         lag-seconds: 300
+         * </pre>
+         * 配了就生效：建任务时探测两侧 {@code MAX(水位列)}，晚于 now-lag 判"未就绪"；
+         * 未就绪侧的单边缺失差异标成 {@code *_PENDING} —— 可能是数据还没到，不是真缺失。
+         * 不配置 = 行为与老版本完全一致（所有缺失都是终判）。
+         */
+        private java.util.Map<String, SideWatermark> watermarks = new java.util.LinkedHashMap<>();
+
+        public java.util.Map<String, SideWatermark> getWatermarks() {
+            return watermarks;
+        }
+
+        public void setWatermarks(java.util.Map<String, SideWatermark> watermarks) {
+            this.watermarks = watermarks;
+        }
+
+        /** 一条规则两侧的水位列。水位只支持表取数侧（自定义 SQL 没有可探测的单一来源表）。 */
+        public static class SideWatermark {
+            /** 左侧水位列名；null = 左侧不探测，视为就绪 */
+            private String left;
+            /** 右侧水位列名；null = 右侧不探测，视为就绪 */
+            private String right;
+            /** 允许的滞后：水位 >= now - lag 即算就绪。给管道一个正常的投递余量 */
+            private long lagSeconds = 300;
+
+            public String getLeft() {
+                return left;
+            }
+
+            public void setLeft(String left) {
+                this.left = left;
+            }
+
+            public String getRight() {
+                return right;
+            }
+
+            public void setRight(String right) {
+                this.right = right;
+            }
+
+            public long getLagSeconds() {
+                return lagSeconds;
+            }
+
+            public void setLagSeconds(long lagSeconds) {
+                if (lagSeconds < 0) {
+                    throw new IllegalArgumentException("watermark lagSeconds 不能为负");
+                }
+                this.lagSeconds = lagSeconds;
+            }
+        }
+
         public int getMaxAttempts() {
             return maxAttempts;
         }

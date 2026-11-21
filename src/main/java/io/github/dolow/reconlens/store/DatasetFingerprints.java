@@ -195,10 +195,23 @@ public class DatasetFingerprints {
      * "用哪段 SQL 读的"</b> —— 否则 job 之间无法解释差异从哪来。
      */
     public String snapshotJson(SideSpec left, SideSpec right) {
+        return snapshotJson(left, right, java.util.Map.of());
+    }
+
+    /**
+     * 带附加信息的快照。水位判定结果走这里进任务记录：任务详情接口能直接回答
+     * "这次跑的时候两侧数据是不是就绪的" —— 没有它，{@code *_PENDING} 差异就没法复盘。
+     *
+     * @param extra 顶层附加键（如 {@code readiness}）；键冲突时以 extra 为准
+     */
+    public String snapshotJson(SideSpec left, SideSpec right, java.util.Map<String, Object> extra) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("left", describe(left));
         root.put("right", describe(right));
         root.put("at", Instant.now().toString());
+        if (extra != null) {
+            root.putAll(extra);
+        }
         try {
             return json.writeValueAsString(root);
         } catch (Exception e) {

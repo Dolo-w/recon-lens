@@ -49,15 +49,22 @@ public class ShardRunner {
     }
 
     public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan) {
-        return run(rule, jobId, plan, null);
+        return run(rule, jobId, plan, null, ReconEngine.Readiness.allReady());
     }
 
     /**
-     * @param capture 非空时把每条差异留一份到内存<b>并逐条计算摘要</b>（试算用）。
-     *                生产路径传 {@code null}：差异只落库，不算摘要 —— 摘要只为试算的幂等比较服务，
-     *                在正式对账里每条差异多花约 0.5 µs 却没有任何读者（摘要不落库）。
+     * @param capture   非空时把每条差异留一份到内存<b>并逐条计算摘要</b>（试算用）。
+     *                  生产路径传 {@code null}：差异只落库，不算摘要 —— 摘要只为试算的幂等比较服务，
+     *                  在正式对账里每条差异多花约 0.5 µs 却没有任何读者（摘要不落库）。
+     * @param readiness 建任务时的水位判定：未就绪侧的单边缺失标 {@code *_PENDING}（未到达≠缺失）
      */
+    /** 便捷重载：不带水位判定（水位未配置路径与单测用），等价于 {@link ReconEngine.Readiness#allReady()}。 */
     public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan, DiffCapture capture) {
+        return run(rule, jobId, plan, capture, ReconEngine.Readiness.allReady());
+    }
+
+    public ShardResult run(RuleSpec rule, long jobId, ShardPlan plan, DiffCapture capture,
+                           ReconEngine.Readiness readiness) {
         int maxAttempts = Math.max(1, rule.maxAttempts());
         String lastError = null;
         boolean digestWanted = capture != null;
@@ -86,7 +93,8 @@ public class ShardRunner {
                         } else {
                             outlet = new BatchDiffSink(repository, DIFF_BATCH_SIZE);
                         }
-                        MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId()).match(left, right, outlet);
+                        MatchStats stats = new MergeMatcher(rule, jobId, plan.shardId(), readiness)
+                                .match(left, right, outlet);
                         repository.markShardSuccess(jobId, plan.shardId(), stats);
                         return new ShardOutcome(stats, sink == null ? null : summarize(plan.shardId(), sink),
                                 sink != null && sink.digest().isEmpty(),

@@ -407,6 +407,40 @@ public class ReconRepository implements DiffWriter {
                 JobStatus.RUNNING.name(), JobStatus.PENDING.name());
     }
 
+    /**
+     * 探测一张表的水位：{@code MAX(水位列)}。水位（cut-off）就绪判定用。
+     *
+     * <p>为什么 fail-loud：探测失败还继续跑，MISSING 差异就没法区分"真缺失"和"未到达"
+     * —— 宁可让任务失败，也不给一个看起来可信其实没验过水位的报告。
+     *
+     * @return 水位时间戳；表为空时返回 null（空表视为无水位，调用方决定语义）
+     * @throws IllegalStateException 列名/表名不合法
+     */
+    public java.time.Instant watermark(String table, String column) {
+        if (!column.matches(COLUMN_PATTERN)) {
+            throw new IllegalStateException("水位列必须是单一列名（纯标识符），当前: " + column);
+        }
+        if (!table.matches("[A-Za-z_][A-Za-z0-9_.]*")) {
+            throw new IllegalStateException("水位探测的表名不合法: " + table);
+        }
+        // 标识符已过正则闸，拼接安全；MAX(索引列) 走索引，代价可忽略
+        java.util.List<java.util.Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT MAX(" + column + ") AS wm FROM " + table);
+        Object wm = rows.isEmpty() ? null : rows.get(0).get("wm");
+        if (wm == null) {
+            return null;
+        }
+        if (wm instanceof java.sql.Timestamp ts) {
+            return ts.toInstant();
+        }
+        if (wm instanceof java.time.LocalDateTime dt) {
+            return dt.atZone(java.time.ZoneId.systemDefault()).toInstant();
+        }
+        // 水位列不是时间型：这个配置八成写错了列名，fail-loud 别让人拿数字当水位
+        throw new IllegalStateException("水位列 " + table + "." + column + " 的类型是 "
+                + wm.getClass().getSimpleName() + "，必须是时间/日期类型");
+    }
+
     // ---------------- 差异 ----------------
 
     /** 幂等基石：重跑某个分片前先删掉它上一次的差异，再重新写入。 */

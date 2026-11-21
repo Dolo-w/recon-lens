@@ -17,9 +17,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.time.Instant;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -75,10 +77,19 @@ public class ReconEngine {
 
     /** 用请求里内联的规则跑（不落规则库）：使用方临时换维度、试算用。 */
     public ReconJob run(RuleCatalog.Resolved resolved, String batchId, String remark) {
-        long jobId = prepare(resolved, batchId, remark, JobKind.PROD, null);
+        return run(resolved, batchId, remark, JobKind.PROD);
+    }
+
+    /**
+     * 带 kind 的同步执行。内联规则应该走 {@code JobKind.TRIAL}：内联规则没过审批流，
+     * 以 PROD 实跑等于绕过闸门 1（规则该"起草 → 试算 → 审批 → 生效"，不该有旁路）。
+     */
+    public ReconJob run(RuleCatalog.Resolved resolved, String batchId, String remark, JobKind kind) {
+        Prepared prepared = prepare(resolved, batchId, remark, kind, null);
         // 生产路径不捕获差异明细：那会把整个任务的差异按批堆在内存里，只为了一个没人看的列表
-        execute(resolved.spec(), jobId, planFor(resolved.spec()), false);
-        return repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
+        execute(resolved.spec(), prepared.jobId(), planFor(resolved.spec()), false, prepared.readiness());
+        return repository.findJob(prepared.jobId())
+                .orElseThrow(() -> new IllegalStateException("任务记录丢失: " + prepared.jobId()));
     }
 
     /**
@@ -93,10 +104,11 @@ public class ReconEngine {
      */
     public RunTrace runTraced(RuleCatalog.Resolved resolved, String batchId, String remark,
                               JobKind kind, TrialPhase phase) {
-        long jobId = prepare(resolved, batchId, remark, kind, phase);
+        Prepared prepared = prepare(resolved, batchId, remark, kind, phase);
         RuleSpec rule = resolved.spec();
-        List<ShardResult> results = execute(rule, jobId, planFor(rule), true);
-        ReconJob job = repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
+        List<ShardResult> results = execute(rule, prepared.jobId(), planFor(rule), true, prepared.readiness());
+        ReconJob job = repository.findJob(prepared.jobId())
+                .orElseThrow(() -> new IllegalStateException("任务记录丢失: " + prepared.jobId()));
         return new RunTrace(job, results);
     }
 
@@ -136,21 +148,21 @@ public class ReconEngine {
 
     /** 异步：HTTP 接口立刻返回 jobId，避免大对账把请求线程占住。 */
     public long runAsync(String ruleCode, String batchId, String remark) {
-        return runAsync(catalog.resolve(ruleCode), batchId, remark);
+        return runAsync(catalog.resolve(ruleCode), batchId, remark, JobKind.PROD);
     }
 
-    public long runAsync(RuleCatalog.Resolved resolved, String batchId, String remark) {
-        long jobId = prepare(resolved, batchId, remark, JobKind.PROD, null);
+    public long runAsync(RuleCatalog.Resolved resolved, String batchId, String remark, JobKind kind) {
+        Prepared prepared = prepare(resolved, batchId, remark, kind, null);
         RuleSpec rule = resolved.spec();
         submitter.submit(() -> {
             try {
-                execute(rule, jobId, planFor(rule), false);
+                execute(rule, prepared.jobId(), planFor(rule), false, prepared.readiness());
             } catch (RuntimeException e) {
-                log.error("任务 #{} 执行异常", jobId, e);
-                repository.finishJob(jobId, JobStatus.FAILED, Errors.describe(e));
+                log.error("任务 #{} 执行异常", prepared.jobId(), e);
+                repository.finishJob(prepared.jobId(), JobStatus.FAILED, Errors.describe(e));
             }
         });
-        return jobId;
+        return prepared.jobId();
     }
 
     /** 断点续跑：只重做失败分片；onlyFailed=false 时全部重做。规则按任务创建时的快照执行。 */
@@ -171,7 +183,8 @@ public class ReconEngine {
 
         repository.markJobForRetry(jobId);
         log.info("任务 #{} 重跑 {} 个分片: {}", jobId, plans.size(), shardIds);
-        execute(rule, jobId, plans, false);
+        // 重跑时重新探测水位：上次跑的时候未就绪标了 PENDING 的缺失，这次可能就绪、该出终判了
+        execute(rule, jobId, plans, false, probeReadiness(rule));
         return repository.findJob(jobId).orElseThrow(() -> new IllegalStateException("任务记录丢失: " + jobId));
     }
 
@@ -193,12 +206,17 @@ public class ReconEngine {
         return catalog.resolve(job.ruleCode()).spec();
     }
 
-    private long prepare(RuleCatalog.Resolved resolved, String batchId, String remark,
-                         JobKind kind, TrialPhase phase) {
+    /** 一次 prepare 的产物：任务号 + 建任务那一刻的水位判定。 */
+    private record Prepared(long jobId, Readiness readiness) {
+    }
+
+    private Prepared prepare(RuleCatalog.Resolved resolved, String batchId, String remark,
+                             JobKind kind, TrialPhase phase) {
         RuleSpec rule = resolved.spec();
         int shardCount = rule.shard().count();
         // 数据快照在"建任务"这一刻定格：之后表被重灌，历史任务仍然答得出它读的是什么（ADR-0002 D4）
-        String dataSnapshot = fingerprints.snapshotJson(rule.left(), rule.right());
+        Readiness readiness = probeReadiness(rule);
+        String dataSnapshot = fingerprints.snapshotJson(rule.left(), rule.right(), readiness.toMap());
         long jobId = repository.createJob(rule.code(), resolved.version(), resolved.snapshot(), batchId, remark,
                 shardCount, kind, phase, dataSnapshot);
         repository.createShards(jobId, shardCount);
@@ -207,7 +225,92 @@ public class ReconEngine {
         log.info("创建对账任务 #{} 规则={} 版本={} 批次={} 分片数={} kind={}{}", jobId, rule.code(),
                 resolved.version() == null ? "内联" : "v" + resolved.version(), batchId, shardCount, kind,
                 phase == null ? "" : " phase=" + phase);
-        return jobId;
+        if (readiness.configured()) {
+            log.info("任务 #{} 水位判定: left={}({}) right={}({})",
+                    jobId,
+                    readiness.leftReady() ? "就绪" : "未就绪",
+                    readiness.leftWatermark() == null ? "无水位" : readiness.leftWatermark(),
+                    readiness.rightReady() ? "就绪" : "未就绪",
+                    readiness.rightWatermark() == null ? "无水位" : readiness.rightWatermark());
+        }
+        return new Prepared(jobId, readiness);
+    }
+
+    /**
+     * 水位（cut-off）就绪判定：{@code MISSING ≠ NOT_YET_ARRIVED} 的第一道闸。
+     *
+     * <p>配置了水位的规则在建任务时探测两侧 {@code MAX(水位列)}：晚于 now-lag 判"未就绪"，
+     * 未就绪侧的单边缺失在报告里标 {@code *_PENDING} —— 可能是数据还没投递到，
+     * 而不是那笔业务真的缺失。探测失败 fail-loud（见 {@code ReconRepository#watermark}）。
+     */
+    private Readiness probeReadiness(RuleSpec rule) {
+        ReconProperties.Engine.SideWatermark wm = properties.getEngine().getWatermarks().get(rule.code());
+        if (wm == null) {
+            return Readiness.allReady();
+        }
+        Instant deadline = Instant.now().minusSeconds(wm.getLagSeconds());
+        boolean leftReady = true;
+        Instant leftWm = null;
+        if (wm.getLeft() != null && !wm.getLeft().isBlank()) {
+            requireTableSide(rule.left(), "left");
+            leftWm = repository.watermark(rule.left().table(), wm.getLeft());
+            leftReady = leftWm != null && !leftWm.isBefore(deadline);
+        }
+        boolean rightReady = true;
+        Instant rightWm = null;
+        if (wm.getRight() != null && !wm.getRight().isBlank()) {
+            requireTableSide(rule.right(), "right");
+            rightWm = repository.watermark(rule.right().table(), wm.getRight());
+            rightReady = rightWm != null && !rightWm.isBefore(deadline);
+        }
+        return new Readiness(true, leftReady, rightReady, leftWm, rightWm, deadline);
+    }
+
+    private void requireTableSide(io.github.dolow.reconlens.dsl.SideSpec side, String name) {
+        if (side.customSql()) {
+            throw new IllegalStateException("规则 " + side.label() + " 是自定义 SQL 取数，不支持水位探测（"
+                    + name + ".watermark 需要一张可探测的来源表）。请去掉该侧的水位配置，或把取数改写成表 + keyField");
+        }
+    }
+
+    /**
+     * 一次任务的水位判定结果。
+     *
+     * @param configured 规则是否配置了水位 —— 没配置时全为 ready 且 {@code *_PENDING} 不会出现
+     */
+    public record Readiness(boolean configured, boolean leftReady, boolean rightReady,
+                            Instant leftWatermark, Instant rightWatermark, Instant deadline) {
+
+        public static Readiness allReady() {
+            return new Readiness(false, true, true, null, null, null);
+        }
+
+        /**
+         * MISSING_LEFT（左表缺行）是否要标 PENDING：左表未就绪 → 行可能还没投到左表，是"未到达"不是"缺失"。
+         * 对应 {@code MergeMatcher#emitMissingLeft}。
+         */
+        public boolean missingLeftPending() {
+            return configured && !leftReady();
+        }
+
+        /** MISSING_RIGHT（右表缺行）是否要标 PENDING：右表未就绪 → 行可能还没投到右表。对应 {@code MergeMatcher#emitMissingRight}。 */
+        public boolean missingRightPending() {
+            return configured && !rightReady();
+        }
+
+        /** 进数据快照：任务详情接口直接能看到这次跑的时候两侧水位状态。 */
+        public Map<String, Object> toMap() {
+            if (!configured) {
+                return Map.of();
+            }
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("leftWatermark", leftWatermark == null ? null : leftWatermark.toString());
+            m.put("rightWatermark", rightWatermark == null ? null : rightWatermark.toString());
+            m.put("deadline", deadline == null ? null : deadline.toString());
+            m.put("leftReady", leftReady);
+            m.put("rightReady", rightReady);
+            return Map.of("readiness", m);
+        }
     }
 
     /**
@@ -225,7 +328,8 @@ public class ReconEngine {
         return ShardPlanner.plan(rule, bounds);
     }
 
-    private List<ShardResult> execute(RuleSpec rule, long jobId, List<ShardPlan> plans, boolean captureDiffs) {
+    private List<ShardResult> execute(RuleSpec rule, long jobId, List<ShardPlan> plans, boolean captureDiffs,
+                                      Readiness readiness) {
         // 真正开跑才标 RUNNING：同步路径等于建任务后立刻执行；异步路径下这里被
         // 提交池调度到才会走到，排队期间任务保持 PENDING
         repository.markJobRunning(jobId);
@@ -243,7 +347,7 @@ public class ReconEngine {
             for (ShardPlan plan : plans) {
                 // 每个分片一个 capture：共享一个 list 会逼着加锁，而试算的并行度和生产一样
                 DiffCapture capture = captureDiffs ? new DiffCapture() : null;
-                futures.add(pool.submit(() -> shardRunner.run(rule, jobId, plan, capture)));
+                futures.add(pool.submit(() -> shardRunner.run(rule, jobId, plan, capture, readiness)));
             }
             for (Future<ShardResult> future : futures) {
                 try {

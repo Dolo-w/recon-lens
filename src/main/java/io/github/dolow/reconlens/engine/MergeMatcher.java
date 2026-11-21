@@ -25,17 +25,26 @@ public final class MergeMatcher {
 
     private static final int MAX_IDS_IN_SUMMARY = 5;
 
+    /** 水位未就绪时缺失差异的类型后缀：语义是"可能尚未到达"，不是终判。 */
+    static final String PENDING_SUFFIX = "_PENDING";
+
     private final RuleSpec rule;
     private final long jobId;
     private final int shardId;
     private final String leftKeyField;
     private final String rightKeyField;
     private final List<String> describeColumns;
+    private final ReconEngine.Readiness readiness;
 
     public MergeMatcher(RuleSpec rule, long jobId, int shardId) {
+        this(rule, jobId, shardId, ReconEngine.Readiness.allReady());
+    }
+
+    public MergeMatcher(RuleSpec rule, long jobId, int shardId, ReconEngine.Readiness readiness) {
         this.rule = rule;
         this.jobId = jobId;
         this.shardId = shardId;
+        this.readiness = readiness;
         this.leftKeyField = rule.left().keyField();
         this.rightKeyField = rule.right().keyField();
         this.describeColumns = describeColumns();
@@ -115,18 +124,35 @@ public final class MergeMatcher {
         return diffs;
     }
 
-    /** 只有左表有 → 右侧（结算）缺失。 */
+    /**
+     * 只有左表有 → 右侧（结算）缺失。
+     * 右侧水位未就绪时标 {@code *_PENDING}：行可能还没投到右表，这是"未到达"不是"真缺失"。
+     */
     private long emitMissingRight(Row leftRow, DiffSink sink) {
-        sink.accept(DiffRecord.of(jobId, shardId, rule.missing().rightMissingDiffType(), rule.missing().severity(),
-                Row.render(leftRow.get(leftKeyField)), "", describe(leftRow), null, null, null));
+        boolean pending = readiness.missingRightPending();
+        String type = rule.missing().rightMissingDiffType() + (pending ? PENDING_SUFFIX : "");
+        sink.accept(DiffRecord.of(jobId, shardId, type, rule.missing().severity(),
+                Row.render(leftRow.get(leftKeyField)), "", describe(leftRow), null, null, null)
+                .withExplanation(pending ? pendingNote("右侧", readiness.rightWatermark(), readiness.deadline()) : null));
         return 1;
     }
 
-    /** 只有右表有 → 左侧（账单）缺失。 */
+    /**
+     * 只有右表有 → 左侧（账单）缺失。左侧水位未就绪时同理标 PENDING。
+     */
     private long emitMissingLeft(Row rightRow, DiffSink sink) {
-        sink.accept(DiffRecord.of(jobId, shardId, rule.missing().leftMissingDiffType(), rule.missing().severity(),
-                Row.render(rightRow.get(rightKeyField)), "", null, describe(rightRow), null, null));
+        boolean pending = readiness.missingLeftPending();
+        String type = rule.missing().leftMissingDiffType() + (pending ? PENDING_SUFFIX : "");
+        sink.accept(DiffRecord.of(jobId, shardId, type, rule.missing().severity(),
+                Row.render(rightRow.get(rightKeyField)), "", null, describe(rightRow), null, null)
+                .withExplanation(pending ? pendingNote("左侧", readiness.leftWatermark(), readiness.deadline()) : null));
         return 1;
+    }
+
+    private static String pendingNote(String side, java.time.Instant watermark, java.time.Instant deadline) {
+        return side + "数据水位未就绪（最新水位 " + (watermark == null ? "无" : watermark)
+                + (deadline == null ? "" : "，就绪线 " + deadline)
+                + "），该缺失可能是'尚未到达'而非'真缺失'，属于待定判定 —— 等水位就绪后重跑即可出终判。";
     }
 
     private DiffRecord duplicateDiff(List<Row> leftGroup, List<Row> rightGroup) {
