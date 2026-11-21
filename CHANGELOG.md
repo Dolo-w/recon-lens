@@ -4,6 +4,25 @@
 
 ## [未发布]
 
+### 新增（2026-11-21：连接器层第二步，厂商导出 profile）
+
+- **`ColumnProfile` + 内置 Lago 两个 profile**（`lago-invoice-fees` 20 列 /
+  `lago-invoices` 29 列）：表头逐字核证自 lago 源码
+  `api/app/services/data_exports/csv/*.rb` 的 `base_headers`（2026-11）。
+  `recon_import_file` 新增可选 `profile` 参数：
+  - 列重命名（`fee_total_amount_cents` → `total_amount`）+ 强制类型，不再依赖推断
+  - `_cents` 分单位自动换算成元（除数 100，灌数时 `divide(100, 6, HALF_UP)`）——
+    两边口径一致才比得出真差异
+  - 表头必须<b>按顺序</b>以 required 前缀匹配（厂商在表尾追加可选列不受影响），
+    不匹配直接报错并列出期望表头，不做模糊匹配
+  - 未知 profile 报错并列出可用值，绝不静默退化成通用导入（单位差 100 倍的
+    假差异比导入失败难看得多）
+  - profile 列跳过金额归一探测；表尾多余列照走通用推断 + 金额归一，两套机制不互斥
+  - 异步导入（`async=true`）与同步路径同样支持 profile
+- profile 是配置不是代码路径：接新厂商 = 在 `ColumnProfiles` 加一份映射 +
+  一组按真实导出表头写的测试，不动导入器一行代码
+- 回归：**910 tests / 0 failures**（`ColumnProfileImportTest` +6）
+
 ### 新增（2026-11-21：连接器层第一步，canonical 金额归一）
 
 - **脏金额导入归一**：新包 `connector` + `AmountNormalizer` —— 账单导出里

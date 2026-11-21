@@ -81,14 +81,15 @@ public class ImportTaskRegistry {
     /**
      * 排队一次导入。
      *
+     * @param profileId 厂商导出映射 profile（见 {@link FileImporter#confirm}）；null = 通用导入
      * @throws IllegalStateException 队列已满
      */
-    public long submit(String file, String table, String operator, String sheet) {
+    public long submit(String file, String table, String operator, String sheet, String profileId) {
         long id = ids.incrementAndGet();
         Task queued = new Task(id, file, table, Status.QUEUED, null, null, Instant.now(), null);
         tasks.put(id, queued);
         try {
-            pool.execute(() -> execute(id, file, table, operator, sheet));
+            pool.execute(() -> execute(id, file, table, operator, sheet, profileId));
         } catch (RuntimeException e) {
             tasks.put(id, queued.done(null, "后台队列已满（同时最多 2 个导入任务），稍后重试"));
             throw new IllegalStateException("导入队列已满，稍后重试", e);
@@ -104,13 +105,13 @@ public class ImportTaskRegistry {
         pool.shutdownNow();
     }
 
-    private void execute(long id, String file, String table, String operator, String sheet) {
+    private void execute(long id, String file, String table, String operator, String sheet, String profileId) {
         Task running = tasks.get(id);
         if (running != null) {
             tasks.put(id, running.withStatus(Status.RUNNING));
         }
         try {
-            FileImporter.ImportPreview result = importer.confirm(file, table, operator, sheet);
+            FileImporter.ImportPreview result = importer.confirm(file, table, operator, sheet, profileId);
             if (result.error() != null) {
                 tasks.put(id, running.done(null, result.error()));
                 log.warn("后台导入 #{} 失败: {} -> {}：{}", id, file, table, result.error());

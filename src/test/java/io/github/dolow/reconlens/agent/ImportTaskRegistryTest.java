@@ -58,10 +58,10 @@ class ImportTaskRegistryTest {
     @Test
     @DisplayName("confirm 立刻返回任务号，后台跑完状态变 SUCCESS 并带上行数")
     void submitReturnsImmediatelyThenSucceeds() {
-        when(importer.confirm(eq("orders.csv"), eq("recon_orders"), any(), any()))
+        when(importer.confirm(eq("orders.csv"), eq("recon_orders"), any(), any(), any()))
                 .thenReturn(preview("recon_orders", 625_000L, null));
 
-        long taskId = registry.submit("orders.csv", "recon_orders", "wang", null);
+        long taskId = registry.submit("orders.csv", "recon_orders", "wang", null, null);
 
         assertThat(taskId).isPositive();
         assertThat(registry.find(taskId)).isPresent();
@@ -76,10 +76,10 @@ class ImportTaskRegistryTest {
     @Test
     @DisplayName("导入失败（FileImporter 返回 error）落 FAILED 并保留原因")
     void importerErrorBecomesFailedTask() {
-        when(importer.confirm(eq("bad.csv"), eq("recon_bad"), any(), any()))
+        when(importer.confirm(eq("bad.csv"), eq("recon_bad"), any(), any(), any()))
                 .thenReturn(preview("recon_bad", 0, "第 3 行有 21 列，表头只有 20 列"));
 
-        long taskId = registry.submit("bad.csv", "recon_bad", "wang", null);
+        long taskId = registry.submit("bad.csv", "recon_bad", "wang", null, null);
 
         assertThat(awaitStatus(taskId, ImportTaskRegistry.Status.FAILED))
                 .isEqualTo(ImportTaskRegistry.Status.FAILED);
@@ -89,10 +89,10 @@ class ImportTaskRegistryTest {
     @Test
     @DisplayName("异常也落 FAILED，不会把任务永远留在 RUNNING")
     void exceptionBecomesFailedTask() {
-        when(importer.confirm(eq("boom.csv"), eq("recon_boom"), any(), any()))
+        when(importer.confirm(eq("boom.csv"), eq("recon_boom"), any(), any(), any()))
                 .thenThrow(new IllegalStateException("连接断开"));
 
-        long taskId = registry.submit("boom.csv", "recon_boom", "wang", null);
+        long taskId = registry.submit("boom.csv", "recon_boom", "wang", null, null);
 
         assertThat(awaitStatus(taskId, ImportTaskRegistry.Status.FAILED))
                 .isEqualTo(ImportTaskRegistry.Status.FAILED);

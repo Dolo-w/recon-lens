@@ -8,6 +8,7 @@ import io.github.dolow.reconlens.domain.ApprovalMode;
 import io.github.dolow.reconlens.domain.CoverageReason;
 import io.github.dolow.reconlens.domain.TrialState;
 import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.connector.ColumnProfiles;
 import io.github.dolow.reconlens.rule.ApprovalRelay;
 import io.github.dolow.reconlens.store.AgentRunRepository;
 import io.github.dolow.reconlens.store.RuleRepository;
@@ -167,12 +168,15 @@ public class AgentMcpTools {
                         + "（recon.agent.file-import.dir，默认 ./data/import）内，只接受该目录内的相对路径。"
                         + "两段式：action=preview 只读解析（列名、推断的列类型、行数），把结果展示给人；"
                         + "人确认后 action=confirm（须传 table 指定目标表名）才建表灌数并注册。"
+                        + "可选 profile：厂商导出文件映射（当前可用 " + String.join(" / ", ColumnProfiles.ids())
+                        + "），按厂商表头重命名列、_cents 分单位自动换算成元；未知 profile 会报错并列出可用值。"
                         + "目标表已存在时拒绝 —— 导入绝不覆盖已有的表。",
                 """
                 {"type":"object","properties":{
                   "file":{"type":"string","description":"导入目录内的相对路径，如 orders.csv 或 2026/账单.xlsx"},
                   "action":{"type":"string","enum":["preview","confirm"],"description":"preview=只读解析（缺省）；confirm=人工确认后建表灌数"},
                   "table":{"type":"string","description":"confirm 必填：目标表名（[schema.]标识符）；已存在的表会被拒绝"},
+                  "profile":{"type":"string","description":"可选：厂商导出映射 profile（如 lago-invoice-fees / lago-invoices），列重命名+单位换算"},
                   "operator":{"type":"string","description":"可选：确认人标识，记入注册审计"},
                   "sheet":{"type":"string","description":"可选：Excel 的 Sheet 名或从 0 开始的序号（缺省第一张）；CSV 忽略"},
                   "async":{"type":"boolean","description":"confirm 时是否后台执行（大文件建议 true）；preview 忽略"}},
@@ -196,6 +200,7 @@ public class AgentMcpTools {
                 args -> importFile(McpToolFactory.text(args, "file", true),
                         McpToolFactory.text(args, "action", false),
                         McpToolFactory.text(args, "table", false),
+                        McpToolFactory.text(args, "profile", false),
                         McpToolFactory.text(args, "operator", false),
                         McpToolFactory.text(args, "sheet", false),
                         flag(args, "async"))));
@@ -298,11 +303,11 @@ public class AgentMcpTools {
     }
 
     /** 导入工具：preview 只读文件；confirm 建表灌数 + 注册白名单，只在人工确认后发起。 */
-    McpToolFactory.ToolResult importFile(String file, String action, String table, String operator,
-                                         String sheet, boolean async) {
+    McpToolFactory.ToolResult importFile(String file, String action, String table, String profile,
+                                         String operator, String sheet, boolean async) {
         boolean confirm = "confirm".equalsIgnoreCase(action == null ? "" : action.trim());
         if (confirm && async) {
-            long taskId = importTasks.submit(file, table, operator, sheet);
+            long taskId = importTasks.submit(file, table, operator, sheet, profile);
             Map<String, Object> structured = new LinkedHashMap<>();
             McpToolFactory.put(structured, "file", file);
             McpToolFactory.put(structured, "table", table);
@@ -316,8 +321,8 @@ public class AgentMcpTools {
             return McpToolFactory.ToolResult.of(message, structured);
         }
         io.github.dolow.reconlens.agent.FileImporter.ImportPreview p = confirm
-                ? importer.confirm(file, table, operator, sheet)
-                : importer.preview(file, sheet);
+                ? importer.confirm(file, table, operator, sheet, profile)
+                : importer.preview(file, sheet, profile);
 
         Map<String, Object> structured = new LinkedHashMap<>();
         McpToolFactory.put(structured, "file", p.file());

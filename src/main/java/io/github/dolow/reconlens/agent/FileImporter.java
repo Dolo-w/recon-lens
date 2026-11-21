@@ -1,6 +1,8 @@
 package io.github.dolow.reconlens.agent;
 
 import io.github.dolow.reconlens.connector.AmountNormalizer;
+import io.github.dolow.reconlens.connector.ColumnProfile;
+import io.github.dolow.reconlens.connector.ColumnProfiles;
 
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
@@ -18,6 +20,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CharsetDecoder;
 import java.nio.charset.CodingErrorAction;
@@ -125,7 +128,7 @@ public class FileImporter {
 
     /** 只读预览：解析文件头与采样行，推断列类型与总行数。不改任何状态。 */
     public ImportPreview preview(String file) {
-        return preview(file, null);
+        return preview(file, null, null);
     }
 
     /**
@@ -134,12 +137,28 @@ public class FileImporter {
      * @param sheet Excel 的 Sheet 名或从 0 开始的序号；为空时取第一个
      */
     public ImportPreview preview(String file, String sheet) {
+        return preview(file, sheet, null);
+    }
+
+    /**
+     * 带厂商 profile 的预览（连接器层，{@link ColumnProfile}）：命中 profile 的列改名 + 强制类型 +
+     * 单位换算，表尾多余列照走通用推断与金额归一。
+     *
+     * @param profileId profile 标识；null/空白 = 通用导入；未知 id 报错（列出可用值，绝不静默退化）
+     */
+    public ImportPreview preview(String file, String sheet, String profileId) {
         List<String> headers;
         List<String> normalized;
         List<String> types;
         long rowCount;
         List<String> notes = List.of();
         Map<Integer, Boolean> amountColumns = Map.of();
+        ColumnProfile profile;
+        try {
+            profile = ColumnProfiles.resolve(profileId);
+        } catch (IllegalArgumentException e) {
+            return new ImportPreview(file, null, List.of(), List.of(), List.of(), null, e.getMessage());
+        }
         try {
             Path path = resolve(file);
             try (ParsedFile parsed = open(path, sheet)) {
@@ -171,6 +190,18 @@ public class FileImporter {
                     types = upgraded;
                 }
                 notes = buildAmountNotes(normalized, headers, amountColumns);
+                if (profile != null) {
+                    ProfileOverride override = applyProfile(profile, headers, normalized, types, rowCount, file);
+                    if (override.error != null) {
+                        return override.error;
+                    }
+                    normalized = override.columns;
+                    types = override.types;
+                    // profile 说明在前，金额归一说明在后 —— 两套机制对尾部多余列都生效
+                    List<String> combined = new ArrayList<>(override.notes);
+                    combined.addAll(notes);
+                    notes = combined;
+                }
             }
         } catch (IOException e) {
             return new ImportPreview(file, null, List.of(), List.of(), List.of(), null,
@@ -236,6 +267,79 @@ public class FileImporter {
         return notes;
     }
 
+    // ------------------------------------------------------------------
+    // 厂商 profile 应用（连接器层）：列重命名 + 强制类型 + 单位换算
+
+    private record ProfileOverride(List<String> columns, List<String> types, List<String> notes,
+                                   ImportPreview error) {
+
+        static ProfileOverride ok(List<String> columns, List<String> types, List<String> notes) {
+            return new ProfileOverride(columns, types, notes, null);
+        }
+    }
+
+    /**
+     * 表头按顺序匹配 profile 前缀 → 命中列重命名/强制类型，尾部多余列保持通用推断结果。
+     * 匹配失败直接报错并列出期望表头 —— 导出文件不是"长得像"就行，金额单位差 100 倍
+     * 的假差异比导入失败难看得多。
+     */
+    private static ProfileOverride applyProfile(ColumnProfile profile, List<String> headers,
+                                                List<String> normalized, List<String> types,
+                                                long rowCount, String file) {
+        List<String> required = profile.requiredHeaders();
+        if (headers.size() < required.size()) {
+            return new ProfileOverride(null, null, null, new ImportPreview(file, null, List.of(), headers,
+                    List.of(), rowCount, "表头只有 " + headers.size() + " 列，不够 profile " + profile.id()
+                    + " 要求的 " + required.size() + " 列（" + profile.description() + "）"));
+        }
+        int diffAt = -1;
+        for (int i = 0; i < required.size(); i++) {
+            if (!required.get(i).equals(headers.get(i))) {
+                diffAt = i;
+                break;
+            }
+        }
+        if (diffAt >= 0) {
+            return new ProfileOverride(null, null, null, new ImportPreview(file, null, List.of(), headers,
+                    List.of(), rowCount, "表头与 profile " + profile.id() + " 不匹配：第 " + (diffAt + 1)
+                    + " 列期望 \"" + required.get(diffAt) + "\"，实际 \"" + headers.get(diffAt) + "\"。"
+                    + "该 profile 要求的表头（按顺序）: " + String.join(", ", required)
+                    + "。如果这不是厂商导出文件，去掉 profile 参数按通用导入即可"));
+        }
+        List<String> cols = new ArrayList<>(normalized);
+        List<String> tps = new ArrayList<>(types);
+        for (int i = 0; i < required.size(); i++) {
+            ColumnProfile.ColumnSpec spec = profile.specs().get(required.get(i));
+            cols.set(i, spec.column());
+            tps.set(i, spec.type());
+        }
+        List<String> notes = new ArrayList<>();
+        notes.add("已按 profile " + profile.id() + " 映射：" + required.size() + " 列重命名并强制类型"
+                + "（" + profile.description() + "）");
+        for (int i = 0; i < required.size(); i++) {
+            ColumnProfile.ColumnSpec spec = profile.specs().get(required.get(i));
+            if (spec.divisor() != null) {
+                notes.add("列 " + spec.column() + "（原表头: " + required.get(i) + "）按单位除数 "
+                        + spec.divisor().toPlainString() + " 换算（分 → 元）");
+            }
+        }
+        return ProfileOverride.ok(cols, tps, notes);
+    }
+
+    /** 确认导入时的单位换算表：目标列名 → 除数（分 → 元）。由 profile specs 推导，通用导入为空表。 */
+    static Map<String, BigDecimal> divisorsOf(ColumnProfile profile) {
+        if (profile == null) {
+            return Map.of();
+        }
+        Map<String, BigDecimal> out = new LinkedHashMap<>();
+        for (ColumnProfile.ColumnSpec spec : profile.specs().values()) {
+            if (spec.divisor() != null) {
+                out.put(spec.column(), spec.divisor());
+            }
+        }
+        return out;
+    }
+
     /**
      * 确认导入：建表 → 灌数 → 注册进白名单。灌数/注册失败时把新建表删回去 ——
      * 重试时不会撞"表已存在"，也不留"建了表但没灌完数"的中间态。
@@ -246,15 +350,25 @@ public class FileImporter {
 
     /** @param sheet Excel 的 Sheet 名或序号；为空时取第一个。CSV 忽略。 */
     public ImportPreview confirm(String file, String table, String operator, String sheet) {
+        return confirm(file, table, operator, sheet, null);
+    }
+
+    /**
+     * 带厂商 profile 的确认导入：列映射/强制类型/单位换算全部按 profile 执行
+     * （口径见 {@link #preview(String, String, String)}）。
+     */
+    public ImportPreview confirm(String file, String table, String operator, String sheet, String profileId) {
         String tableName = table == null ? "" : table.trim();
         if (!TABLE_NAME.matcher(tableName).matches()) {
             return new ImportPreview(file, tableName, List.of(), List.of(), List.of(), null,
                     "表名不合法：只允许 [schema.]标识符（字母/数字/下划线/$），不要引号或特殊字符");
         }
-        ImportPreview p = preview(file, sheet);
+        ImportPreview p = preview(file, sheet, profileId);
         if (p.error() != null) {
             return p;
         }
+        // 走到这里 profile 一定合法（preview 已校验），divisors 从 specs 推导换算表
+        Map<String, BigDecimal> divisors = divisorsOf(ColumnProfiles.resolve(profileId));
         if (tableExists(tableName)) {
             return new ImportPreview(file, tableName, p.columns(), p.originalHeaders(), p.columnTypes(), p.rows(),
                     "表 " + tableName + " 已存在 —— 导入绝不覆盖已有的表，请换一个表名"
@@ -294,7 +408,7 @@ public class FileImporter {
         long inserted;
         try {
             inserted = loadRows(resolve(file), tableName, columns, types, sheet,
-                    baseCount, amountCols, rawCols);
+                    baseCount, amountCols, rawCols, divisors);
         } catch (Exception e) {
             safeDrop(tableName);
             return new ImportPreview(file, tableName, columns, p.originalHeaders(), types, p.rows(),
@@ -830,9 +944,11 @@ public class FileImporter {
      * @param baseCount  原始列数（{@code __raw_*} 旁列不算）—— 行列数校验和报错口径都按它
      * @param amountCols 金额归一列号 → 是否欧式分隔；这些列不走普通 convert，走 {@link AmountNormalizer}
      * @param rawCols    金额归一列号 → 原始值旁列名
+     * @param divisors   目标列名 → 单位除数（profile 的分 → 元换算）；空表 = 无换算
      */
     private long loadRows(Path path, String table, List<String> columns, List<String> types, String sheet,
-                          int baseCount, Map<Integer, Boolean> amountCols, Map<Integer, String> rawCols)
+                          int baseCount, Map<Integer, Boolean> amountCols, Map<Integer, String> rawCols,
+                          Map<String, BigDecimal> divisors)
             throws IOException {
         String placeholders = String.join(", ", Collections.nCopies(columns.size(), "?"));
         String sql = "INSERT INTO " + table + " (" + String.join(", ", columns) + ") VALUES (" + placeholders + ")";
@@ -884,6 +1000,12 @@ public class FileImporter {
                                     + "（类型是前 " + properties.getFileImport().getInferenceSampleRows()
                                     + " 行推断的，可以调大 recon.agent.file-import.inference-sample-rows）", e);
                         }
+                        BigDecimal divisor = divisors.get(columns.get(i));
+                        if (divisor != null) {
+                            // profile 的单位换算（分 → 元）。固定 6 位小数与 DECIMAL(24,6) 对齐；
+                            // 非 terminate 的除数在注册表的构造期校验里就该被拦住
+                            one[i] = ((BigDecimal) one[i]).divide(divisor, 6, RoundingMode.HALF_UP);
+                        }
                     }
                     params.add(one);
                 }
@@ -921,7 +1043,7 @@ public class FileImporter {
         return value;
     }
 
-    private boolean tableExists(String table) {
+    boolean tableExists(String table) {
         try {
             // WHERE 1=0 让 COUNT 恒为一行一列的 0：验证了表存在，又不扫任何数据
             jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE 1=0", Long.class);
