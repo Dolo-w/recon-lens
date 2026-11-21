@@ -267,8 +267,9 @@ node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项
 | 文档 | 内容 |
 | --- | --- |
 | [docs/rule-dsl.md](docs/rule-dsl.md) | 规则 DSL 完整手册（维度 / 聚合 / 分片 / 容差 / 校验规则） |
+| [docs/tutorial-lago-onboard.md](docs/tutorial-lago-onboard.md) | **30 分钟接一个 Lago 厂商**（文件导入 / API 连接器 / 证据包全流程） |
 | [docs/agent-quickstart.md](docs/agent-quickstart.md) | Agent 本地运行与对接全流程实测指南 |
-| [docs/mcp.md](docs/mcp.md) | MCP 接入：18 个工具入参/返回、动态表注册、文件导入 |
+| [docs/mcp.md](docs/mcp.md) | MCP 接入：23 个工具入参/返回、动态表注册、文件导入 |
 | [docs/architecture.md](docs/architecture.md) | 架构说明 |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字 |
 
