@@ -36,6 +36,10 @@ recon:
   engine:
     # 分片并行度，默认取 min(规则内 parallelism, CPU*2)
     parallelism: 8
+    # 执行模式：默认（不配）是 go-worker（正式对账统一走 Go worker 二进制）。
+    # 这里显式 inprocess：本地裸 java -jar 没有 worker 二进制，保住开箱即跑的演示；
+    # 生产/MySQL 档（application-mysql.yml，Docker 镜像内必含 worker）显式 go-worker。
+    execution: inprocess
     # JDBC 游标抓取条数：这是"内存可控"的关键，配合 ORDER BY 做归并式对账
     fetch-size: 2000
     # 单个分片最大重试次数（幂等重跑的基础）

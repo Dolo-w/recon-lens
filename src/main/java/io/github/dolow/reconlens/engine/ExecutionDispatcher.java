@@ -31,20 +31,22 @@ import java.util.concurrent.TimeUnit;
  * 执行分发器（v3 扩展架构 §一）：决定一个对账任务在 JVM 内跑还是交给 Go worker 跑，
  * 并保证<b>两条路径产出同口径</b>的 job 状态机、差异集与统计（golden-set 对照测试钉住）。
  *
- * <p>三档模式（{@code recon.engine.execution}）：
+ * <p>两档模式（{@code recon.engine.execution}，2026-11-21 纯化：正式对账统一走 worker，
+ * 不再按数据量路由 —— "跟数据量没关系"是有意的架构决定：一条执行路径 = 一套要养的心智）：
  * <ul>
- *   <li>{@code inprocess}（默认）—— JVM 内分片对账，行为与历史版本完全一致</li>
- *   <li>{@code go-worker} —— 两侧数据导出键序 CSV，调 worker 二进制比对，差异 JSONL 导回 recon_diff</li>
- *   <li>{@code auto} —— 两侧行数探测达到阈值（默认 5 万）才切 worker；探不了行数（自定义 SQL）保守走 inprocess</li>
+ *   <li>{@code go-worker}（默认）—— 两侧数据导出键序 CSV，调 worker 二进制比对，差异 JSONL 导回 recon_diff</li>
+ *   <li>{@code inprocess} —— JVM 内分片对账，作为<b>显式回退档</b>保留（worker 二进制不在的逃生门、
+ *       golden-set 对照测试的另一边）</li>
  * </ul>
  *
  * <p>两条铁律：
  * <ol>
  *   <li><b>试算（captureDiffs）永远走 inprocess</b> —— 摘要 T2/T3/T4 的幂等比较语义绑定在
- *       Java 路径上（biz_key 截断的教训见 ReconEngine.runTraced），worker 路径没有摘要。</li>
+ *       Java 路径上（biz_key 截断的教训见 ReconEngine.runTraced），worker 路径没有摘要；
+ *       且试算是规则质检不是正式对账，物化样本有上限、天然小数据。</li>
  *   <li><b>go-worker 模式下 worker 不可用 = 任务失败（fail-loud）</b>，绝不静默降级 ——
  *       用户显式点名 worker 却偷偷用 JVM 跑，是在替他做他不知道的决定。
- *       {@code auto} 是软偏好，worker 不可用时降级 inprocess 但 WARN 说清楚。</li>
+ *       （未显式配置路径时会自动探测常见位置：jar 同目录 / ./bin / /app。）</li>
  * </ol>
  *
  * <p>worker 路径的差异 shardId 统一为 0：worker 的分片是提交粒度（checkpoint 单位），
@@ -78,17 +80,21 @@ public class ExecutionDispatcher {
         this.specWriter = specWriter;
     }
 
-    /** 当前任务是否由 worker 接手。captureDiffs=true（试算）永远 false。 */
+    /** 当前任务是否由 worker 接手。captureDiffs=true（试算）永远 false；正式对账默认全走 worker。 */
     public boolean shouldTakeOver(RuleSpec rule, boolean captureDiffs) {
         if (captureDiffs) {
             return false;
         }
         String mode = mode();
-        return switch (mode) {
-            case "go-worker" -> requireWorkerAvailable("go-worker");
-            case "auto" -> workerAvailable() && estimateRows(rule) >= threshold();
-            default -> false;
-        };
+        // 默认 go-worker；仅显式 inprocess 走 JVM。未知取值 fail-loud（打错字不该悄悄跑错路径）。
+        if ("inprocess".equals(mode)) {
+            return false;
+        }
+        if ("go-worker".equals(mode)) {
+            return requireWorkerAvailable("go-worker");
+        }
+        throw new IllegalStateException("recon.engine.execution 取值未知: \"" + mode
+                + "\"（可用: go-worker / inprocess）—— 不猜，配置错了就明说");
     }
 
     /**
@@ -124,7 +130,13 @@ public class ExecutionDispatcher {
         }
 
         List<String> command = new ArrayList<>();
-        command.add(properties.getEngine().getGoWorkerPath());
+        Path binary = resolveWorkerBinary();
+        if (binary == null) {
+            // shouldTakeOver 已 requireWorkerAvailable 过，正常到不了这里；防御性兜底说人话
+            return failed(jobId, "worker 二进制不可用（go-worker-path="
+                    + properties.getEngine().getGoWorkerPath() + "）—— 见 requireWorkerAvailable 的提示");
+        }
+        command.add(binary.toAbsolutePath().toString());
         command.add("--left"); command.add(leftCsv.toAbsolutePath().toString());
         command.add("--right"); command.add(rightCsv.toAbsolutePath().toString());
         command.add("--spec"); command.add(specFile.toAbsolutePath().toString());
@@ -324,39 +336,56 @@ public class ExecutionDispatcher {
     private String mode() {
         String mode = properties.getEngine().getExecution();
         if (mode == null || mode.isBlank()) {
-            return "inprocess";
+            return "go-worker";
         }
         return mode.trim().toLowerCase(Locale.ROOT);
     }
 
-    private int threshold() {
-        return Math.max(1, properties.getEngine().getGoWorkerThreshold());
+    /**
+     * 自动探测顺序（go-worker-path 未显式配置时）：工作目录 → ./bin → /app（Docker 镜像约定）。
+     * 显式配置了路径则只看那一个位置 —— 配置了却不存在就是配置错了，不帮用户到处找。
+     */
+    private static final List<Path> WORKER_SEARCH_DIRS =
+            List.of(Path.of("."), Path.of("./bin"), Path.of("/app"));
+    private static final List<String> WORKER_NAMES = List.of("recon-worker", "recon-worker.exe");
+
+    /**
+     * 解析 worker 二进制实际路径：显式配置优先（配置了却不存在 = null，配置错了不帮用户到处找）；
+     * 未配置时按 WORKER_SEARCH_DIRS × WORKER_NAMES 自动探测。
+     */
+    private Path resolveWorkerBinary() {
+        String path = properties.getEngine().getGoWorkerPath();
+        if (path != null && !path.isBlank()) {
+            Path p = Path.of(path);
+            return Files.isRegularFile(p) ? p : null;
+        }
+        for (Path dir : WORKER_SEARCH_DIRS) {
+            for (String name : WORKER_NAMES) {
+                Path candidate = dir.resolve(name);
+                if (Files.isRegularFile(candidate)) {
+                    log.info("recon.engine.go-worker-path 未配置，自动探测到 worker: {}",
+                            candidate.toAbsolutePath());
+                    return candidate;
+                }
+            }
+        }
+        return null;
     }
 
     private boolean workerAvailable() {
-        String path = properties.getEngine().getGoWorkerPath();
-        return path != null && !path.isBlank() && Files.isRegularFile(Path.of(path));
+        return resolveWorkerBinary() != null;
     }
 
     private boolean requireWorkerAvailable(String mode) {
-        if (workerAvailable()) {
+        Path binary = resolveWorkerBinary();
+        if (binary != null) {
             return true;
         }
-        throw new IllegalStateException("execution=" + mode + " 但 recon.engine.go-worker-path 未配置或文件不存在（"
-                + properties.getEngine().getGoWorkerPath() + "）—— 显式点名 worker 却不可用必须失败，"
-                + "不静默降级（要自动降级请用 execution=auto）");
-    }
-
-    /** auto 决策的行数估算：两侧都是可探测的单一表才返回行数（取大者），否则 null = 保守走 inprocess。 */
-    private long estimateRows(RuleSpec rule) {
-        Long left = repository.tableRowCount(rule.left().table());
-        Long right = repository.tableRowCount(rule.right().table());
-        if (left == null || right == null) {
-            log.info("auto 模式行数探测不可用（自定义 SQL 或表不存在），保守走 inprocess: rule={}", rule.code());
-            return -1;
-        }
-        // 聚合维度按原表行数估算会高估 —— 高估只是性能选择（worker 语义相同），不影响正确性
-        return Math.max(left, right);
+        throw new IllegalStateException("execution=" + mode + " 但 worker 二进制不可用（"
+                + "go-worker-path=" + properties.getEngine().getGoWorkerPath()
+                + "，自动探测位置: " + WORKER_SEARCH_DIRS + " 下的 " + WORKER_NAMES + "）—— "
+                + "把 recon-worker 放到 jar 同目录、或 recon.engine.go-worker-path=/绝对路径、"
+                + "或显式 recon.engine.execution=inprocess 回退 JVM；不静默降级");
     }
 
     private Path workDir(long jobId) {

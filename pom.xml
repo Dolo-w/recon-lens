@@ -140,6 +140,12 @@
         <configuration>
           <argLine>${surefire.argLine}</argLine>
           <excludedGroups>${surefire.excludedGroups}</excludedGroups>
+          <systemPropertyVariables>
+            <!-- 测试环境钉住 inprocess：主配置默认 go-worker（2026-11-21 纯化），
+                 但 900+ 个存量测试不应依赖 worker 二进制。golden-set 测试用
+                 @SpringBootTest properties / 运行时 setExecution 显式覆盖此值。 -->
+            <recon.engine.execution>inprocess</recon.engine.execution>
+          </systemPropertyVariables>
         </configuration>
       </plugin>
     </plugins>

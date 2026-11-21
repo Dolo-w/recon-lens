@@ -233,15 +233,23 @@ class GoWorkerGoldenSetTest {
     }
 
     @Test
-    @DisplayName("auto 模式：行数低于阈值走 inprocess，行为不变")
-    void autoModeStaysInprocessBelowThreshold() {
-        configExecution("auto");
-        properties.getEngine().setGoWorkerThreshold(1_000_000);
-        ReconJob job = engine.run("GOLDEN_SET", "golden-auto", "auto 低于阈值");
+    @DisplayName("显式 inprocess 回退档：走 JVM 内分片，shard 记录是规则分片计划口径")
+    void explicitInprocessStaysJvm() {
+        configExecution("inprocess");
+        ReconJob job = engine.run("GOLDEN_SET", "golden-inprocess", "显式回退 JVM");
         assertThat(job.status()).isEqualTo(JobStatus.SUCCESS);
         // shard 记录还是规则分片计划的口径（inprocess 路径），没有被 worker 重建
         Integer shards = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM recon_shard WHERE job_id = ?", Integer.class, job.id());
         assertThat(shards).isNotNull().isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("execution 配了未知取值：fail-loud 不猜")
+    void unknownExecutionModeFailsLoud() {
+        configExecution("gowkrker"); // 打错字
+        assertThatThrownBy(() -> engine.run("GOLDEN_SET", "golden-typo", "未知取值"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("go-worker / inprocess");
     }
 }

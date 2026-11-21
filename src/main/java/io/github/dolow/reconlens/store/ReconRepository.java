@@ -153,18 +153,6 @@ public class ReconRepository implements DiffWriter {
         createShards(jobId, shardCount);
     }
 
-    /** auto 模式决策用的行数探测：只接受单一表名（与水位探测同一正则闸），探不了返回 null。 */
-    public Long tableRowCount(String table) {
-        if (table == null || !table.matches("[A-Za-z_][A-Za-z0-9_.]*")) {
-            return null;
-        }
-        try {
-            return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Long.class);
-        } catch (RuntimeException e) {
-            return null;
-        }
-    }
-
     public void markJobRunning(long jobId) {
         jdbc.update("UPDATE recon_job SET status=?, started_at=COALESCE(started_at, CURRENT_TIMESTAMP), error_msg=NULL WHERE id=?",
                 JobStatus.RUNNING.name(), jobId);

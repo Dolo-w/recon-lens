@@ -401,3 +401,16 @@
   - 断点续跑集成：工作目录（go-worker-dir，按任务号分子目录）里 CSV+spec+checkpoint 齐全时重跑自动 --resume，从最大可提交前缀接着跑，不重新导出（CSV 就是那次任务的原始凭证）
   - worker 超时保险丝（go-worker-timeout-seconds，默认 3600）超时强杀任务标失败；退出码 0/2/3 分别映射 SUCCESS/FAILED（数据错）/FAILED（PARTIAL 前缀，差异不完整绝不导回）
 - 测试 974 全绿（+3：golden-set 对照 / fail-loud / auto 阈值内不变）
+
+
+## 变更（2026-11-21 深夜：执行纯化 —— 正式对账全走 Go worker，删 auto）
+
+- **架构决定（老大拍板）**：执行模式从"按数据量路由"纯化为"正式对账统一走 worker，与数据量无关"——一条执行路径 = 一套要养的心智。`recon.engine.execution` 三档收敛为两档：
+  - **go-worker（新默认）**：正式对账全部导出键序 CSV 交 worker 比对，数据量不再是决策变量
+  - **inprocess（显式回退档）**：保留为逃生门——本地裸 java -jar 没有 worker 二进制时用（application.yml 显式钉住保住开箱即跑），以及 golden-set 对照测试的另一边
+  - ~~auto~~：整个删除（行数阈值估算、ReconRepository.tableRowCount 一并移除）
+- **worker 二进制自动探测**：go-worker-path 未显式配置时按 jar 同目录 → ./bin → /app 探测 recon-worker[.exe]（Docker 镜像靠 RECON_ENGINE_GOWORKERPATH 显式钉 /usr/local/bin）；显式配置了却不存在 = fail-loud 不帮用户到处找
+- **execution 未知取值 fail-loud**：打错字（如 "gowkrker"）直接报错列出可用值，不悄悄跑错路径
+- **试算（captureDiffs）保持走 JVM**：摘要 T2/T3/T4 的分片级 biz_key 摘要哈希语义绑定 Java 路径，移植 Go 需逐字对齐哈希口径（错了 T2 假绿）；且试算是规则质检不是正式对账，物化样本有上限
+- **修 Dockerfile 潜伏 bug**：原 ENV RECON_EXECUTION_WORKERPATH 键名绑不到任何属性（relaxed binding 对不上 recon.engine.go-worker-path），之前靠默认 inprocess 掩盖；改为 RECON_ENGINE_GOWORKERPATH。application-mysql.yml 显式 execution: go-worker（Docker 镜像内 worker 必在）
+- 测试 975 全绿（golden-set +1：execution 未知取值 fail-loud；auto 用例改写为显式 inprocess 回退档用例）；surefire 全局钉 recon.engine.execution=inprocess，900+ 存量测试不依赖 worker 二进制

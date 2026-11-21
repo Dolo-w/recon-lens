@@ -23,7 +23,7 @@ COPY src/main/resources/rules/ /app/rules/
 
 # 规则目录与 worker 路径在容器内是确定的，直接钉死
 ENV RECON_RULES=/app/rules/
-ENV RECON_EXECUTION_WORKERPATH=/usr/local/bin/recon-worker
+ENV RECON_ENGINE_GOWORKERPATH=/usr/local/bin/recon-worker
 
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]

@@ -29,6 +29,9 @@ recon:
     api-key: ${RECON_REVIEW_API_KEY:}
     token-secret: ${RECON_REVIEW_TOKEN_SECRET:}
   engine:
+    # 生产/Docker 档显式 go-worker：镜像内 worker 在 /app/recon-worker（自动探测命中）。
+    # 正式对账统一走 worker，与数据量无关（2026-11-21 纯化决定）。
+    execution: go-worker
     parallelism: 8
     fetch-size: 2000
     max-attempts: 2

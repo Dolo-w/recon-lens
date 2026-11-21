@@ -1,6 +1,6 @@
 # 扩展架构 v3：执行分发器 + 连接器 SPI + CI + Docker
 
-> 状态：**已全部落地**（第一批 795d81c：CI/Docker/SPI/Orb；第二批：ExecutionDispatcher + golden-set 对照测试）
+> 状态：**已全部落地**（第一批 795d81c：CI/Docker/SPI/Orb；第二批：ExecutionDispatcher + golden-set；2026-11-21 深夜纯化：正式对账全走 worker，删 auto 三档改两档）
 > 原则不变：拉取与导入分离、fail-loud、差异生命周期口径统一、ArchUnit 边界硬约束。
 
 ## 一、总览
