@@ -386,3 +386,18 @@
 - **Docker 部署形态**：多阶段 Dockerfile（golang 静态编 worker + maven 打 jar + temurin-jre 运行层，worker 与规则目录钉死在镜像内）+ docker-compose（recon + mysql:8，建表与演示数据直接挂仓库权威文件零拷贝，演示库显式放行启动演示=开箱即见差异）。演示凭证仅演示用，见 docker-compose.yml 注释
 - **BillingConnector SPI**：连接器抽象接口（name/configured/resources/sync），契约钉死"拉取与导入分离 / fail-loud / 不回显凭证 / 落盘即凭证"；CSV 落盘口径抽 ConnectorCsvWriter 公共设施；ConnectorController 多厂商化（实现 Bean 注册即收，`POST /api/connectors/{name}/sync` 向后兼容原 `/lago/sync`）
 - **Orb 第二连接器**：usage-based 计费厂商（AI 公司主流），`invoices`（GET /invoices，一行=一张发票）+ `subscriptions`（GET /subscriptions/summary，一行=一个订阅）；cursor 分页（pagination_metadata.has_more/next_cursor）逐字核证自官方文档；与 Lago 的关键差异如实落档——金额是字符串十进制元按 DECIMAL 直入（无分换算），日期列存 ISO 原文（字符串可比）；orb-invoices / orb-subscriptions 两个 profile；端到端测试（伪 Orb + cursor 翻页 + 导入链路 + 多厂商目录）3 例全绿
+
+
+## 新增（2026-11-21 晚：v3 扩展架构第二批 —— ExecutionDispatcher 执行分发器）
+
+- `ExecutionDispatcher`（engine 包）：`recon.engine.execution` 三档执行模式，v3 最大块落地，路线 v3 全部闭环
+  - **inprocess**（默认）：JVM 内分片对账，行为与历史版本完全一致
+  - **go-worker**：两侧数据经 `WorkerCsvExporter` 导出键序 CSV（复用 ReconCursors 的 ORDER BY SQL 与 `Row.render` 同一字符串化口径）→ `WorkerSpecWriter` 逐字翻译规则 DSL → ProcessBuilder 调 worker → 差异 JSONL 批量导回 recon_diff + 凭证导回 recon_diff_evidence（shardId=0）→ 分片记录按 worker 实际提交单元 resetShards 重建 → finishJob。统计（scanned/matched/diffRows）、水位 PENDING（--left-watermark/--right-watermark/--deadline）、事件时间全部贯通
+  - **auto**：两侧行数（COUNT(*)，自定义 SQL 保守跳过）达阈值（go-worker-threshold，默认 5 万）才切 worker
+- **硬不变式与安全闸**：
+  - golden-set 对照测试（GoWorkerGoldenSetTest）：同一份数据两执行器各跑一遍，差异集合逐条等价（忽略 shardId、delta 数值归一）；测试现场 go build worker，无 Go 环境 assume 跳过、CI 有 setup-go 兜底
+  - 试算（captureDiffs）永远走 JVM：摘要 T2/T3/T4 幂等语义绑定在 Java 路径
+  - go-worker 模式下 worker 不可用 = 任务失败且送终态（fail-loud 不静默降级）；auto 降级 inprocess 但 WARN
+  - 断点续跑集成：工作目录（go-worker-dir，按任务号分子目录）里 CSV+spec+checkpoint 齐全时重跑自动 --resume，从最大可提交前缀接着跑，不重新导出（CSV 就是那次任务的原始凭证）
+  - worker 超时保险丝（go-worker-timeout-seconds，默认 3600）超时强杀任务标失败；退出码 0/2/3 分别映射 SUCCESS/FAILED（数据错）/FAILED（PARTIAL 前缀，差异不完整绝不导回）
+- 测试 974 全绿（+3：golden-set 对照 / fail-loud / auto 阈值内不变）

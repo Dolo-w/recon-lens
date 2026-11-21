@@ -617,6 +617,64 @@ public class ReconProperties {
             this.watermarks = watermarks;
         }
 
+        // ---------------- 执行分发（v3 扩展架构 §一） ----------------
+
+        /**
+         * 执行模式：{@code inprocess}（默认，JVM 内分片对账）| {@code go-worker}（导出 CSV
+         * 交给 Go worker 二进制比对）| {@code auto}（按行数阈值决策，探不了行数保守走 inprocess）。
+         * 试算任务（captureDiffs）永远走 inprocess —— 摘要 T2/T3/T4 语义绑定在 Java 路径上。
+         */
+        private String execution = "inprocess";
+        /** Go worker 可执行文件路径。go-worker 模式下不存在直接任务失败（fail-loud，不静默降级）。 */
+        private String goWorkerPath = "";
+        /** auto 模式的行数阈值：两侧最大行数达到它才切 worker。 */
+        private int goWorkerThreshold = 50000;
+        /** worker 进程超时保险丝（秒），超时强杀任务标失败。 */
+        private int goWorkerTimeoutSeconds = 3600;
+        /** worker 工作目录（CSV/spec/JSONL/checkpoint 落这里，按任务号分子目录，跑完保留可审计可续跑）。 */
+        private String goWorkerDir = "./data/worker";
+
+        public String getExecution() {
+            return execution;
+        }
+
+        public void setExecution(String execution) {
+            this.execution = execution;
+        }
+
+        public String getGoWorkerPath() {
+            return goWorkerPath;
+        }
+
+        public void setGoWorkerPath(String goWorkerPath) {
+            this.goWorkerPath = goWorkerPath;
+        }
+
+        public int getGoWorkerThreshold() {
+            return goWorkerThreshold;
+        }
+
+        public void setGoWorkerThreshold(int goWorkerThreshold) {
+            this.goWorkerThreshold = goWorkerThreshold;
+        }
+
+        public int getGoWorkerTimeoutSeconds() {
+            return goWorkerTimeoutSeconds;
+        }
+
+        public void setGoWorkerTimeoutSeconds(int goWorkerTimeoutSeconds) {
+            this.goWorkerTimeoutSeconds = goWorkerTimeoutSeconds;
+        }
+
+        public String getGoWorkerDir() {
+            return goWorkerDir;
+        }
+
+        public void setGoWorkerDir(String goWorkerDir) {
+            this.goWorkerDir = goWorkerDir;
+        }
+
+
         /** 一条规则两侧的水位列。水位只支持表取数侧（自定义 SQL 没有可探测的单一来源表）。 */
         public static class SideWatermark {
             /** 左侧水位列名；null = 左侧不探测，视为就绪 */

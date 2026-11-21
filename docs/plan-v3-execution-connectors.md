@@ -1,6 +1,6 @@
 # 扩展架构 v3：执行分发器 + 连接器 SPI + CI + Docker
 
-> 状态：**已定稿（2026-11-21，老大拍板五决策，见 §七）**。四件事一起规划：①Java↔Go worker 打通 ②第二连接器 ③CI 补 Go ④Docker 部署形态。
+> 状态：**已全部落地**（第一批 795d81c：CI/Docker/SPI/Orb；第二批：ExecutionDispatcher + golden-set 对照测试）
 > 原则不变：拉取与导入分离、fail-loud、差异生命周期口径统一、ArchUnit 边界硬约束。
 
 ## 一、总览

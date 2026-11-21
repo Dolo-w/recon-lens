@@ -1,0 +1,40 @@
+# 测试规则：golden-set 对照（inprocess vs go-worker 同口径）
+# 场景刻意覆盖：decimal 精度与 tolerance 边界 / 缺失 / 重复键 / BOOLEAN / null / 事件时间
+code: GOLDEN_SET
+name: 两执行器同口径对照
+description: 同一份数据 inprocess 与 go-worker 各跑一遍，差异集合必须等价
+
+left:
+  label: 我方计量
+  table: gl_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+  eventTime: event_time
+
+right:
+  label: 厂商账单
+  table: gl_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.05
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: status
+    type: STRING
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+  - field: ok
+    type: BOOLEAN
+    diffType: OK_MISMATCH
+    severity: LOW
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH

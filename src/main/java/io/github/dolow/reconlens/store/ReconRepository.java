@@ -142,6 +142,29 @@ public class ReconRepository implements DiffWriter {
         }
     }
 
+    /**
+     * 重建分片记录：先清空再按新数量插入。执行分发器用 —— go-worker 路径的分片粒度
+     * 是 worker 自己的提交单元（键组事件数），与 Java 的规则分片计划不是一个东西，
+     * 跑完后分片记录必须如实反映 worker 实际跑了多少个提交单元，不然 job 的
+     * shard_done/left_rows 等 SUM 统计全是编出来的数。
+     */
+    public void resetShards(long jobId, int shardCount) {
+        jdbc.update("DELETE FROM recon_shard WHERE job_id=?", jobId);
+        createShards(jobId, shardCount);
+    }
+
+    /** auto 模式决策用的行数探测：只接受单一表名（与水位探测同一正则闸），探不了返回 null。 */
+    public Long tableRowCount(String table) {
+        if (table == null || !table.matches("[A-Za-z_][A-Za-z0-9_.]*")) {
+            return null;
+        }
+        try {
+            return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Long.class);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     public void markJobRunning(long jobId) {
         jdbc.update("UPDATE recon_job SET status=?, started_at=COALESCE(started_at, CURRENT_TIMESTAMP), error_msg=NULL WHERE id=?",
                 JobStatus.RUNNING.name(), jobId);

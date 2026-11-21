@@ -45,6 +45,7 @@ public class ReconEngine {
     private final RuleCatalog catalog;
     private final ReconRepository repository;
     private final ShardRunner shardRunner;
+    private final ExecutionDispatcher dispatcher;
     private final ReconProperties properties;
     private final DatasetFingerprints fingerprints;
     /**
@@ -56,10 +57,11 @@ public class ReconEngine {
     private final ExecutorService submitter;
 
     public ReconEngine(RuleCatalog catalog, ReconRepository repository, ShardRunner shardRunner,
-                       ReconProperties properties, DatasetFingerprints fingerprints) {
+                       ExecutionDispatcher dispatcher, ReconProperties properties, DatasetFingerprints fingerprints) {
         this.catalog = catalog;
         this.repository = repository;
         this.shardRunner = shardRunner;
+        this.dispatcher = dispatcher;
         this.properties = properties;
         this.fingerprints = fingerprints;
         this.submitter = Executors.newFixedThreadPool(
@@ -333,6 +335,17 @@ public class ReconEngine {
         // 真正开跑才标 RUNNING：同步路径等于建任务后立刻执行；异步路径下这里被
         // 提交池调度到才会走到，排队期间任务保持 PENDING
         repository.markJobRunning(jobId);
+        // 执行分发（v3）：大任务可交给 Go worker。worker 路径从导出到 finishJob 全程自治，
+        // 直接返回结果；JVM 路径往下走原有分片逻辑。分发决策失败（如 worker 不可用）也要把
+        // 任务送到终态 —— 不然任务卡在 RUNNING，"执行中的任务不能重跑"这道闸就永远关不上。
+        try {
+            if (dispatcher.shouldTakeOver(rule, captureDiffs)) {
+                return dispatcher.executeViaWorker(rule, jobId, readiness);
+            }
+        } catch (RuntimeException e) {
+            repository.finishJob(jobId, JobStatus.FAILED, Errors.describe(e));
+            throw e;
+        }
         int parallelism = Math.max(1, Math.min(rule.shard().effectiveParallelism(),
                 Math.max(1, properties.getEngine().getParallelism())));
         ExecutorService pool = Executors.newFixedThreadPool(parallelism, runnable -> {

@@ -26,6 +26,13 @@ jobs:
           distribution: temurin
           cache: maven
 
+      # golden-set 对照测试（两执行器同口径的硬不变式）需要现场 go build worker，
+      # 所以 Java job 也要有 Go 工具链 —— 本机开发没装 Go 时该测试自动 assume 跳过
+      - name: Set up Go（golden-set 对照测试现场编译 worker 用）
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-worker/go.mod
+
       - name: 跑测试（用仓库自带的 mvnw，保证本地和 CI 同一套 Maven）
         run: ./mvnw -B --no-transfer-progress test
 
