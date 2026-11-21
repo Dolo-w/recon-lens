@@ -28,7 +28,8 @@ public record SideSpec(String label,
                        List<String> dimensionColumns,
                        String dimensionSeparator,
                        Map<String, String> measures,
-                       String where) {
+                       String where,
+                       String eventTime) {
 
     /** 声明式维度生成的业务键别名：引擎只认一个键列，复合键与表达式维度都收敛到它。 */
     public static final String KEY_ALIAS = "__biz_key";
@@ -39,7 +40,15 @@ public record SideSpec(String label,
     /** 老写法（表/SQL + keyField）的兼容构造器。 */
     public SideSpec(String label, String table, String sql, String keyField, FieldType keyType, String orderBy) {
         this(label, table, sql, keyField, keyType, orderBy, null, List.of(),
-                DEFAULT_DIMENSION_SEPARATOR, Map.of(), null);
+                DEFAULT_DIMENSION_SEPARATOR, Map.of(), null, null);
+    }
+
+    /** 不带事件时间列的兼容构造器（事件级对账之前的老调用点/测试用）。 */
+    public SideSpec(String label, String table, String sql, String keyField, FieldType keyType, String orderBy,
+                    String dimension, List<String> dimensionColumns, String dimensionSeparator,
+                    Map<String, String> measures, String where) {
+        this(label, table, sql, keyField, keyType, orderBy, dimension, dimensionColumns,
+                dimensionSeparator, measures, where, null);
     }
 
     public boolean customSql() {

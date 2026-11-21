@@ -82,9 +82,9 @@ public class EvidencePackService {
         EvidencePackCsv csv = new EvidencePackCsv();
         csv.row("差异ID", "任务ID", "规则code", "分片", "差异类型", "严重度", "业务键", "字段",
                 "我方值(left)", "对方值(right)", "差额", "差异比", "解释",
-                "生命周期状态", "凭证来源LEFT", "凭证JSON LEFT", "凭证来源RIGHT", "凭证JSON RIGHT",
+                "事件时间", "生命周期状态", "凭证来源LEFT", "凭证JSON LEFT", "凭证来源RIGHT", "凭证JSON RIGHT",
                 "计价模型", "token类型", "单价(每百万)", "我方金额", "对方金额", "金额影响",
-                "币种", "价格生效起", "价格生效止");
+                "币种", "价格生效起", "价格生效止", "计价时点");
         for (DiffRecord d : diffs) {
             List<DiffEvidence> ev = evidence.get(d.shardId() + "|" + d.bizKey());
             String leftSource = evSource(ev, DiffEvidence.LEFT);
@@ -101,6 +101,7 @@ public class EvidencePackService {
                     d.deltaValue() == null ? "" : d.deltaValue().toPlainString(),
                     d.deltaRatio() == null ? "" : d.deltaRatio().toPlainString(),
                     d.explanation() == null ? "" : d.explanation(),
+                    d.eventAt() == null ? "" : d.eventAt(),
                     statuses.getOrDefault(d.id(), Status.OPEN).name(),
                     leftSource, leftJson, rightSource, rightJson,
                     p == null ? "" : nz(model), p == null ? "" : nz(tokenType),
@@ -110,7 +111,8 @@ public class EvidencePackService {
                     p == null ? "" : p.impact().toPlainString(),
                     p == null ? "" : nz(p.currency()),
                     p == null ? "" : nz(p.effectiveFrom()),
-                    p == null ? "" : nz(p.effectiveTo()));
+                    p == null ? "" : nz(p.effectiveTo()),
+                    p == null ? "" : nz(p.pricedAt()));
         }
         return csv.bytes();
     }

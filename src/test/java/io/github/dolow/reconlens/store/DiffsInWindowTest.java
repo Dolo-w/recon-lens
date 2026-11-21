@@ -34,7 +34,8 @@ class DiffsInWindowTest {
               right_value VARCHAR(512),
               delta_value DECIMAL(20,4),
               delta_ratio DECIMAL(12,6),
-              explanation VARCHAR(1000)
+              explanation VARCHAR(1000),
+              event_at   VARCHAR(64)
             )
             """;
 

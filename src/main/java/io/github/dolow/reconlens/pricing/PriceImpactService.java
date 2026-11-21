@@ -25,9 +25,10 @@ import java.util.Map;
  *   <li>正数 = 我方多收，客户来对质时要有解释。</li>
  * </ul>
  *
- * <p><b>诚实边界</b>：recon_diff 没有"差异发生时刻"列（表级比对不携带事件时间），
- * 价格匹配的 at 用<b>任务完成时刻</b>近似（对账批跑时刻）；请求里显式传 at 时以请求为准。
- * 月中调价敏感的精细归因，需要事件时间戳进差异模型，那是 P3 事件级对账的事。
+ * <p><b>计价时点（at）的优先级</b>：请求显式传 at（人主动指定，最高）→
+ * 差异的<b>业务发生时刻</b>（规则配了 {@code eventTime} 列，事件级对账——月中调价时
+ * 同一份差异两侧能算出各自时点的价）→ 任务完成时刻（没配 eventTime 的老规则兜底）。
+ * 事件时间解析不了（来源列类型五花八门）就静默回退下一级——宁可回退也不猜错。
  *
  * <p>v1 是<b>单映射</b>：一个 (priceCode, model, tokenType) 作用于整个 job ——
  * 单价格场景已经能出数；多模型混跑（按 field_name 路由到不同价格）留给接了
@@ -55,10 +56,10 @@ public class PriceImpactService {
                     + (diff.field().isBlank() ? "记录级" : diff.field()) + "）—— "
                     + "状态类/文本类差异没有金额语义，不参与计量漂移归因");
         }
-        Instant atFinal = at != null ? at : reconRepository.findJob(diff.jobId())
+        Instant atFinal = resolveAt(diff, at, reconRepository.findJob(diff.jobId())
                 .map(ReconJob::finishedAt)
                 .map(j -> j == null ? null : j)
-                .orElse(null);
+                .orElse(null));
         if (atFinal == null) {
             atFinal = Instant.now();
         }
@@ -73,8 +74,7 @@ public class PriceImpactService {
                                             String tokenType, Instant at) {
         ReconJob job = reconRepository.findJob(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("任务不存在: id=" + jobId));
-        Instant atFinal = at != null ? at
-                : (job.finishedAt() != null ? job.finishedAt() : job.createdAt());
+        Instant atFinal = at != null ? at : null;
         List<PriceImpact> priced = new ArrayList<>();
         List<String> skipped = new ArrayList<>();
         List<DiffRecord> diffs = reconRepository.listDiffs(jobId, null, 0, Integer.MAX_VALUE);
@@ -85,7 +85,11 @@ public class PriceImpactService {
                 skipped.add("#" + diff.id() + " " + diff.diffType() + " 值非数值，跳过");
                 continue;
             }
-            priced.add(compute(diff, priceCode, model, tokenType, atFinal, left, right));
+            // job 级汇总：显式 at > 差异事件时间（每条各自的业务发生时刻，月中调价归因的关键）
+            // > 任务完成时刻。atFinal 为 null 说明前两级都没给出，由 resolveAt 用任务时刻兜底。
+            Instant diffAt = atFinal != null ? atFinal
+                    : resolveAt(diff, null, job.finishedAt() != null ? job.finishedAt() : job.createdAt());
+            priced.add(compute(diff, priceCode, model, tokenType, diffAt, left, right));
         }
         BigDecimal total = priced.stream()
                 .map(PriceImpact::impact)
@@ -95,7 +99,8 @@ public class PriceImpactService {
         body.put("priceCode", priceCode);
         body.put("model", model);
         body.put("tokenType", tokenType);
-        body.put("at", atFinal == null ? null : atFinal.toString());
+        body.put("at", at != null ? at.toString()
+                : "逐条按业务发生时刻（规则 eventTime）计价；未配 eventTime 的差异回退任务完成时刻");
         body.put("diffTotal", diffs.size());
         body.put("pricedCount", priced.size());
         body.put("skippedCount", skipped.size());
@@ -104,6 +109,45 @@ public class PriceImpactService {
         body.put("impactNote", "impact = left(我方账单口径) - right(对方口径)；负数=少收，正数=多收");
         body.put("items", priced);
         return body;
+    }
+
+    /**
+     * 计价时点解析：显式 at 最高；其次差异的业务发生时刻（{@code eventAt} 原样字符串，
+     * 尽力解析，解析不了静默回退）；最后任务完成/创建时刻。全部缺失返回 null（调用方 now() 兜底）。
+     */
+    private static Instant resolveAt(DiffRecord diff, Instant explicitAt, Instant jobFallback) {
+        if (explicitAt != null) {
+            return explicitAt;
+        }
+        Instant fromEvent = parseEventAt(diff.eventAt());
+        if (fromEvent != null) {
+            return fromEvent;
+        }
+        return jobFallback;
+    }
+
+    /** 事件时间字符串解析（尽力而为，public 供回退行为断言直接测试）：支持 ISO 与 {@code yyyy-MM-dd[ HH:mm[:ss]]}。 */
+    public static Instant parseEventAt(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        String v = raw.trim();
+        try {
+            return Instant.parse(v);
+        } catch (Exception ignored) {
+            // 不是 ISO-Instant 形态，继续试本地日期时间
+        }
+        try {
+            String normalized = v.replace('T', ' ');
+            String[] parts = normalized.split(" ");
+            java.time.LocalDate date = java.time.LocalDate.parse(parts[0]);
+            java.time.LocalTime time = parts.length > 1
+                    ? java.time.LocalTime.parse(parts[1])
+                    : java.time.LocalTime.MIN;
+            return date.atTime(time).toInstant(java.time.ZoneOffset.UTC);
+        } catch (Exception e) {
+            return null; // 解析不了：宁可回退任务时刻，也不猜一个错时点
+        }
     }
 
     private PriceImpact compute(DiffRecord diff, String priceCode, String model, String tokenType,
@@ -119,7 +163,8 @@ public class PriceImpactService {
                 leftQuote.entry().currency(),
                 leftQuote.entry().unitPricePerMillion().toPlainString(),
                 leftQuote.entry().effectiveFrom().toString(),
-                leftQuote.entry().effectiveTo() == null ? null : leftQuote.entry().effectiveTo().toString());
+                leftQuote.entry().effectiveTo() == null ? null : leftQuote.entry().effectiveTo().toString(),
+                diff.eventAt(), at.toString());
     }
 
     /** 严格数值解析：空、null、非数值都返回 null（"3000 tokens" 这种带字的也不猜）。 */
@@ -134,11 +179,12 @@ public class PriceImpactService {
         }
     }
 
-    /** 一条差异的计价结果（命中价格条目的证据一起带出，供争议证据包直接引用）。 */
+    /** 一条差异的计价结果（命中价格条目与计价时点证据一起带出，供争议证据包直接引用）。 */
     public record PriceImpact(Long diffId, String diffType, String bizKey, String field,
                               BigDecimal leftTokens, BigDecimal rightTokens,
                               BigDecimal leftAmount, BigDecimal rightAmount, BigDecimal impact,
                               String currency, String unitPricePerMillion,
-                              String effectiveFrom, String effectiveTo) {
+                              String effectiveFrom, String effectiveTo,
+                              String eventAt, String pricedAt) {
     }
 }

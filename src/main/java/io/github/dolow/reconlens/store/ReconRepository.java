@@ -35,7 +35,7 @@ public class ReconRepository implements DiffWriter {
 
 
     private static final String DIFF_COLUMNS =
-            "id, job_id, shard_id, diff_type, severity, biz_key, field_name, left_value, right_value, delta_value, delta_ratio, explanation";
+            "id, job_id, shard_id, diff_type, severity, biz_key, field_name, left_value, right_value, delta_value, delta_ratio, explanation, event_at";
 
     private static final String JOB_COLUMNS =
             "id, rule_code, batch_id, status, shard_count, shard_done, left_rows, right_rows, matched_rows, diff_rows, "
@@ -463,8 +463,8 @@ public class ReconRepository implements DiffWriter {
         }
         jdbc.batchUpdate("""
                 INSERT INTO recon_diff (job_id, shard_id, diff_type, severity, biz_key, field_name, left_value,
-                                        right_value, delta_value, delta_ratio, explanation)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                                        right_value, delta_value, delta_ratio, explanation, event_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """, diffs, diffs.size(), (ps, diff) -> {
             ps.setLong(1, diff.jobId());
             ps.setInt(2, diff.shardId());
@@ -477,6 +477,7 @@ public class ReconRepository implements DiffWriter {
             ps.setBigDecimal(9, diff.deltaValue());
             ps.setBigDecimal(10, diff.deltaRatio());
             ps.setString(11, truncate(diff.explanation(), 1000));
+            ps.setString(12, truncate(diff.eventAt(), 64));
         });
     }
 
@@ -704,7 +705,8 @@ public class ReconRepository implements DiffWriter {
                 rs.getString("right_value"),
                 rs.getBigDecimal("delta_value"),
                 rs.getBigDecimal("delta_ratio"),
-                rs.getString("explanation"));
+                rs.getString("explanation"),
+                rs.getString("event_at"));
     }
 
     private static Instant instant(ResultSet rs, String column) throws SQLException {

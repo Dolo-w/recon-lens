@@ -1,0 +1,30 @@
+# 测试规则：事件级对账——左侧配 eventTime，差异按业务发生时刻计价
+code: EVENT_TIME_RECON
+name: 事件时间对账（月中调价归因）
+description: left.eventTime 指定业务发生时刻列；价格按该时刻匹配
+
+left:
+  label: 我方计量
+  table: et_left
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+  eventTime: event_time
+
+right:
+  label: 厂商账单
+  table: et_right
+  keyField: order_no
+  keyType: STRING
+  orderBy: order_no
+
+compare:
+  - field: output_tokens
+    type: DECIMAL
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH

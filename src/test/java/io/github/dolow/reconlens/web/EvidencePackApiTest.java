@@ -212,6 +212,20 @@ class EvidencePackApiTest {
     }
 
     @Test
+    @DisplayName("公式注入_非数字形态负数被钳_数字负数保留")
+    void negativeNumericSurvivesFormulaPrefixClamp() {
+        // 数字形态负数：金额语义优先，原样保留
+        assertThat(io.github.dolow.reconlens.export.EvidencePackCsv.encodeCell("-2.00000000"))
+                .isEqualTo("\"-2.00000000\"");
+        // 非数字形态（OWASP DDE 注入形态）：钳掉
+        assertThat(io.github.dolow.reconlens.export.EvidencePackCsv.encodeCell("-cmd|' /C calc'!D2"))
+                .isEqualTo("\"'-cmd|' /C calc'!D2\"");
+        // 既有三类前缀照旧
+        assertThat(io.github.dolow.reconlens.export.EvidencePackCsv.encodeCell("=SUM(A1)"))
+                .isEqualTo("\"'=SUM(A1)\"");
+    }
+
+    @Test
     @DisplayName("at格式错_400说人话")
     void badAtFormatIs400() throws Exception {
         String body = mvc.perform(get("/api/jobs/" + jobId + "/evidence-pack.csv")

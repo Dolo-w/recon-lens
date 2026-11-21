@@ -4,6 +4,15 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 傍晚：事件级对账 —— 月中调价精确归因）
+
+- 规则 DSL 新增可选 `left/right.eventTime`（事件时间列名）：差异落库带业务发生时刻（`recon_diff.event_at`，原样字符串、不做时区翻译）；取值左侧优先，缺失型差异用存在侧
+- 计价时点优先级 = 显式 `at` > 差异事件时间 > 任务完成时刻兜底；事件时间解析不了静默回退（宁可回退不猜错）；`PriceImpact` 结果带出 `eventAt/pricedAt` 证据
+- 争议证据包新增「事件时间」「计价时点」两列
+- MySQL 存量迁移：`docs/migrations/2026-11-21-diff-event-at.sql`（含回滚）
+- 修复：演示横幅 curl 示例跟随实际端口（6c59e19）；演示档默认开启 agent（首页控制台不再 404，06722ea）；证据包负数公式注入精细化钳制（数字负数保留、DDE 形态钳掉）
+- 全量 967 绿（+5：事件级端到端 4 + 注入钳制 1）
+
 ### 修复（2026-11-21 下午：评审短板 #14 收尾 —— chat 层次倒置清零）
 
 - 会话领域模型（`ChatSession` / `ChatTurn` / `SessionHit` / `SessionScope` / `Visibility`）从 chat 包归位 domain 包：此前最底层的 store（`ChatSessionRepository`）反向 import 最上层的 chat，层次倒置

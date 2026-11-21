@@ -164,6 +164,12 @@ public final class RuleParser {
         }
         String orderBy = optionalString(side, "orderBy", null);
         String label = optionalString(side, "label", key);
+        // 事件时间列（可选）：差异的业务发生时刻从这列取，价格按业务发生时刻匹配（月中调价归因）。
+        // 自定义 SQL 的写法里这列必须在 SELECT 结果集中，否则差异的事件时间为空、计价回退任务完成时刻。
+        String eventTime = optionalString(side, "eventTime", null);
+        if (eventTime != null && eventTime.isBlank()) {
+            eventTime = null;
+        }
 
         if (dimension != null && keyField != null) {
             throw RuleException.at(source, key + " 只能配置 keyField 或 dimension 之一：dimension 描述的就是"
@@ -186,7 +192,7 @@ public final class RuleParser {
                         + orderBy + ", keyField=" + keyField);
             }
             return new SideSpec(label, table, sql, keyField, keyType, orderBy, null, List.of(),
-                    SideSpec.DEFAULT_DIMENSION_SEPARATOR, Map.of(), where);
+                    SideSpec.DEFAULT_DIMENSION_SEPARATOR, Map.of(), where, eventTime);
         }
 
         if (orderBy != null) {
@@ -194,7 +200,7 @@ public final class RuleParser {
                     + SideSpec.KEY_ALIAS + " 升序取数");
         }
         return new SideSpec(label, table, sql, SideSpec.KEY_ALIAS, keyType, SideSpec.KEY_ALIAS,
-                dimension.expression(), dimension.columns(), dimension.separator(), measures, where);
+                dimension.expression(), dimension.columns(), dimension.separator(), measures, where, eventTime);
     }
 
     /** 解析出来的对账维度：要么是一组列（自动拼分隔符），要么是一段 SQL 表达式。 */

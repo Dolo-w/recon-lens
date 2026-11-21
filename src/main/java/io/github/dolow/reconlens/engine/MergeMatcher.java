@@ -115,6 +115,7 @@ public final class MergeMatcher {
     private long compareFields(Row leftRow, Row rightRow, DiffSink sink) {
         long diffs = 0;
         String bizKey = bizKeyOf(leftRow, rightRow);
+        String eventAt = eventAtOf(leftRow, rightRow);
         for (FieldRule fieldRule : rule.compare()) {
             Object leftValue = leftRow.get(fieldRule.field());
             Object rightValue = rightRow.get(fieldRule.field());
@@ -122,7 +123,7 @@ public final class MergeMatcher {
             if (result.different()) {
                 sink.accept(DiffRecord.of(jobId, shardId, fieldRule.diffType(), fieldRule.severity(), bizKey,
                         fieldRule.field(), Row.render(leftValue), Row.render(rightValue),
-                        result.delta(), result.ratio()),
+                        result.delta(), result.ratio(), eventAt),
                         List.of(evidence(DiffEvidence.LEFT, bizKey, leftRow),
                                 evidence(DiffEvidence.RIGHT, bizKey, rightRow)));
                 diffs++;
@@ -139,7 +140,8 @@ public final class MergeMatcher {
         boolean pending = readiness.missingRightPending();
         String type = rule.missing().rightMissingDiffType() + (pending ? PENDING_SUFFIX : "");
         sink.accept(DiffRecord.of(jobId, shardId, type, rule.missing().severity(),
-                Row.render(leftRow.get(leftKeyField)), "", describe(leftRow), null, null, null)
+                Row.render(leftRow.get(leftKeyField)), "", describe(leftRow), null, null, null,
+                eventAtOf(leftRow, null))
                 .withExplanation(pending ? pendingNote("右侧", readiness.rightWatermark(), readiness.deadline()) : null),
                 List.of(evidence(DiffEvidence.LEFT, Row.render(leftRow.get(leftKeyField)), leftRow)));
         return 1;
@@ -152,7 +154,8 @@ public final class MergeMatcher {
         boolean pending = readiness.missingLeftPending();
         String type = rule.missing().leftMissingDiffType() + (pending ? PENDING_SUFFIX : "");
         sink.accept(DiffRecord.of(jobId, shardId, type, rule.missing().severity(),
-                Row.render(rightRow.get(rightKeyField)), "", null, describe(rightRow), null, null)
+                Row.render(rightRow.get(rightKeyField)), "", null, describe(rightRow), null, null,
+                eventAtOf(null, rightRow))
                 .withExplanation(pending ? pendingNote("左侧", readiness.leftWatermark(), readiness.deadline()) : null),
                 List.of(evidence(DiffEvidence.RIGHT, Row.render(rightRow.get(rightKeyField)), rightRow)));
         return 1;
@@ -170,7 +173,7 @@ public final class MergeMatcher {
         return DiffRecord.of(jobId, shardId, rule.duplicate().diffType(), rule.duplicate().severity(), bizKey, "",
                 groupSummary(rule.left().label(), leftGroup, leftKeyField),
                 groupSummary(rule.right().label(), rightGroup, rightKeyField),
-                null, null);
+                null, null, eventAtOf(leftGroup.get(0), rightGroup.get(0)));
     }
 
     private String groupSummary(String label, List<Row> rows, String keyField) {
@@ -234,6 +237,26 @@ public final class MergeMatcher {
 
     private String bizKeyOf(Row leftRow, Row rightRow) {
         return firstNonNull(Row.render(leftRow.get(leftKeyField)), Row.render(rightRow.get(rightKeyField)));
+    }
+
+    /**
+     * 差异的业务发生时刻：左侧配置了 {@code eventTime} 用左行，其次右侧配置的用右行，都没有给 null。
+     * 值原样渲染（不猜类型/时区），解析交给计价侧。缺失型差异天然只有一侧有行，用存在侧的配置。
+     */
+    private String eventAtOf(Row leftRow, Row rightRow) {
+        if (leftRow != null && rule.left().eventTime() != null) {
+            Object v = leftRow.get(rule.left().eventTime());
+            if (v != null) {
+                return Row.render(v);
+            }
+        }
+        if (rightRow != null && rule.right().eventTime() != null) {
+            Object v = rightRow.get(rule.right().eventTime());
+            if (v != null) {
+                return Row.render(v);
+            }
+        }
+        return null;
     }
 
     private static String firstNonNull(String first, String second) {

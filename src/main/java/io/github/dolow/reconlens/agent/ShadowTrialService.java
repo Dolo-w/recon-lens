@@ -333,7 +333,8 @@ public class ShadowTrialService {
 
     private static SideSpec sampleSide(SideSpec side, String table) {
         return new SideSpec(side.label(), table, null, side.keyField(), side.keyType(), side.orderBy(),
-                side.dimension(), side.dimensionColumns(), side.dimensionSeparator(), side.measures(), null);
+                side.dimension(), side.dimensionColumns(), side.dimensionSeparator(), side.measures(), null,
+                side.eventTime());
     }
 
     private TrialOutcome.Canary runCanary(SampleMaterializer.Materialized tables, RuleSpec trialRule,

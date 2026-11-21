@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS recon_diff (
   delta_value  DECIMAL(20,4),
   delta_ratio  DECIMAL(12,6),
   explanation  VARCHAR(1000),
+  -- 差异的业务发生时刻（规则 eventTime 列的原样值，VARCHAR 不做时区翻译）。
+  -- 价格按这个时刻匹配（事件级对账）：月中调价时同一份差异两侧能算出各自时点的价，
+  -- 没配 eventTime 的规则这列为 NULL，计价回退任务完成时刻。
+  event_at     VARCHAR(64),
   created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 -- 幂等基石：同一 job 同一分片同一业务键同一字段只允许一条差异，重跑先删后写天然去重
