@@ -33,15 +33,19 @@ public class DemoRunner implements ApplicationRunner {
     private final ReconRepository repository;
     private final ExplainService explainService;
     private final DataSource dataSource;
+    /** 实际监听端口（server.port 可被改到任意值，横幅里的 curl 示例必须跟随它，否则就是把人引向 404）。 */
+    private final org.springframework.core.env.Environment environment;
 
     public DemoRunner(ReconProperties properties, ReconEngine engine,
                       ReconRepository repository, ExplainService explainService,
-                      DataSource dataSource) {
+                      DataSource dataSource,
+                      org.springframework.core.env.Environment environment) {
         this.properties = properties;
         this.engine = engine;
         this.repository = repository;
         this.explainService = explainService;
         this.dataSource = dataSource;
+        this.environment = environment;
     }
 
     @Override
@@ -99,7 +103,8 @@ public class DemoRunner implements ApplicationRunner {
                     .append("    归因: ").append(diff.explanation()).append('\n');
         }
         report.append("----------------------------------------------------\n");
-        report.append("试一下: curl http://localhost:8080/api/jobs/" ).append(job.id()).append('\n');
+        String port = environment.getProperty("local.server.port", environment.getProperty("server.port", "8080"));
+        report.append("试一下: curl http://localhost:").append(port).append("/api/jobs/").append(job.id()).append('\n');
         report.append("====================================================");
         log.info(report.toString());
     }
