@@ -33,7 +33,13 @@ public final class DiffLifecycle {
         CLAIM, RELEASE, RESOLVE, EXEMPT, UNEXEMPT
     }
 
-    /** 一条台账记录。{@code status} 是该动作执行后的状态（不是动作前）。 */
+    /**
+     * 一条台账记录。{@code status} 是该动作执行后的状态（不是动作前）。
+     *
+     * <p>{@code reasonId} 是定性结论的分类 ID（K2 模式库的分类法，如 {@code TIMEZONE_OFFSET_8H}），
+     * K1 阶段允许为空（自由文本兜底）；它是 K2 用人工定性数据校准模式区间的原料 ——
+     * 台账里"为什么这条被核销"的结构化答案，比 note 的自由文本可聚合得多。
+     */
     public record DiffAction(
             Long id,
             long diffId,
@@ -42,6 +48,7 @@ public final class DiffLifecycle {
             Status status,
             String operator,
             String note,
+            String reasonId,
             java.time.Instant createdAt) {
     }
 

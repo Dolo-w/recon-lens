@@ -12,7 +12,7 @@
 
 规则即数据：用 YAML 声明"对账维度 + 比对字段"，提交经影子试算与人工审批后生效；
 引擎按业务键流式归并对账，分片并行、断点重跑、水位判定区分"真缺失"与"未到达"、差异自动分类归因；
-同时是一个 MCP server —— 23 个工具把全部能力暴露给 Agent，一句业务描述就能起草规则。
+同时是一个 MCP server —— 24 个工具把全部能力暴露给 Agent，一句业务描述就能起草规则。
 
 ## 它解决什么问题
 
@@ -224,7 +224,7 @@ mysql -h <实例> -u <用户名> -p recon_demo < src/main/resources/schema-mysql
 }
 ```
 
-- 17 个基础工具（跑对账 / 看差异 / 归因 / 表结构探查 / 价格表与计量漂移归因 / 差异闭环台账 / 证据包导出 / Lago 连接器）始终可用；`recon.agent.enabled=true` 额外开放 6 个 Agent 工具（起草、试算轮询、表注册、文件导入、审批代办）
+- 18 个基础工具（跑对账 / 看差异 / 归因（知识库 → 模式库 → LLM → 模板四层）/ 表结构探查（含字段语义与口径冲突）/ 价格表与计量漂移归因 / 差异闭环台账 / 归因经验模式库 / 证据包导出 / Lago 连接器（带厂商计费语义摘录））始终可用；`recon.agent.enabled=true` 额外开放 6 个 Agent 工具（起草、试算轮询、表注册、文件导入、审批代办）
 - **表白名单 fail-closed**：`--recon.agent.schema.tables` 不配等于拒绝所有规则
 - **审批铁律**：规则生效必须人批 —— 草稿 → 影子试算 → 人工批准 → ACTIVE，会话里说"批准"不算数
 - 要起草规则再配 `--recon.llm.enabled=true` + OpenAI 兼容端点；不配也能跑，起草降级为模板骨架
@@ -273,7 +273,7 @@ node tools/agent-smoke.mjs target/recon-lens-0.1.0.jar  # Agent 全链路 16 项
 | [docs/tutorial-lago-onboard.md](docs/tutorial-lago-onboard.md) | **30 分钟接一个 Lago 厂商**（文件导入 / API 连接器 / 证据包全流程） |
 | [docs/plan-v3-execution-connectors.md](docs/plan-v3-execution-connectors.md) | v3 扩展架构：执行分发器 / 连接器 SPI / CI / Docker（决策已定稿） |
 | [docs/agent-quickstart.md](docs/agent-quickstart.md) | Agent 本地运行与对接全流程实测指南 |
-| [docs/mcp.md](docs/mcp.md) | MCP 接入：23 个工具入参/返回、动态表注册、文件导入 |
+| [docs/mcp.md](docs/mcp.md) | MCP 接入：24 个工具入参/返回、动态表注册、文件导入 |
 | [docs/architecture.md](docs/architecture.md) | 架构说明 |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法与百万级实测数字 |
 | [go-worker/README.md](go-worker/README.md) | Go 单二进制大批量比对执行器（提交语义/断点续跑/语义对齐清单） |

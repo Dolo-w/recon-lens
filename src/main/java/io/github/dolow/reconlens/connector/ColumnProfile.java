@@ -45,6 +45,25 @@ public interface ColumnProfile {
     Map<String, ColumnSpec> specs();
 
     /**
+     * 厂商计费行为语义摘录（K4）：出账时机 / 冲抵语义 / 单位口径的<b>短句</b>，
+     * 给归因与规则起草当上下文 —— 模型不知道 Lago 的 credit note 是冲销而不是错误，
+     * 也不知道 Orb 的金额是字符串十进制元。每条一句，宁缺毋滥：
+     * 摘录随 profile 版本化（{@link #semanticsVersion()}），厂商 API 变了就升版本重核。
+     *
+     * <p>放 profile 不放知识库的理由：这是厂商的<b>结构性行为</b>（表头即证据），
+     * 与某个客户的数据无关；知识库沉淀的是"这家客户这类差异怎么办"（经验），
+     * 两者生命周期不同、变更责任方不同。
+     */
+    default List<String> billingSemantics() {
+        return List.of();
+    }
+
+    /** 语义摘录的核证版本（如 {@code lago-api-2026-11}）。空 = 没有语义摘录。 */
+    default String semanticsVersion() {
+        return "";
+    }
+
+    /**
      * 一列的映射结果。
      *
      * @param column  目标列名（进 DDL，会再过标识符规范化）

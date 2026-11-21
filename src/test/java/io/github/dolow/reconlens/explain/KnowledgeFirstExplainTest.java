@@ -80,9 +80,12 @@ class KnowledgeFirstExplainTest {
     @BeforeEach
     void setUp() {
         jdbc.execute(DDL);
-        jdbc.execute("CREATE UNIQUE INDEX IF NOT EXISTS uk_kb_cause_key ON recon_diff_kb (cause_key)");
+        jdbc.execute("CREATE INDEX IF NOT EXISTS idx_kb_key ON recon_diff_kb (cause_key)");
         jdbc.update("DELETE FROM recon_diff_kb");
 
+        // 本类老用例钉的是 L1 知识库 → L2 模型的成本分层，把 L0 模式库关掉隔离干扰；
+        // L0 的行为由下面的 K2 专属用例（显式打开）钉住
+        properties.getExplain().getPatterns().setEnabled(false);
         rebuildService();
         when(llm.available()).thenReturn(true);
         when(llm.name()).thenReturn("stub-llm");
@@ -93,7 +96,8 @@ class KnowledgeFirstExplainTest {
 
     private void rebuildService() {
         service = new ExplainService(template, llm,
-                new DiffKnowledgeBase(knowledgeRepository, properties), engine, repository);
+                new DiffKnowledgeBase(knowledgeRepository, properties),
+                new io.github.dolow.reconlens.explain.pattern.PatternLibrary(properties), engine, repository);
     }
 
     /** shape 相同、金额不同的两条差异 —— 它们应该共用同一条归因。 */
@@ -196,7 +200,7 @@ class KnowledgeFirstExplainTest {
     void lowConfidenceEntriesAreCountedAsMissesNotHits() {
         DiffRecord diff = diff(1L, 10L, "ORD-1", "100.00", "100.50");
         CauseKey key = CauseKey.of(RULE, diff);
-        knowledgeRepository.insertIfAbsent(new DiffKnowledgeRepository.Entry(
+        knowledgeRepository.insert(new DiffKnowledgeRepository.Entry(
                 0L, key.digest(), RULE, "AMOUNT_MISMATCH", "amount", key.featureSignature(),
                 "模型猜的", null, new BigDecimal("0.5"), "LLM", 0, 0, "agent", null, null));
 
@@ -210,7 +214,10 @@ class KnowledgeFirstExplainTest {
         assertThat(service.knowledgeSnapshot().lowConfidence()).isEqualTo(1);
         assertThat(service.knowledgeSnapshot().hits()).isZero();
         verify(llm).explainBatch(any(), anyList());
-        assertThat(knowledgeRepository.findByKey(key.digest()).orElseThrow().misses()).isEqualTo(1);
+        // 多候选：模型的新答案也插进来了，top-1 可能换行 —— misses 要按"原来那条候选"查
+        assertThat(knowledgeRepository.findCandidates(key.digest(), 10).stream()
+                .filter(e -> "模型猜的".equals(e.cause())).findFirst().orElseThrow().misses())
+                .isEqualTo(1);
     }
 
     /** 关掉知识库就等于退回"每次都问模型"，用于验证知识库到底省了多少。 */
@@ -265,5 +272,64 @@ class KnowledgeFirstExplainTest {
                 .isEqualTo("对方批次未同步");
 
         verify(llm, times(1)).explain(any(), any());
+    }
+
+    // ------------------------------------------------------------------
+    // K2 / L0 模式库：知识库 miss 后、调模型前，机械特征先联想一次
+
+    private static DiffRecord feeLikeDiff(long id, long jobId, String bizKey) {
+        // 0.6% 的稳定偏差 → FEE_RATE_SMALL（手续费/服务费率档）
+        return new DiffRecord(id, jobId, 0, "AMOUNT_MISMATCH", Severity.HIGH, bizKey, "amount",
+                "100.00", "100.60", new BigDecimal("0.60"), new BigDecimal("0.006"), null);
+    }
+
+    /** 模式命中 = 又省一次模型调用：文案带"机器联想"标注，且绝不写回知识库。 */
+    @Test
+    void patternHitPreemptsTheModelAndNeverWritesBack() {
+        properties.getExplain().getPatterns().setEnabled(true);
+        rebuildService();
+        pending(10L, feeLikeDiff(1L, 10L, "ORD-FEE-1"));
+
+        assertThat(service.explainJob(10L, 100)).isEqualTo(1);
+
+        verify(llm, never()).explainBatch(any(), anyList());
+        verify(repository).updateExplanation(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.contains("机器联想"));
+        verify(repository).updateExplanation(org.mockito.ArgumentMatchers.eq(1L),
+                org.mockito.ArgumentMatchers.contains("FEE_RATE_SMALL"));
+        assertThat(knowledgeRepository.recent(10))
+                .as("机器猜测不许进知识库：0.5 缓存进去就是永远赶不走的中置信噪声")
+                .isEmpty();
+    }
+
+    /** 知识库的人工答案比模式假设证据更强：同一条差异，两者都命中时知识库赢。 */
+    @Test
+    void knowledgeStillWinsOverPattern() {
+        properties.getExplain().getPatterns().setEnabled(true);
+        rebuildService();
+        DiffRecord diff = feeLikeDiff(1L, 10L, "ORD-FEE-1");
+        CauseKey key = CauseKey.of(RULE, diff);
+        knowledgeRepository.insert(new DiffKnowledgeRepository.Entry(
+                0L, key.digest(), RULE, "AMOUNT_MISMATCH", "amount", key.featureSignature(),
+                "财务确认：这是 9 月税率调整", null, new BigDecimal("0.9"), "HUMAN", 0, 0, "ops", null, null));
+        pending(10L, diff);
+
+        assertThat(service.explainJob(10L, 100)).isEqualTo(1);
+
+        verify(llm, never()).explainBatch(any(), anyList());
+        verify(repository).updateExplanation(1L, "财务确认：这是 9 月税率调整");
+    }
+
+    /** K2 幂等：同一条差异重复 teach 同一句结论，知识库不堆重复候选。 */
+    @Test
+    void teachingTheSameCauseTwiceDoesNotDuplicateTheCandidate() {
+        DiffRecord diff = diff(1L, 10L, "ORD-1", "100.00", "100.50");
+        when(repository.findDiff(1L)).thenReturn(Optional.of(diff));
+        pending(10L, diff);
+
+        assertThat(service.correct(1L, "渠道方未同步退款", null, "ops")).isTrue();
+        assertThat(service.correct(1L, "渠道方未同步退款", null, "ops")).isTrue();
+
+        assertThat(knowledgeRepository.recent(10)).hasSize(1);
     }
 }

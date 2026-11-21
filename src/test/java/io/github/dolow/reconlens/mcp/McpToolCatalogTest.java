@@ -45,7 +45,8 @@ class McpToolCatalogTest {
             "recon_list_rules", "recon_list_jobs", "recon_list_tables", "recon_describe_table", "recon_define_rule", "recon_build_model", "recon_run",
             "recon_job_summary", "recon_list_diffs", "recon_explain_diff", "recon_explain_job",
             "recon_diagnose",
-            "recon_list_prices", "recon_price_impact", "recon_diff_lifecycle", "recon_evidence_pack", "recon_lago_sync");
+            "recon_list_prices", "recon_price_impact", "recon_diff_lifecycle", "recon_evidence_pack", "recon_lago_sync",
+            "recon_list_patterns");
 
     @Test
     void twelveToolsWhenAgentIsDisabled() {
@@ -67,7 +68,7 @@ class McpToolCatalogTest {
 
         List<String> names = McpServerRunner.toolNames(runnerWithAgent(agent).specifications(jsonMapper));
 
-        assertThat(names).hasSize(23)
+        assertThat(names).hasSize(24)
                 .containsAll(BASE_TOOLS)
                 .contains("recon_draft_rule", "recon_trial_status", "recon_register_table", "recon_import_file",
                         "recon_import_status", "recon_submit_approval");
@@ -100,7 +101,7 @@ class McpToolCatalogTest {
 
         // 宿主看到的就是目录里的，不多不少
         List<String> hostSees = McpServerRunner.toolNames(McpSpecifications.build(jsonMapper, withAgent));
-        assertThat(hostSees).containsExactlyElementsOf(withAgent.names()).hasSize(23);
+        assertThat(hostSees).containsExactlyElementsOf(withAgent.names()).hasSize(24);
     }
 
     /** structuredContent 必须与声明了 outputSchema 的工具配套：有 schema 没内容，客户端会判定结果不合规。 */
@@ -359,7 +360,9 @@ class McpToolCatalogTest {
                         new org.springframework.jdbc.core.JdbcTemplate(
                                 new org.springframework.jdbc.datasource.DriverManagerDataSource("jdbc:h2:mem:mcp_catalog")),
                         mock(org.springframework.beans.factory.ObjectProvider.class)),
-                mock(io.github.dolow.reconlens.store.ReconRepository.class));
+                mock(io.github.dolow.reconlens.store.ReconRepository.class),
+                new io.github.dolow.reconlens.explain.semantics.FieldSemanticDictionary(
+                        new io.github.dolow.reconlens.config.ReconProperties()));
     }
 
     private io.github.dolow.reconlens.tool.ToolCatalog catalog(List<AgentMcpTools> agents) {

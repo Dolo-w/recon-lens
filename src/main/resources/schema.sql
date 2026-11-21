@@ -99,6 +99,9 @@ CREATE TABLE IF NOT EXISTS recon_diff_lifecycle (
   status     VARCHAR(16)  NOT NULL,  -- 动作执行后的状态: OPEN / CLAIMED / RESOLVED / EXEMPTED
   operator   VARCHAR(64)  NOT NULL,
   note       VARCHAR(1000),          -- 核销原因 / 豁免依据，RESOLVE 与 EXEMPT 必填
+  -- 定性结论分类 ID（K2 模式库分类法，如 TIMEZONE_OFFSET_8H）。K1 阶段允许空：
+  -- 它是 K2 用人工定性数据校准模式区间的原料 —— 台账里"为什么这条被核销"的结构化答案
+  reason_id  VARCHAR(64),
   created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_dlc_diff ON recon_diff_lifecycle (diff_id, id);
@@ -269,7 +272,10 @@ CREATE TABLE IF NOT EXISTS recon_diff_kb (
   created_at        TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at        TIMESTAMP     NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uk_kb_cause_key ON recon_diff_kb (cause_key);
+-- K2 多候选：同一个 cause_key 允许多条归因并存 —— 9 月的"税"和 10 月的"手续费"
+-- 可以是同形状差异的两种真实病因，一键一答会让 teach 覆盖掉上个月的正确知识。
+-- 检索取 top-1（置信度 → 命中数 → 新鲜度），完整候选集给 few-shot 与运营复核。
+CREATE INDEX IF NOT EXISTS idx_kb_key ON recon_diff_kb (cause_key);
 CREATE INDEX IF NOT EXISTS idx_kb_lookup ON recon_diff_kb (rule_code, diff_type);
 
 -- ============ 预处理模型表：把"每次对账都要重做的扫描 + 汇总"提前做一次 ============

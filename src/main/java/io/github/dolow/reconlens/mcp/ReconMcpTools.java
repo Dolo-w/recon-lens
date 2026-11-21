@@ -2,6 +2,7 @@ package io.github.dolow.reconlens.mcp;
 
 import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.connector.BillingConnector;
+import io.github.dolow.reconlens.connector.ColumnProfiles;
 import io.github.dolow.reconlens.connector.LagoConnectorService;
 import io.github.dolow.reconlens.domain.DiffLifecycle;
 import io.github.dolow.reconlens.domain.DiffRecord;
@@ -527,7 +528,8 @@ public class ReconMcpTools {
     }
 
     /** 差异闭环台账：认领/核销/豁免/撤销豁免/看历史/看汇总，一个工具六种用法。 */
-    public String diffLifecycle(String action, Long diffId, Long jobId, String operator, String note) {
+    public String diffLifecycle(String action, Long diffId, Long jobId, String operator, String note,
+                                String reasonId) {
         String act = blankToNull(action) == null ? "" : action.trim().toUpperCase();
         String who = blankToNull(operator) == null ? "mcp" : operator;
         switch (act) {
@@ -536,10 +538,11 @@ public class ReconMcpTools {
                     throw new IllegalArgumentException("action=" + act + " 需要 diffId");
                 }
                 DiffLifecycle.DiffAction applied = lifecycle.apply(diffId,
-                        DiffLifecycle.Action.valueOf(act), who, blankToNull(note));
+                        DiffLifecycle.Action.valueOf(act), who, blankToNull(note), blankToNull(reasonId));
                 return "差异 #" + applied.diffId() + " → " + applied.status() + "（动作 " + applied.action()
                         + "，操作人 " + applied.operator() + "，"
-                        + (applied.note() == null ? "无备注" : "备注：" + applied.note()) + "）。"
+                        + (applied.note() == null ? "无备注" : "备注：" + applied.note())
+                        + (applied.reasonId() == null ? "" : "，定性分类 " + applied.reasonId()) + "）。"
                         + "台账 append-only，历史不可改写；闭环汇总用 action=SUMMARY。";
             }
             case "HISTORY" -> {
@@ -554,7 +557,8 @@ public class ReconMcpTools {
                 for (DiffLifecycle.DiffAction a : history) {
                     sb.append("- ").append(a.createdAt()).append(" ").append(a.operator())
                             .append(" ").append(a.action()).append(" → ").append(a.status())
-                            .append(a.note() == null ? "" : "（" + a.note() + "）").append('\n');
+                            .append(a.note() == null ? "" : "（" + a.note() + "）")
+                            .append(a.reasonId() == null ? "" : " [" + a.reasonId() + "]").append('\n');
                 }
                 return sb.toString();
             }
@@ -606,7 +610,42 @@ public class ReconMcpTools {
         }
         Map<String, String> hint = result.importHint();
         sb.append("下一步：").append(hint.get("tool")).append("（").append(hint.get("args")).append("）")
-                .append("。注意：").append(hint.get("note"));
+                .append("。注意：").append(hint.get("note")).append('\n');
+        // K4：把这份资源的 profile 语义摘录一并带出来，归因/起草规则时不用再回头查文档
+        String digest = ColumnProfiles.semanticsDigest(lagoConnector.resources().stream()
+                .filter(r -> r.id().equals(result.resource()))
+                .findFirst()
+                .map(BillingConnector.ConnectorResource::profileId)
+                .orElse(null));
+        if (!digest.isEmpty()) {
+            sb.append(digest).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** 经验模式库（K2）：归因前的机械联想层。模型归因没把握时先来这里找同形状的病。 */
+    public String listPatterns() {
+        List<io.github.dolow.reconlens.explain.pattern.DiffPattern> patterns = explain.patterns();
+        if (patterns.isEmpty()) {
+            return "经验模式库为空（未配置或加载失败）。模式库是「账单常见病」的机械特征匹配表，"
+                    + "加载失败请看启动日志里的 warn。";
+        }
+        StringBuilder sb = new StringBuilder("经验模式库共 ").append(patterns.size())
+                .append(" 条（归因分层 L0：知识库 miss 后、调 LLM 前先做机械联想）：\n");
+        for (io.github.dolow.reconlens.explain.pattern.DiffPattern p : patterns) {
+            sb.append("- ").append(p.id());
+            if (p.family() != null) {
+                sb.append('[').append(p.family()).append(']');
+            }
+            if (p.name() != null) {
+                sb.append(' ').append(p.name());
+            }
+            sb.append("：").append(p.hypothesis());
+            if (p.probeHint() != null) {
+                sb.append("（核对：").append(p.probeHint()).append('）');
+            }
+            sb.append('\n');
+        }
         return sb.toString();
     }
 

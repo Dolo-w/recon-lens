@@ -91,4 +91,40 @@ class CauseKeyTest {
         assertThat(key.ruleCode()).hasSize(64);
         assertThat(key.digest()).hasSize(64).matches("[0-9a-f]{64}");
     }
+
+    // ------------------------------------------------------------------
+    // K2 时间桶：规则配置了 eventTime 时，键按业务月份分桶
+
+    private static DiffRecord withEventAt(String eventAt, String ratio) {
+        return DiffRecord.of(1L, 0, "AMOUNT_MISMATCH", Severity.HIGH, "ORD-1", "amount",
+                "100", "100.50", new BigDecimal("10"),
+                ratio == null ? null : new BigDecimal(ratio), eventAt);
+    }
+
+    @Test
+    void eventTimeRulesAreBucketedByBusinessMonth() {
+        CauseKey sep = CauseKey.of("R", withEventAt("2026-09-15T10:00:00", "0.005"));
+        CauseKey oct = CauseKey.of("R", withEventAt("2026-10-15T10:00:00", "0.005"));
+        CauseKey noEvent = CauseKey.of("R", withEventAt(null, "0.005"));
+
+        assertThat(sep.featureSignature()).contains("|@2026-09");
+        assertThat(oct.featureSignature()).contains("|@2026-10");
+        assertThat(sep.digest()).as("9 月的税和 10 月的手续费不该共用一个键").isNotEqualTo(oct.digest());
+        assertThat(noEvent.featureSignature()).as("没配 eventTime 的规则不带桶，键与老版本一致").doesNotContain("@");
+    }
+
+    @Test
+    void sameMonthDifferentDaysShareOneBucket() {
+        CauseKey early = CauseKey.of("R", withEventAt("2026-09-01T00:00:00", "0.005"));
+        CauseKey late = CauseKey.of("R", withEventAt("2026/09/28 23:59:59", "0.005"));
+
+        assertThat(early.digest()).isEqualTo(late.digest());
+    }
+
+    @Test
+    void unparseableEventTimeFallsBackToNoBucket() {
+        // 解析不了就退回"无桶"，绝不猜 —— 宁可键变宽，不可键变错
+        assertThat(CauseKey.of("R", withEventAt("不是时间", "0.005")).featureSignature()).doesNotContain("@");
+        assertThat(CauseKey.of("R", withEventAt("2026-13-99", "0.005")).featureSignature()).doesNotContain("@");
+    }
 }

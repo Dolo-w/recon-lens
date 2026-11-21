@@ -202,9 +202,11 @@ public class AgentConfiguration {
                                                ExplainService explainService,
                                                AgentProperties agentProperties,
                                                ObjectMapper objectMapper,
-                                               io.github.dolow.reconlens.store.RuleRepository ruleRepository) {
+                                               io.github.dolow.reconlens.store.RuleRepository ruleRepository,
+                                               io.github.dolow.reconlens.explain.semantics.CaliberConflictChecker caliberConflictChecker) {
         return new AgentOrchestrator(agentRunRepository, ruleCatalog, reconEngine, shadowTrialService,
-                ruleDrafter, explainService, agentProperties, objectMapper, ruleRepository);
+                ruleDrafter, explainService, agentProperties, objectMapper, ruleRepository,
+                caliberConflictChecker);
     }
 
     /**

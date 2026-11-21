@@ -4,6 +4,7 @@ import io.github.dolow.reconlens.domain.DiffLifecycle.Action;
 import io.github.dolow.reconlens.domain.DiffLifecycle.DiffAction;
 import io.github.dolow.reconlens.domain.DiffLifecycle.Status;
 import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.explain.DiffKnowledgeBase;
 import io.github.dolow.reconlens.store.DiffLifecycleRepository;
 import io.github.dolow.reconlens.store.ReconRepository;
 
@@ -29,6 +30,11 @@ import java.util.Map;
  *
  * <p>闭环率 = (RESOLVED + EXEMPTED) / 总差异 —— 财务画像的核心指标：
  * 报出来一百条差异、闭环了三十条，剩下七十条才是"少收的钱"还在不在的真相。
+ *
+ * <p><b>K1 知识回流</b>：RESOLVE / EXEMPT 的定性结论在写台账的同时 {@code teach()} 进
+ * 归因知识库（{@code source=HUMAN}, 置信度 0.9）。处理过的账要能被下一批同类差异查到，
+ * 否则第 101 条同病差异还要财务重新想一遍 —— 最贵的数据躺在台账里生锈。
+ * 回流是 best-effort：知识库挂了不影响台账写入（台账是审计事实，知识库是成本优化）。
  */
 @Service
 public class DiffLifecycleService {
@@ -36,21 +42,26 @@ public class DiffLifecycleService {
     private static final Logger log = LoggerFactory.getLogger(DiffLifecycleService.class);
 
     private static final int MAX_NOTE = 1000;
+    private static final int MAX_REASON_ID = 64;
 
     private final DiffLifecycleRepository lifecycle;
     private final ReconRepository recon;
+    private final DiffKnowledgeBase knowledge;
 
-    public DiffLifecycleService(DiffLifecycleRepository lifecycle, ReconRepository recon) {
+    public DiffLifecycleService(DiffLifecycleRepository lifecycle, ReconRepository recon,
+                                DiffKnowledgeBase knowledge) {
         this.lifecycle = lifecycle;
         this.recon = recon;
+        this.knowledge = knowledge;
     }
 
     /**
      * 执行一次处置动作。
      *
+     * @param reasonId 定性结论分类 ID（K2 模式库分类法），可空 —— K1 阶段自由文本兜底
      * @throws IllegalArgumentException 差异不存在 / operator 缺失 / note 缺失或超长 / 非法状态转移
      */
-    public DiffAction apply(long diffId, Action action, String operator, String note) {
+    public DiffAction apply(long diffId, Action action, String operator, String note, String reasonId) {
         DiffRecord diff = recon.findDiff(diffId).orElseThrow(() ->
                 new IllegalArgumentException("差异不存在: " + diffId));
         String who = operator == null ? "" : operator.trim();
@@ -68,12 +79,46 @@ public class DiffLifecycleService {
                 throw new IllegalArgumentException("note 超过 " + MAX_NOTE + " 字符，写进台账前先提炼");
             }
         }
+        String trimmedReason = reasonId == null ? "" : reasonId.trim();
+        if (trimmedReason.length() > MAX_REASON_ID) {
+            throw new IllegalArgumentException("reasonId 超过 " + MAX_REASON_ID + " 字符：它是分类 ID 不是说明文");
+        }
         Status current = lifecycle.currentStatus(diffId).orElse(Status.OPEN);
         validateTransition(current, action);
         Status next = io.github.dolow.reconlens.domain.DiffLifecycle.resultOf(action);
-        DiffAction recorded = lifecycle.insert(diffId, diff.jobId(), action, next, who, trimmedNote);
+        DiffAction recorded = lifecycle.insert(diffId, diff.jobId(), action, next, who, trimmedNote,
+                trimmedReason.isEmpty() ? null : trimmedReason);
         log.info("差异处置: diff={} {} {} -> {} by {} ({})", diffId, current, action, next, who, trimmedNote);
+        if (action == Action.RESOLVE || action == Action.EXEMPT) {
+            teachBackflow(diffId, action, diff, trimmedNote, who);
+        }
         return recorded;
+    }
+
+    /**
+     * K1 知识回流：定性结论 teach 进知识库，并把差异说明同步成人工结论。
+     *
+     * <p>失败绝不向上抛：台账已经落库（事实成立），知识库写不进去只损失"下次自动带出答案"，
+     * 损失一条 warn 日志比让核销动作整体失败便宜得多 —— 和 {@code DiffKnowledgeBase.remember}
+     * 的容错立场一致。
+     */
+    private void teachBackflow(long diffId, Action action, DiffRecord diff, String note, String operator) {
+        try {
+            String ruleCode = recon.findJob(diff.jobId()).map(job -> job.ruleCode()).orElse(null);
+            if (ruleCode == null) {
+                return;
+            }
+            // 核销的知识是"这类差异的病因"；豁免的知识是"这类差异可以不处理"——动作不同，沉淀的形态不同
+            String kbAction = action == Action.EXEMPT ? "此类差异已确认可豁免" : null;
+            if (knowledge.teach(ruleCode, diff, note, kbAction, operator)) {
+                // 人给了结论，差异说明跟着换 —— 界面上不能还挂着模型那句 0.5 的猜测
+                recon.updateExplanation(diffId, action == Action.EXEMPT
+                        ? note + " 建议动作：此类差异已确认可豁免"
+                        : note);
+            }
+        } catch (RuntimeException e) {
+            log.warn("处置结论回流知识库失败（不影响台账）：diff={} {} — {}", diffId, action, e.toString());
+        }
     }
 
     /** 单条差异的处置历史，最新在前。 */

@@ -355,8 +355,11 @@ class AgentOrchestratorTest {
         RuleDrafter drafter = new RuleDrafter(llm, schema, catalog,
                 new RuleSafetyValidator(schema, new ShardSplitAnalyzer(), new BigDecimal("2.0")),
                 new ObjectMapper());
+        io.github.dolow.reconlens.config.ReconProperties props = new io.github.dolow.reconlens.config.ReconProperties();
         return new AgentOrchestrator(runs, catalog, engine, trials, drafter, explain, properties,
-                new ObjectMapper(), new io.github.dolow.reconlens.store.RuleRepository(jdbc));
+                new ObjectMapper(), new io.github.dolow.reconlens.store.RuleRepository(jdbc),
+                new io.github.dolow.reconlens.explain.semantics.CaliberConflictChecker(
+                        new io.github.dolow.reconlens.explain.semantics.FieldSemanticDictionary(props)));
     }
 
     // ---------------------------------------------------------------- 恢复（M20）

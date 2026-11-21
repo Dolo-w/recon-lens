@@ -1,0 +1,155 @@
+# 经验模式库（K2 / L0 层）：账单对账常见病的机械特征 → 候选假设
+#
+# 哲学与规则 YAML 同款：git 可审、可 diff、改动走 PR；客户可用
+# recon.explain.patterns.dir 指向外部目录追加/覆盖（同 id 外部赢）。
+#
+# 匹配语义：
+#   match 是单个映射 = 一个条件（条件内各维度 AND）；
+#   match 是列表 = 多个条件，任一命中即匹配（OR，双方向病用列表）。
+#   未写的维度不参与判定；deltaRatio 为空的差异不参与比率条件。
+#
+# deltaRatio 口径与引擎一致：(left - right) / left，带符号——正 = 左侧大。
+# ⚠️ 档位单位是"小数比率"不是百分比：6% = 0.06。比率在 right ≈ 0 时饱和于 ±1，
+#    "×100 还是 ×1000"从 (ratio, delta) 上不可分辨，假设里写"数量级"不写死倍数。
+#
+# 这份清单是产品化的核心资产：新增病只改这个文件，不改代码。
+
+patterns:
+  # ============ 金额量级 ============
+
+  - id: ROUNDING_SUBCENT
+    family: 金额量级
+    name: 抹零/分币差
+    match:
+      absDeltaValueMax: 0.05
+      directionIn: [BOTH]
+    hypothesis: 两侧存在分币级抹零差（舍入方式或精度口径不同），不构成实质金额差异
+    probeHint: 对比两侧的舍入规则（HALF_UP vs BANKERS）与金额精度（分 vs 厘）
+
+  - id: FEE_RATE_SMALL
+    family: 金额量级
+    name: 手续费/服务费率差
+    match:
+      deltaRatioMin: 0.003
+      deltaRatioMax: 0.03
+    hypothesis: 一侧叠加了手续费/服务费/通道费率（千分之几到百分之几的固定费率），另一侧未含
+    probeHint: 核对两侧的费率配置与"金额是否含费"口径
+
+  - id: TAX_BAND_6PCT
+    family: 金额量级
+    name: 税率档差（约 6%）
+    match:
+      deltaRatioMin: 0.055
+      deltaRatioMax: 0.065
+    hypothesis: 一侧含税一侧不含税（税率档约 6%），或两侧税率口径不同
+    probeHint: 核对两侧金额的含税/净额口径与适用税率
+
+  - id: RATE_OR_PRICE_ADJUSTED
+    family: 金额量级
+    name: 费率/汇率/单价调整
+    match:
+      deltaRatioMin: 0.03
+      deltaRatioMax: 0.5
+    hypothesis: 两侧使用了不同版本的费率、汇率或单价（月中调价，一侧按旧价一侧按新价）
+    probeHint: 按差异业务发生时刻核对价格表生效窗口（价格回溯）
+
+  - id: UNIT_SCALE_X100
+    family: 金额量级
+    name: 单位换算差（左侧大出数量级）
+    match:
+      deltaRatioMin: 0.9
+      deltaRatioMax: 1.0
+    hypothesis: 左侧金额约为右侧的几十到上千倍 —— 单位换算不一致（分/元/厘），左侧可能多了两位小数
+    probeHint: 对比两侧 profile 的单位换算配置（_cents 除数）；比率饱和时分不清 ×100 还是 ×1000，看原始值定数量级
+
+  - id: UNIT_SCALE_DIV100
+    family: 金额量级
+    name: 单位换算差（右侧大出数量级）
+    match:
+      deltaRatioMin: -1000.0
+      deltaRatioMax: -0.9
+    hypothesis: 右侧金额约为左侧的几十倍以上 —— 单位换算不一致，右侧可能多了两位小数或左侧漏乘
+    probeHint: 对比两侧 profile 的单位换算配置（分/元），看原始值定数量级
+
+  - id: DOUBLE_COUNTING
+    family: 金额量级
+    name: 疑似双倍计量
+    match:
+      deltaRatioMin: -1.05
+      deltaRatioMax: -0.95
+    hypothesis: 对方金额恰为我方两倍 —— 重复计费、翻倍扣款或两侧计量口径（单次/双向）不一致
+    probeHint: 核对是否存在重复出账单，以及"双向流量单侧计费"类口径约定
+
+  # ============ 存在性 ============
+
+  - id: MISSING_LEFT_UNSYNCED
+    family: 存在性
+    name: 我方未入账/未同步
+    match:
+      diffTypeIn: [MISSING_LEFT]
+    hypothesis: 结算侧有这笔而账单侧没有 —— 我方漏记或数据管道未同步
+    probeHint: 用 biz_key 回查我方源表与管道投递日志（先排除水位未就绪）
+
+  - id: MISSING_RIGHT_UNBILLED
+    family: 存在性
+    name: 对方未出账/未同步
+    match:
+      diffTypeIn: [MISSING_RIGHT]
+    hypothesis: 账单侧有这笔而结算侧没有 —— 对方未出账、退款已删单或数据未同步
+    probeHint: 用 biz_key 回查对方系统/账期边界（是否下一账期才出）
+
+  - id: PENDING_NOT_MISSING
+    family: 存在性
+    name: 未就绪 ≠ 真缺失
+    match:
+      diffTypeRegex: "_PENDING$"
+    hypothesis: 这是水位未就绪标记（数据还没到），不是终判缺失 —— 不是异常
+    probeHint: 看任务的 readiness 与水位配置（lag-seconds），等数据就绪后重跑
+
+  - id: DUPLICATE_REPLAY
+    family: 存在性
+    name: 重放/重复导入
+    match:
+      diffTypeIn: [DUPLICATE_KEY]
+    hypothesis: 同一业务键出现多次 —— 重放、重复导入或幂等键缺失
+    probeHint: 比较重复行的 created_at 与来源批次，确认幂等键（transaction_id）是否生效
+
+  # ============ 时间/格式 ============
+
+  - id: TIME_FIELD_CALIBER
+    family: 时间
+    name: 时间字段口径差
+    match:
+      fieldRegex: "(?i)(time|date|_at$|timestamp)"
+      directionIn: [BOTH]
+    hypothesis: 两侧时间字段口径不同（时区 UTC vs UTC+8、格式、精度）
+    probeHint: 抽两条对比原始值；确认两侧时区与格式化配置
+
+  - id: TIME_ZONE_EPOCH_8H
+    family: 时间
+    name: 时区差 8 小时（epoch 数值型）
+    match:
+      - absDeltaValueMin: 28440000
+        absDeltaValueMax: 29160000
+      - absDeltaValueMin: 28799
+        absDeltaValueMax: 28801
+    hypothesis: 两侧时间差恰为 8 小时 —— UTC vs UTC+8 时区口径（epoch 毫秒或秒差）
+    probeHint: 核对两侧时间戳的时区配置与存储格式（epoch ms/s/本地时间字符串）
+
+  - id: NULL_VS_ZERO
+    family: 状态语义
+    name: 空值当零
+    match:
+      - valueTypes: "E/N"
+      - valueTypes: "N/E"
+    hypothesis: 一侧把"无记录"存成空值，另一侧存成 0 —— 空值口径不一致
+    probeHint: 核对两侧对空值的落库约定（NULL vs 0），统一口径或在规则里做归一化
+
+  - id: STATUS_ENUM_DRIFT
+    family: 状态语义
+    name: 状态枚举漂移
+    match:
+      diffTypeIn: [VALUE_MISMATCH]
+      valueTypes: "T/T"
+    hypothesis: 两侧状态/枚举字段的取值集不同（同一业务状态两套命名）
+    probeHint: 对比两侧 status 的枚举映射表，确认是否需要翻译层

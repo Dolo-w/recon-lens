@@ -23,7 +23,7 @@ import java.util.Optional;
 public class DiffLifecycleRepository {
 
     private static final String ACTION_COLUMNS =
-            "id, diff_id, job_id, action, status, operator, note, created_at";
+            "id, diff_id, job_id, action, status, operator, note, reason_id, created_at";
 
     private static final RowMapper<DiffAction> ACTION_MAPPER = (rs, i) -> new DiffAction(
             rs.getLong("id"),
@@ -33,6 +33,7 @@ public class DiffLifecycleRepository {
             Status.valueOf(rs.getString("status")),
             rs.getString("operator"),
             rs.getString("note"),
+            rs.getString("reason_id"),
             timestamp(rs.getTimestamp("created_at")));
 
     /** NULL 时间戳不会出现（DDL 有 DEFAULT），防御式兜底而已。 */
@@ -47,10 +48,10 @@ public class DiffLifecycleRepository {
     }
 
     public DiffAction insert(long diffId, long jobId, Action action, Status status,
-                             String operator, String note) {
-        jdbc.update("INSERT INTO recon_diff_lifecycle (diff_id, job_id, action, status, operator, note) "
-                        + "VALUES (?, ?, ?, ?, ?, ?)",
-                diffId, jobId, action.name(), status.name(), operator, note);
+                             String operator, String note, String reasonId) {
+        jdbc.update("INSERT INTO recon_diff_lifecycle (diff_id, job_id, action, status, operator, note, reason_id) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                diffId, jobId, action.name(), status.name(), operator, note, reasonId);
         // 台账要回显 id 与时间戳：取该差异最新一条（就是刚插的这条 —— 单写者，无并发竞态窗口）
         return history(diffId).get(0);
     }

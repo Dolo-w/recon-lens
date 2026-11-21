@@ -46,6 +46,21 @@ recon:
     max-attempts: 2
     # 是否在启动时执行一次演示对账（方便 clone 下来直接看到效果）
     run-demo-on-startup: true
+  # 归因链路（K2 知识层）：知识库(L1) → 模式库(L0) → 大模型(L2) → 内置模板(L3)。
+  # L1/L0 全部零模型成本；命中率上升 = LLM 调用下降，这是本系统的核心经济曲线。
+  explain:
+    knowledge:
+      # 关掉就退回"直接调 LLM"，用于验证知识库是否真的在省调用
+      enabled: true
+      # LLM 自产条目置信度就是 0.5，门槛高于它 = 只信人工修正过的答案
+      min-confidence: 0.5
+    patterns:
+      # 经验模式库（K2 / L0）：机械特征联想，内容在 classpath:patterns/diff-patterns.yml，
+      # 客户可加 recon.explain.patterns.dir 指向外部目录（同 id 外部覆盖，mtime 热加载）
+      enabled: true
+      dir: ""
+      # 单条差异最多联想几个候选模式（防 prompt 膨胀）
+      max-candidates: 3
   llm:
     # 归因说明：默认走本地规则模板（离线可用）；打开后走 OpenAI 兼容接口
     enabled: false

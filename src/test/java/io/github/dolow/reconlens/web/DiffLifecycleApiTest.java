@@ -53,6 +53,7 @@ class DiffLifecycleApiTest {
     @BeforeEach
     void seed() {
         jdbc.update("DELETE FROM recon_diff_lifecycle");
+        jdbc.update("DELETE FROM recon_diff_kb");
         jdbc.update("DELETE FROM recon_diff");
         jdbc.update("DELETE FROM recon_job");
         jdbc.update("INSERT INTO recon_job (rule_code, batch_id, status, kind, shard_count) "
@@ -222,5 +223,64 @@ class DiffLifecycleApiTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value(
                         org.hamcrest.Matchers.containsString("CLAIM / RELEASE / RESOLVE / EXEMPT / UNEXEMPT")));
+    }
+
+    // ------------------------------------------------------------------
+    // K1 知识回流：核销/豁免的定性结论 teach 进 recon_diff_kb（HUMAN/0.9）
+
+    /**
+     * 核销动作三件事一起验证：台账落了 reasonId、知识库多了 HUMAN/0.9 条目、
+     * 差异说明从模型猜测换成人工结论。三者缺一，回流就是摆设。
+     */
+    @Test
+    @DisplayName("核销回流知识库_HUMAN条目加说明同步")
+    void resolve_teaches_backflow() throws Exception {
+        MvcResult resolve = mvc.perform(post("/api/diffs/" + diffA + "/lifecycle")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(java.util.Map.of(
+                                "action", "RESOLVE", "operator", "finance01",
+                                "note", "两侧单位不一致，账单侧少乘了汇率系数",
+                                "reasonId", "UNIT_SCALE_X100"))))
+                .andReturn();
+        assertThat(resolve.getResponse().getStatus()).isEqualTo(200);
+        JsonNode body = json.readTree(resolve.getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8));
+        assertThat(body.get("reasonId").asText()).isEqualTo("UNIT_SCALE_X100");
+
+        // 知识库：HUMAN 来源 + 0.9 置信度 + 原因就是核销原因
+        // 注意 rule_code 落库是 CauseKey.normalize 后的大写（BILL_MATCH），字符串比较不分标识符大小写
+        java.util.Map<String, Object> kb = jdbc.queryForMap(
+                "SELECT source, confidence, cause FROM recon_diff_kb WHERE rule_code = 'BILL_MATCH'");
+        assertThat(kb.get("source")).isEqualTo("HUMAN");
+        assertThat(new java.math.BigDecimal(kb.get("confidence").toString())
+                .compareTo(new java.math.BigDecimal("0.900"))).isEqualTo(0);
+        assertThat((String) kb.get("cause")).isEqualTo("两侧单位不一致，账单侧少乘了汇率系数");
+
+        // 差异说明同步成人工结论（界面上不能还挂着模型那句）
+        String explanation = jdbc.queryForObject(
+                "SELECT explanation FROM recon_diff WHERE id = ?", String.class, diffA);
+        assertThat(explanation).isEqualTo("两侧单位不一致，账单侧少乘了汇率系数");
+    }
+
+    @Test
+    @DisplayName("豁免回流_动作语义是可豁免")
+    void exempt_teaches_backflow() throws Exception {
+        assertThat(act(diffB, "EXEMPT", "finance02", "两侧口径差异，属已知例外").getResponse().getStatus())
+                .isEqualTo(200);
+        java.util.Map<String, Object> kb = jdbc.queryForMap(
+                "SELECT action FROM recon_diff_kb WHERE rule_code = 'BILL_MATCH'");
+        assertThat((String) kb.get("action")).isEqualTo("此类差异已确认可豁免");
+    }
+
+    @Test
+    @DisplayName("reasonId超长_400")
+    void reason_id_too_long() throws Exception {
+        mvc.perform(post("/api/diffs/" + diffA + "/lifecycle")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(java.util.Map.of(
+                                "action", "RESOLVE", "operator", "finance01", "note", "x",
+                                "reasonId", "R".repeat(65)))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value(
+                        "reasonId 超过 64 字符：它是分类 ID 不是说明文"));
     }
 }

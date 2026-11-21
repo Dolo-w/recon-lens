@@ -6,7 +6,7 @@ MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模
 调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因、调 `recon_define_rule` 换一套对账维度、
 调 `recon_build_model` 把大表先物化好，全程不用人拼 URL。
 
-recon-lens 暴露 17 个工具（启用 Agent 后 23 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
+recon-lens 暴露 18 个工具（启用 Agent 后 24 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
 `ModelBuilder`），所以两条路的结果必然一致，不存在两套逻辑。
 
 ## 多轮 Agent 请走 `/mcp`，不要用 stdio
@@ -74,9 +74,10 @@ java -jar target/recon-lens-0.1.0.jar --spring.profiles.active=mcp
 | `recon_diagnose` | `jobId`（必填） | 任务级诊断：哪里不对 + 疑似原因 + 建议动作 + 差异抽样 |
 | `recon_list_prices` | `priceCode`、`model`、`tokenType` | token 价格表条目（单价/生效窗/阶梯）；空表时给录入指引 |
 | `recon_price_impact` | `jobId`（必填）、`priceCode`（必填）、`model`、`tokenType`、`at` | 计量漂移归因：全部可计价差异 × 价格 = 金额影响（负数 = 少收）；状态类差异跳过并计数 |
-| `recon_diff_lifecycle` | `action`（必填）、`diffId`、`jobId`、`operator`、`note` | 闭环台账：CLAIM / RESOLVE / EXEMPT / UNEXEMPT（RESOLVE/EXEMPT 必须写 note 依据）/ HISTORY / SUMMARY（闭环率） |
+| `recon_diff_lifecycle` | `action`（必填）、`diffId`、`jobId`、`operator`、`note`、`reasonId` | 闭环台账：CLAIM / RESOLVE / EXEMPT / UNEXEMPT（RESOLVE/EXEMPT 必须写 note 依据，建议带 `reasonId` 分类进知识回流）/ HISTORY / SUMMARY（闭环率） |
 | `recon_evidence_pack` | `jobId`（必填）、`priceCode`、`model`、`tokenType`、`at` | 争议证据包落盘 CSV（差异 + 两侧整行 JSON 凭证 + 适用价格 + 生命周期状态），返回文件路径 |
-| `recon_lago_sync` | `resource`（必填：`fees`/`invoices`） | 拉 Lago 账单按 profile 表头落盘 CSV（需配 `recon.connector.lago.api-key`），返回 `recon_import_file` 导入指引 |
+| `recon_lago_sync` | `resource`（必填：`fees`/`invoices`） | 拉 Lago 账单按 profile 表头落盘 CSV（需配 `recon.connector.lago.api-key`），返回 `recon_import_file` 导入指引 + 该资源 profile 的厂商计费语义摘录 |
+| `recon_list_patterns` | 无 | 归因经验模式库（L0）：15 条「账单常见病」的机械特征匹配表，知识库 miss 后、调 LLM 前先做机械联想 |
 
 启用 Agent（`recon.agent.enabled=true`）后额外暴露 5 个：
 

@@ -78,11 +78,13 @@ public class AgentOrchestrator {
     private final ObjectMapper json;
     /** 恢复时读回"已经落库的试算态"用；不参与规划，只参与从哪接着做的判断。 */
     private final RuleRepository rules;
+    /** K3 口径冲突检查：语义字典里两侧 caliber/unit 不一致的比对字段，起草后 WARN 进轨迹。 */
+    private final io.github.dolow.reconlens.explain.semantics.CaliberConflictChecker caliberChecker;
 
     public AgentOrchestrator(AgentRunRepository runs, RuleCatalog catalog, ReconEngine engine,
                              ShadowTrialService trialService, RuleDrafter drafter,
                              ExplainService explain, AgentProperties properties, ObjectMapper json,
-                             RuleRepository rules) {
+                             RuleRepository rules, io.github.dolow.reconlens.explain.semantics.CaliberConflictChecker caliberChecker) {
         this.runs = runs;
         this.catalog = catalog;
         this.engine = engine;
@@ -92,6 +94,7 @@ public class AgentOrchestrator {
         this.properties = properties;
         this.json = json;
         this.rules = rules;
+        this.caliberChecker = caliberChecker;
     }
 
     /** 一次会话的产出。{@code status} 用的是落库值，便于调用方直接对照 {@code recon_agent_run}。 */
@@ -621,6 +624,17 @@ public class AgentOrchestrator {
         savedPayload.put("reasoning", draft.reasoning());
         savedPayload.put("assumptions", draft.assumptions());
         recordStep(runId, ++seq[0], "ACT", "save-draft", plan.reason(), toJson(savedPayload), "OK", t);
+
+        // K3 口径冲突 WARN：语义字典里两侧 caliber/unit 不一致的比对字段，在这里喊出来。
+        // 是 WARN 不是 REJECT —— 字典是人工登记的理解，判定权留给审批人（落轨迹即可见）。
+        t = System.nanoTime();
+        List<String> caliberConflicts = caliberChecker.conflicts(saved.spec());
+        if (!caliberConflicts.isEmpty()) {
+            recordStep(runId, ++seq[0], "ACT", "semantic-caliber-warn", plan.reason(),
+                    String.join("\n", caliberConflicts), "WARN", t);
+            log.warn("规则 {} v{} 存在口径冲突（{} 条），已记入会话 #{} 轨迹",
+                    saved.spec().code(), saved.version(), caliberConflicts.size(), runId);
+        }
 
         // 试算：闸门 2 是"这条规则值不值得批"的证据来源，Agent 自己不能跳过
         t = System.nanoTime();

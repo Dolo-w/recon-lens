@@ -78,6 +78,20 @@ public final class ColumnProfiles {
             m.put("fee_total_amount_cents", ColumnProfile.ColumnSpec.cents("total_amount"));
             return m;
         }
+
+        /** K4 语义摘录（核证自导出表头结构本身 + Lago 源码精读，随版本重核）。 */
+        @Override
+        public List<String> billingSemantics() {
+            return List.of(
+                    "金额列单位是分（源列以 _cents 结尾），profile 导入时已统一除以 100 换算成元 —— 两侧口径差 100 倍的差异先怀疑漏配换算",
+                    "fee_from_date / fee_to_date 是这条计费项的服务归属期：月初月末切账差异、跨账期分摊差异先核对这两列，再怀疑金额本身",
+                    "fee_units × fee_precise_unit_amount ≈ 小计（税费另列），三项对不上时优先怀疑阶梯/梯度计价而非数据损坏");
+        }
+
+        @Override
+        public String semanticsVersion() {
+            return "lago-api-2026-11";
+        }
     });
 
     /** Lago「按发票导出」：一行 = 一张发票的汇总金额。 */
@@ -163,6 +177,24 @@ public final class ColumnProfiles {
                     ColumnProfile.ColumnSpec.cents("offsetted_credit_note_amount"));
             return m;
         }
+
+        /** K4 语义摘录（核证自导出表头的金额列构成 + Lago 源码精读，随版本重核）。 */
+        @Override
+        public List<String> billingSemantics() {
+            return List.of(
+                    "金额勾稽：fees_amount + taxes_amount − coupons_amount − credit_notes_amount "
+                            + "− prepaid_credit_amount ≈ total_amount；对不上时先核对优惠券/贷记单/预付抵扣"
+                            + "三种冲抵是否都算进对账口径，再怀疑计费引擎",
+                    "credit_notes_amount_cents 是贷记单冲销（冲抵历史发票的商业动作），不是数据错误——"
+                            + "出现大额负向差异先查 credit note，不要往计费正确性上引",
+                    "status 列含 voided（作废）等状态，作废发票的金额行仍在导出里；做金额对账前先确认"
+                            + "对账口径是否排除作废发票，不要假设导出里全是有效账");
+        }
+
+        @Override
+        public String semanticsVersion() {
+            return "lago-api-2026-11";
+        }
     });
 
     /** Orb 发票汇总：一行 = 一张发票（字段核证自 docs.withorb.com list-invoices，2026-11）。 */
@@ -226,6 +258,23 @@ public final class ColumnProfiles {
             m.put("memo", ColumnProfile.ColumnSpec.of("memo", "VARCHAR(1024)"));
             m.put("created_at", ColumnProfile.ColumnSpec.of("created_at", "VARCHAR(64)"));
             return m;
+        }
+
+        /** K4 语义摘录（核证自 Orb 官方文档的金额字段语义，随版本重核）。 */
+        @Override
+        public List<String> billingSemantics() {
+            return List.of(
+                    "Orb 金额是字符串十进制元（如 \"8.00\"），按 DECIMAL 直接入库，没有分换算——"
+                            + "与 Lago（分入库）对账时不要互相套用换算规则，×100/÷100 的差异先查口径混用",
+                    "subtotal 是明细小计，total 是含折扣/返还后的总额，amount_due 是当前应付——"
+                            + "三者口径不同；跨厂商比对时统一取 total 对 total_amount，不要拿 amount_due 混比",
+                    "service_period_start/end 是服务归属期（账期切分），paid_at/voided_at 是现金动作时间——"
+                            + "voided_at 非空的发票已作废，金额对账口径应先排除；月初月末切账差异先核对归属期两列");
+        }
+
+        @Override
+        public String semanticsVersion() {
+            return "orb-api-2026-11";
         }
     });
 
@@ -321,5 +370,25 @@ public final class ColumnProfiles {
     /** 全部 profile id，保持注册顺序。 */
     public static List<String> ids() {
         return List.copyOf(BY_ID.keySet());
+    }
+
+    /**
+     * 指定 profile 的语义摘录摘要（K4）：给归因/规则起草当上下文的一段文本。
+     * profile 不存在或没有语义摘录时返回空串（调用方据此跳过，不硬塞段落）。
+     */
+    public static String semanticsDigest(String profileId) {
+        if (profileId == null) {
+            return "";
+        }
+        ColumnProfile profile = BY_ID.get(profileId.trim());
+        if (profile == null || profile.billingSemantics().isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("厂商计费语义摘录 [").append(profile.id())
+                .append(" / ").append(profile.semanticsVersion()).append("]：");
+        for (String s : profile.billingSemantics()) {
+            sb.append('\n').append("- ").append(s);
+        }
+        return sb.toString();
     }
 }

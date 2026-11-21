@@ -759,9 +759,93 @@ public class ReconProperties {
     public static class Explain {
 
         private final Knowledge knowledge = new Knowledge();
+        private final Patterns patterns = new Patterns();
+        private final Semantics semantics = new Semantics();
 
         public Knowledge getKnowledge() {
             return knowledge;
+        }
+
+        public Patterns getPatterns() {
+            return patterns;
+        }
+
+        public Semantics getSemantics() {
+            return semantics;
+        }
+
+        /**
+         * 字段语义字典（K3）配置：给"这列是什么口径"一个可查、可复算的答案。
+         * 消费点：describe_table 增强 + 规则起草闸门口径冲突 WARN。
+         */
+        public static class Semantics {
+            /** 关掉 = describe 不带语义层、起草不做口径冲突检查 */
+            private boolean enabled = true;
+
+            /** 外部语义字典目录（*.yml 与内置合并，同 (table,column) 外部覆盖） */
+            private String dir = "";
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public String getDir() {
+                return dir;
+            }
+
+            public void setDir(String dir) {
+                this.dir = dir;
+            }
+        }
+
+        /**
+         * 经验模式库（K2）配置：L0 机械特征联想，跨规则、跨客户沉淀"账单对账常见病"。
+         * 加载失败/关闭都只降级到 L1 知识库链路，绝不让坏知识挡住归因主链路。
+         */
+        public static class Patterns {
+            /** 关掉 = 归因分层退回 L1 知识库 → LLM → 模板，行为与 K2 之前一致 */
+            private boolean enabled = true;
+
+            /**
+             * 外部模式库目录（file:/path 或相对路径），目录里的 *.yml 与内置库合并，
+             * 同 id 外部覆盖内置。空 = 只用 classpath 内置库。文件改动按 mtime 热加载。
+             */
+            private String dir = "";
+
+            /** 单条差异最多联想多少个候选模式（给 few-shot 与展示用，防 prompt 膨胀） */
+            private int maxCandidates = 3;
+
+            public boolean isEnabled() {
+                return enabled;
+            }
+
+            public void setEnabled(boolean enabled) {
+                this.enabled = enabled;
+            }
+
+            public String getDir() {
+                return dir;
+            }
+
+            public void setDir(String dir) {
+                this.dir = dir;
+            }
+
+            public int getMaxCandidates() {
+                return maxCandidates;
+            }
+
+            public void setMaxCandidates(int maxCandidates) {
+                if (maxCandidates < 1) {
+                    throw new IllegalArgumentException(
+                            "recon.explain.patterns.max-candidates 必须 ≥ 1，当前: " + maxCandidates);
+                }
+                this.maxCandidates = maxCandidates;
+            }
         }
 
         public static class Knowledge {

@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS recon_diff_lifecycle (
   status     VARCHAR(16)  NOT NULL,
   operator   VARCHAR(64)  NOT NULL,
   note       VARCHAR(1000),
+  -- 定性结论分类 ID（K2 模式库分类法），K1 阶段允许空
+  reason_id  VARCHAR(64),
   created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_dlc_diff (diff_id, id),
   KEY idx_dlc_job (job_id, status)
@@ -258,7 +260,7 @@ CREATE TABLE IF NOT EXISTS recon_diff_kb (
   created_by        VARCHAR(64)   NULL,
   created_at        TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at        TIMESTAMP     NULL,
-  UNIQUE KEY uk_kb_cause_key (cause_key),
+  KEY idx_kb_key (cause_key),
   KEY idx_kb_lookup (rule_code, diff_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

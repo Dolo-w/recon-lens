@@ -3,7 +3,6 @@ package io.github.dolow.reconlens.store;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
-import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
@@ -24,12 +23,15 @@ import java.util.Optional;
  * 没有向量检索、没有语义相似度 —— 初期数据量小、维度固定，结构化键够了（§14 决策记录）。
  * 语义检索真正需要的不是技术，是"数据够多到能证明键匹配漏了东西"，现在还没有。
  *
- * <p><b>为什么是"先查再插"而不是 upsert</b>：{@code INSERT ... ON DUPLICATE KEY UPDATE}
- * 在 H2 与 MySQL 里语义不完全一致（H2 需要 MySQL 兼容模式），而本项目所有 SQL 都要两边都能跑。
- * 代价是多一次查询，在这里可以忽略 —— 一次归因本来就要查一次。
+ * <p><b>K2 多候选</b>：{@code cause_key} 是普通索引不是唯一索引 —— 同形状差异可以有
+ * 多种真实病因（9 月的税、10 月的手续费），一键一答会让 teach 覆盖掉上个月的正确知识。
+ * 所以这里的写路径全是 <b>INSERT</b>（候选累加，永不 UPDATE 覆盖），
+ * 读路径按 {@code (confidence DESC, hits DESC, id DESC)} 取 top-1 ——
+ * 人工确认过的、被反复验证过的、最新的，排前面。
  *
- * <p><b>{@code source} 决定谁能覆盖谁</b>：{@code HUMAN} 的条目不会被 {@code LLM} 覆盖，
- * 否则运营手工修正过的归因会在下一轮被模型的另一次胡说冲掉 —— 人工修正就成了白干。
+ * <p><b>防堆重复</b>：多候选的代价是"同一个键下同一句废话写一百遍"。
+ * 写入方（{@code remember}/{@code teach}）用 {@link #existsByCauseKeyAndCause} 去重 ——
+ * 同键同措辞不落第二行，措辞不同才作为新候选累加。
  */
 @Repository
 public class DiffKnowledgeRepository {
@@ -77,10 +79,32 @@ public class DiffKnowledgeRepository {
         }
     }
 
-    public Optional<Entry> findByKey(String causeKey) {
-        List<Entry> rows = jdbc.query("SELECT " + COLUMNS + " FROM recon_diff_kb WHERE cause_key = ?",
+    /**
+     * 键下的最优候选：人工确认 > 被验证多 > 更新。
+     *
+     * <p>多候选检索的语义就是"最可信的那条答案"：{@code confidence} 让 HUMAN(0.9)
+ * 压过 LLM(0.5)；{@code hits} 让被反复采用的老候选站住；{@code id} 兜底同分时取新。
+     */
+    public Optional<Entry> findTopByKey(String causeKey) {
+        List<Entry> rows = jdbc.query("SELECT " + COLUMNS + " FROM recon_diff_kb WHERE cause_key = ? "
+                        + "ORDER BY confidence DESC, hits DESC, id DESC LIMIT 1",
                 mapper(), causeKey);
         return rows.stream().findFirst();
+    }
+
+    /** 键下的完整候选集（按 top-1 同序），给 few-shot 注入与运营复核用。 */
+    public List<Entry> findCandidates(String causeKey, int limit) {
+        return jdbc.query("SELECT " + COLUMNS + " FROM recon_diff_kb WHERE cause_key = ? "
+                        + "ORDER BY confidence DESC, hits DESC, id DESC LIMIT ?",
+                mapper(), causeKey, limit);
+    }
+
+    /** 同键同措辞是否已存在 —— 多候选模式的去重闸，防止同一句废话堆一百行。 */
+    public boolean existsByCauseKeyAndCause(String causeKey, String cause) {
+        Long count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM recon_diff_kb WHERE cause_key = ? AND cause = ?",
+                Long.class, causeKey, cause);
+        return count != null && count > 0;
     }
 
     public Optional<Entry> findById(long id) {
@@ -89,19 +113,13 @@ public class DiffKnowledgeRepository {
     }
 
     /**
-     * 没有才写。<b>已存在就什么都不做</b> —— 包括不更新 {@code cause}。
+     * 追加一条候选。<b>永不覆盖</b> —— 多候选模式下写路径只有 INSERT，
+     * 人工确认过的高置信条目在结构上就不可能被模型冲掉（不再是靠"先查再插"的约定）。
      *
-     * <p>这条"不做"是刻意的：同一个键下已经有 {@code HUMAN} 修正过的高置信条目时，
-     * 新一轮 LLM 的措辞不同但可能更差，覆盖它等于把人工成本反复烧掉。
-     *
-     * @return 新写入的 id；已存在时返回 {@code Optional.empty()}
+     * @return 是否真的写入了（调用方负责先 {@link #existsByCauseKeyAndCause} 去重）
      */
-    public Optional<Long> insertIfAbsent(Entry entry) {
-        if (findByKey(entry.causeKey()).isPresent()) {
-            return Optional.empty();
-        }
-        KeyHolder keys = new GeneratedKeyHolder();
-        jdbc.update(connection -> {
+    public boolean insert(Entry entry) {
+        return jdbc.update(connection -> {
             PreparedStatement ps = connection.prepareStatement(
                     "INSERT INTO recon_diff_kb (cause_key, rule_code, diff_type, field_name, feature_signature,"
                             + " cause, action, confidence, source, hits, misses, created_by, created_at)"
@@ -118,8 +136,7 @@ public class DiffKnowledgeRepository {
             ps.setString(9, entry.source());
             ps.setString(10, entry.createdBy());
             return ps;
-        }, keys);
-        return Optional.ofNullable(generatedId(keys));
+        }, new GeneratedKeyHolder()) > 0;
     }
 
     /** 命中计数：只加一列，不参与任何判定 —— 它是观测值，不是状态机。 */
@@ -137,16 +154,6 @@ public class DiffKnowledgeRepository {
      */
     public void bumpMisses(long id) {
         jdbc.update("UPDATE recon_diff_kb SET misses = misses + 1 WHERE id = ?", id);
-    }
-
-    /**
-     * 人工修正：覆盖原因/动作，置信度升到 0.9，来源改为 {@code HUMAN}。
-     * 这是"归因回流"里唯一能提高置信度的入口 —— 模型自己不能给自己升置信度。
-     */
-    public boolean correctByHuman(String causeKey, String cause, String action, String correctedBy) {
-        return jdbc.update("UPDATE recon_diff_kb SET cause = ?, action = ?, confidence = 0.900, source = 'HUMAN',"
-                        + " created_by = ?, updated_at = CURRENT_TIMESTAMP WHERE cause_key = ?",
-                cause, action, correctedBy, causeKey) > 0;
     }
 
     public List<Entry> recent(int limit) {
@@ -185,28 +192,5 @@ public class DiffKnowledgeRepository {
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         Timestamp value = rs.getTimestamp(column);
         return value == null ? null : value.toInstant();
-    }
-
-    /**
-     * 按列名取主键。
-     *
-     * <p>不能直接用 {@link KeyHolder#getKey()}：H2 会把 {@code created_at DEFAULT CURRENT_TIMESTAMP}
-     * 也当作生成列返回，{@code getKey()} 随即抛
-     * {@code contains multiple keys} —— 这个坑在 {@code AgentRunRepository} 上已经踩过一次。
-     */
-    private static Long generatedId(KeyHolder keys) {
-        Map<String, Object> map = keys.getKeys();
-        for (Map.Entry<String, Object> entry : map.entrySet()) {
-            if ("ID".equalsIgnoreCase(entry.getKey()) && entry.getValue() instanceof Number number) {
-                return number.longValue();
-            }
-        }
-        if (map.size() == 1) {
-            Object only = map.values().iterator().next();
-            if (only instanceof Number number) {
-                return number.longValue();
-            }
-        }
-        return null;
     }
 }

@@ -155,13 +155,14 @@ public class DiffController {
                     + "，可用: CLAIM / RELEASE / RESOLVE / EXEMPT / UNEXEMPT");
         }
         DiffActionSnapshot snapshot = DiffActionSnapshot.of(
-                lifecycleService.apply(id, action, request.operator(), request.note()));
+                lifecycleService.apply(id, action, request.operator(), request.note(), request.reasonId()));
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", id);
         body.put("action", snapshot.action());
         body.put("status", snapshot.status());
         body.put("operator", snapshot.operator());
         body.put("note", snapshot.note());
+        body.put("reasonId", snapshot.reasonId());
         body.put("actedAt", snapshot.actedAt());
         return body;
     }
@@ -196,10 +197,12 @@ public class DiffController {
 
     private record DiffActionSnapshot(io.github.dolow.reconlens.domain.DiffLifecycle.Action action,
                                       io.github.dolow.reconlens.domain.DiffLifecycle.Status status,
-                                      String operator, String note, java.time.Instant actedAt) {
+                                      String operator, String note, String reasonId,
+                                      java.time.Instant actedAt) {
 
         static DiffActionSnapshot of(io.github.dolow.reconlens.domain.DiffLifecycle.DiffAction a) {
-            return new DiffActionSnapshot(a.action(), a.status(), a.operator(), a.note(), a.createdAt());
+            return new DiffActionSnapshot(a.action(), a.status(), a.operator(), a.note(), a.reasonId(),
+                    a.createdAt());
         }
     }
 
@@ -282,6 +285,24 @@ public class DiffController {
         return body;
     }
 
+    /** 经验模式库（K2 / L0 层）：机械特征 → 候选假设，跨规则生效，内容在 patterns/*.yml。 */
+    @GetMapping("/patterns")
+    public Map<String, Object> patterns() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        List<io.github.dolow.reconlens.explain.pattern.DiffPattern> items = explainService.patterns();
+        body.put("total", items.size());
+        body.put("items", items.stream().map(p -> {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", p.id());
+            row.put("family", p.family());
+            row.put("name", p.name());
+            row.put("hypothesis", p.hypothesis());
+            row.put("probeHint", p.probeHint());
+            return row;
+        }).toList());
+        return body;
+    }
+
     /**
      * 单条差异详情：差异本体 + 两侧原始行凭证。凭证是差异落库时刻的整行快照，
      * 源表后来变了也不影响复盘口径；该行没有凭证（如试算旧数据）时为空列表。
@@ -321,8 +342,9 @@ public class DiffController {
     public record AttributionRequest(String cause, String action, String operator) {
     }
 
-    /** 差异处置请求体。{@code operator} 必填；RESOLVE / EXEMPT 时 {@code note} 必填。 */
-    public record LifecycleRequest(String action, String operator, String note) {
+    /** 差异处置请求体。{@code operator} 必填；RESOLVE / EXEMPT 时 {@code note} 必填；
+     *  {@code reasonId} 可选（定性结论分类 ID，K2 模式库分类法，K1 阶段允许空）。 */
+    public record LifecycleRequest(String action, String operator, String note, String reasonId) {
     }
 
     @org.springframework.web.bind.annotation.ExceptionHandler(IllegalArgumentException.class)

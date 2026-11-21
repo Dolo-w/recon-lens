@@ -16,12 +16,17 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * 归因知识库：L1 层，零 LLM 成本。
  *
- * <p>它只做三件事 —— 查、记、学：
+ * <p>它只做四件事 —— 查、记、学、列：
  * <ol>
- *   <li>{@link #lookup} 按 {@link CauseKey} 查；命中且置信度够 → 直接用，不再调模型；</li>
- *   <li>{@link #remember} 把模型的归因写回（{@code source=LLM}, {@code confidence=0.5}）；</li>
- *   <li>{@link #teach} 运营确认/修正后写回（{@code source=HUMAN}, {@code confidence=0.9}）。</li>
+ *   <li>{@link #lookup} 按 {@link CauseKey} 查 top-1；命中且置信度够 → 直接用，不再调模型；</li>
+ *   <li>{@link #remember} 把模型的归因追加为新候选（{@code source=LLM}, {@code confidence=0.5}）；</li>
+ *   <li>{@link #teach} 运营确认/修正后追加候选（{@code source=HUMAN}, {@code confidence=0.9}）；</li>
+ *   <li>{@link #candidates} 列出键下完整候选集 —— few-shot 注入与运营复核用。</li>
  * </ol>
+ *
+ * <p><b>K2 多候选语义</b>：同形状差异可以有几种真实病因（9 月的税、10 月的手续费）。
+ * 写路径只追加、永不覆盖 —— 人工确认过的知识在结构上就不可能被模型的下一次胡说冲掉。
+ * 读路径取 top-1（置信度 → 命中数 → 新鲜度）；旧候选还在库里，降级场景可被翻出来。
  *
  * <p><b>为什么 {@code remember} 的置信度只有 0.5</b>：模型的自述不是事实。0.5 意味着
  * "可以复用，但一有人工修正就该被覆盖"。这是知识库里唯一可信的信任梯度 ——
@@ -69,7 +74,7 @@ public class DiffKnowledgeBase {
         }
         CauseKey key = CauseKey.of(ruleCode, diff);
         lookups.incrementAndGet();
-        Optional<Entry> found = repository.findByKey(key.digest());
+        Optional<Entry> found = repository.findTopByKey(key.digest());
         if (found.isEmpty()) {
             absent.incrementAndGet();
             return Optional.empty();
@@ -87,10 +92,10 @@ public class DiffKnowledgeBase {
     }
 
     /**
-     * 把模型的归因写回知识库。已有条目一律不动（含人工修正过的）。
+     * 把模型的归因追加为候选。同键同措辞不重复落（多候选模式的去重闸）。
      *
      * <p>写库失败不让归因失败：知识库是成本优化，不是正确性依赖 ——
-     * 这里 {@code try/catch} 而不是向上抛，是为了让"库表不存在 / 唯一索引冲突"
+     * 这里 {@code try/catch} 而不是向上抛，是为了让"库表不存在 / 索引冲突"
      * 变成一条 warn，而不是让一批差异全部没有解释。
      *
      * @return 真的写进去了才返回 {@code true}
@@ -100,11 +105,15 @@ public class DiffKnowledgeBase {
             return false;
         }
         CauseKey key = CauseKey.of(ruleCode, diff);
+        String clipped = clip(cause, 1000);
         Entry entry = new Entry(0L, key.digest(), key.ruleCode(), key.diffType(), key.fieldName(),
-                key.featureSignature(), clip(cause, 1000), null, LLM_CONFIDENCE,
+                key.featureSignature(), clipped, null, LLM_CONFIDENCE,
                 Entry.SOURCE_LLM, 0, 0, "agent", null, null);
         try {
-            return repository.insertIfAbsent(entry).isPresent();
+            if (repository.existsByCauseKeyAndCause(key.digest(), clipped)) {
+                return false;
+            }
+            return repository.insert(entry);
         } catch (RuntimeException e) {
             log.warn("归因写回知识库失败（不影响本次解释）：{} — {}", key.describe(), e.toString());
             return false;
@@ -112,23 +121,39 @@ public class DiffKnowledgeBase {
     }
 
     /**
-     * 人工确认/修正。这是置信度升到 0.9 的唯一入口。
+     * 人工确认/修正。<b>追加</b>一条 {@code HUMAN}/0.9 候选，不覆盖旧行 ——
+     * 9 月的"税"和 10 月的"手续费"可能都是对的，覆盖会把上个月的正确知识抹掉。
+     * 这是置信度升到 0.9 的唯一入口。
      *
-     * <p>键不存在时先插入再修正：运营在界面上修订一条"模型说错了"的归因，
-     * 不该因为"库里还没有这条"而被拒绝 —— 那等于要求人先等模型犯一次错。
+     * <p>同键同措辞的重复 teach 是幂等的（运营手抖点两次不该堆两行）。
      */
     public boolean teach(String ruleCode, DiffRecord diff, String cause, String action, String correctedBy) {
         if (cause == null || cause.isBlank()) {
             throw new IllegalArgumentException("人工修正的归因不能为空");
         }
         CauseKey key = CauseKey.of(ruleCode, diff);
-        if (repository.correctByHuman(key.digest(), clip(cause, 1000), clip(action, 1000), correctedBy)) {
-            return true;
+        String clipped = clip(cause, 1000);
+        try {
+            if (repository.existsByCauseKeyAndCause(key.digest(), clipped)) {
+                return true;
+            }
+            Entry entry = new Entry(0L, key.digest(), key.ruleCode(), key.diffType(), key.fieldName(),
+                    key.featureSignature(), clipped, clip(action, 1000),
+                    new BigDecimal("0.900"), Entry.SOURCE_HUMAN, 0, 0, correctedBy, null, null);
+            return repository.insert(entry);
+        } catch (RuntimeException e) {
+            log.warn("人工归因写入知识库失败：{} — {}", key.describe(), e.toString());
+            return false;
         }
-        Entry entry = new Entry(0L, key.digest(), key.ruleCode(), key.diffType(), key.fieldName(),
-                key.featureSignature(), clip(cause, 1000), clip(action, 1000),
-                new BigDecimal("0.900"), Entry.SOURCE_HUMAN, 0, 0, correctedBy, null, null);
-        return repository.insertIfAbsent(entry).isPresent();
+    }
+
+    /** 键下完整候选集（按 top-1 同序）。few-shot 注入与"这条差异历史上答过什么"用。 */
+    public List<Entry> candidates(String ruleCode, DiffRecord diff, int limit) {
+        if (!enabled || limit <= 0) {
+            return List.of();
+        }
+        CauseKey key = CauseKey.of(ruleCode, diff);
+        return repository.findCandidates(key.digest(), limit);
     }
 
     public List<Entry> recent(int limit) {

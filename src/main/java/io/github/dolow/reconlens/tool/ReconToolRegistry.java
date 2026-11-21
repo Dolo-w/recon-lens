@@ -34,6 +34,7 @@ public class ReconToolRegistry implements ToolRegistry {
     private final ObjectProvider<TableAllowList> allowList;
     private final io.github.dolow.reconlens.store.TableInspector inspector;
     private final ReconRepository repository;
+    private final io.github.dolow.reconlens.explain.semantics.FieldSemanticDictionary semantics;
     private final List<ToolSpec> specs;
 
     /**
@@ -45,17 +46,19 @@ public class ReconToolRegistry implements ToolRegistry {
     public ReconToolRegistry(ReconMcpTools tools, ObjectProvider<RegisteredTableRepository> tables,
                              RuleCatalog catalog, ObjectProvider<TableAllowList> allowList,
                              io.github.dolow.reconlens.store.TableInspector inspector,
-                             ReconRepository repository) {
+                             ReconRepository repository,
+                             io.github.dolow.reconlens.explain.semantics.FieldSemanticDictionary semantics) {
         this.tools = tools;
         this.tables = tables;
         this.catalog = catalog;
         this.allowList = allowList;
         this.inspector = inspector;
         this.repository = repository;
+        this.semantics = semantics;
         this.specs = List.of(
                 listRules(), listJobs(), listTables(), describeTable(), defineRule(), buildModel(), run(),
                 jobSummary(), listDiffs(), explainDiff(), explainJob(), diagnose(),
-                listPrices(), priceImpact(), diffLifecycle(), evidencePack(), lagoSync());
+                listPrices(), priceImpact(), diffLifecycle(), evidencePack(), lagoSync(), listPatterns());
     }
 
     @Override
@@ -341,8 +344,66 @@ public class ReconToolRegistry implements ToolRegistry {
                     if (advice != null) {
                         structured.put("advice", structuredAdvice(advice));
                     }
-                    return ToolOutcome.of(renderDetail(detail) + renderProfile(profile) + renderAdvice(advice), structured);
+                    // K3 语义层：列的口径/单位/枚举含义（字典没覆盖的列不出现 —— 不冒充知道）
+                    String semanticsText = renderSemantics(detail);
+                    if (!semanticsText.isEmpty()) {
+                        structured.put("semantics", semanticsFor(detail));
+                    }
+                    return ToolOutcome.of(renderDetail(detail) + renderProfile(profile) + renderAdvice(advice)
+                            + semanticsText, structured);
                 });
+    }
+
+    /** 语义层的文本出口：有标注才输出，没标注一个字都不占。 */
+    private String renderSemantics(io.github.dolow.reconlens.store.TableInspector.Detail detail) {
+        List<io.github.dolow.reconlens.explain.semantics.FieldSemantics> items = semantics.forTable(detail.table());
+        if (items.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("\n字段语义（来自语义字典，写规则/解释差异时请带上口径）：\n");
+        for (io.github.dolow.reconlens.explain.semantics.FieldSemantics s : items) {
+            sb.append("- ").append(s.column()).append(':');
+            if (s.semantic() != null) {
+                sb.append(' ').append(s.semantic());
+            }
+            if (s.caliber() != null) {
+                sb.append("［口径：").append(s.caliber()).append('］');
+            }
+            if (s.unit() != null) {
+                sb.append("［单位：").append(s.unit()).append('］');
+            }
+            if (!s.enumMeanings().isEmpty()) {
+                sb.append("［枚举：");
+                s.enumMeanings().forEach((k, v) -> sb.append(k).append('=').append(v).append(' '));
+                sb.append('］');
+            }
+            sb.append('\n');
+        }
+        sb.append("两侧口径/单位不一致的比对字段，起草时会被口径冲突检查喊出来（WARN 落轨迹）。\n");
+        return sb.toString();
+    }
+
+    /** 语义层的结构化出口：column → {semantic, caliber, unit, enum}。 */
+    private List<Map<String, Object>> semanticsFor(io.github.dolow.reconlens.store.TableInspector.Detail detail) {
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (io.github.dolow.reconlens.explain.semantics.FieldSemantics s : semantics.forTable(detail.table())) {
+            Map<String, Object> row = new java.util.LinkedHashMap<>();
+            row.put("column", s.column());
+            if (s.semantic() != null) {
+                row.put("semantic", s.semantic());
+            }
+            if (s.caliber() != null) {
+                row.put("caliber", s.caliber());
+            }
+            if (s.unit() != null) {
+                row.put("unit", s.unit());
+            }
+            if (!s.enumMeanings().isEmpty()) {
+                row.put("enum", s.enumMeanings());
+            }
+            out.add(row);
+        }
+        return out;
     }
 
     /**
@@ -778,7 +839,8 @@ public class ReconToolRegistry implements ToolRegistry {
                   "diffId":{"type":"integer","description":"差异编号（CLAIM/RESOLVE/EXEMPT/UNEXEMPT/HISTORY 必填）"},
                   "jobId":{"type":"integer","description":"任务号（action=SUMMARY 时可选；不传 = 全库 PROD 口径）"},
                   "operator":{"type":"string","description":"操作人标识，默认 mcp"},
-                  "note":{"type":"string","description":"处置依据。RESOLVE/EXEMPT 必须写清楚，核销没有依据等于没核销"}},
+                  "note":{"type":"string","description":"处置依据。RESOLVE/EXEMPT 必须写清楚，核销没有依据等于没核销"},
+                  "reasonId":{"type":"string","description":"可选：定性结论分类 ID（如 UNIT_SCALE_X100 / TIMEZONE_OFFSET_8H），核销/豁免时带上会被知识库用于同类差异自动归因"}},
                  "required":["action"],"additionalProperties":false}
                 """,
                 null,
@@ -795,7 +857,8 @@ public class ReconToolRegistry implements ToolRegistry {
                     }
                     return ToolOutcome.text(tools.diffLifecycle(
                             ToolArgs.text(a, "action", true), diffId, jobId,
-                            ToolArgs.text(a, "operator", false), ToolArgs.text(a, "note", false)));
+                            ToolArgs.text(a, "operator", false), ToolArgs.text(a, "note", false),
+                            ToolArgs.text(a, "reasonId", false)));
                 });
     }
 
@@ -832,6 +895,17 @@ public class ReconToolRegistry implements ToolRegistry {
                 """,
                 null,
                 a -> ToolOutcome.text(tools.lagoSync(ToolArgs.text(a, "resource", true))));
+    }
+
+    private ToolSpec listPatterns() {
+        return new ToolSpec(ToolNames.LIST_PATTERNS,
+                "列出经验模式库（账单对账常见病的机械特征匹配表）：归因没把握时先来这里找同形状的病，"
+                        + "再决定要不要现场推理。模式库跨规则、跨客户生效，改内容走 YAML 文件 + 代码评审。",
+                """
+                {"type":"object","properties":{},"additionalProperties":false}
+                """,
+                null,
+                a -> ToolOutcome.text(tools.listPatterns()));
     }
 
     /** 供会话侧直接取结构化视图（不解析文本）。 */

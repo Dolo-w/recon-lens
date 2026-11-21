@@ -4,6 +4,29 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 晚：知识层 K1→K4 全部落地 —— 归因从「猜一次」变成「越用越准」）
+
+- **K1 人工闭环回流**：`recon_diff_lifecycle` 的 RESOLVE/EXEMPT 支持可选 `reasonId`（差异原因分类），
+  闭环动作 best-effort 回流知识库（`HUMAN/0.9`，失败只 warn 不挡核销）——人工确认过的归因，
+  下次同类差异 L1 直出，零 LLM 成本。迁移：`docs/migrations/2026-11-21-lifecycle-reason-id.sql`（含回滚）
+- **K2 经验模式库（L0）**：15 条「账单常见病」的机械特征匹配（delta 比率区间/方向/值类型/字段正则），
+  YAML 进 git（`patterns/diff-patterns.yml`）+ 外部目录 mtime 热加载，坏文件降级不挡主链路。
+  归因分层升级为 **L1 知识库 → L0 模式库 → L2 LLM → L3 模板**（人工确认证据强于机器联想）；
+  模式命中只给出联想假设（`[模式库:ID]` 标注），不写回知识库。
+  键升级：规则配 `eventTime` 后签名追加分桶 `|@YYYY-MM`——9 月的税差和 10 月的手续费差不再混键；
+  `uk_kb_cause_key` 唯一索引降级为普通索引，一键多候选（只追加不覆盖，读路 top-1）。
+  迁移：`docs/migrations/2026-11-21-kb-multi-candidate.sql`（含回滚，先人工去重）
+- **K3 字段语义字典**：`semantics/field-semantics.yml`（classpath + 外部目录）给列标口径
+  （含税/不含税）/单位（元/分）/枚举含义；`recon_describe_table` 输出语义层；
+  Agent 起草规则时两侧都登记的口径冲突 → WARN 记录（「不知道」不当「不一样」用，WARN 不是 REJECT）
+- **K4 厂商语义摘录**：Lago/Orb profile 携带 `billingSemantics()` + `semanticsVersion()`
+  （`lago-api-2026-11` / `orb-api-2026-11`），分换算/金额勾稽/credit note 冲销/voided 口径等踩坑短句
+  随 profile 版本化；`recon_lago_sync` 输出自动附带摘录（拉完账单就知道口径坑）。
+  完整排查 SOP 放外部资料库，仓库只留结构化摘录与引用（`docs/vendor-semantics.md`）
+- 基础工具 17 → 18（新增 `recon_list_patterns`），总工具面 24
+- 全量 1007 绿（967 → 1007，+40：K1 回流 3 / L0 匹配与幂等 5 / 时间桶 3 / 模式库 9 /
+  多候选语义重写 / 语义字典 8 / 工具计数适配 / 厂商语义摘录 6 / 事件级等既有用例）
+
 ### 新增（2026-11-21 傍晚：事件级对账 —— 月中调价精确归因）
 
 - 规则 DSL 新增可选 `left/right.eventTime`（事件时间列名）：差异落库带业务发生时刻（`recon_diff.event_at`，原样字符串、不做时区翻译）；取值左侧优先，缺失型差异用存在侧

@@ -52,6 +52,9 @@ class AgentSwitchTest {
                     () -> mock(io.github.dolow.reconlens.llm.LlmChatClient.class))
             .withBean(io.github.dolow.reconlens.explain.ExplainService.class,
                     () -> mock(io.github.dolow.reconlens.explain.ExplainService.class))
+            // K3：编排器多了一个口径冲突检查依赖；这里只验证装配，mock 顶替即可
+            .withBean(io.github.dolow.reconlens.explain.semantics.CaliberConflictChecker.class,
+                    () -> mock(io.github.dolow.reconlens.explain.semantics.CaliberConflictChecker.class))
             .withUserConfiguration(AgentConfiguration.class);
 
     @Test
