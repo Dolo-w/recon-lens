@@ -1,6 +1,10 @@
 package io.github.dolow.reconlens.mcp;
 
+import io.github.dolow.reconlens.config.ReconProperties;
+import io.github.dolow.reconlens.connector.LagoConnectorService;
+import io.github.dolow.reconlens.domain.DiffLifecycle;
 import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.domain.PriceEntry;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.domain.ReconShard;
 import io.github.dolow.reconlens.domain.ShardStatus;
@@ -11,12 +15,19 @@ import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.explain.DiagnosisService;
 import io.github.dolow.reconlens.explain.ExplainService;
+import io.github.dolow.reconlens.lifecycle.DiffLifecycleService;
 import io.github.dolow.reconlens.model.ModelBuilder;
+import io.github.dolow.reconlens.pricing.PriceCatalogService;
+import io.github.dolow.reconlens.pricing.PriceImpactService;
+import io.github.dolow.reconlens.export.EvidencePackService;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.stereotype.Component;
 
+import java.nio.file.Path;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,11 +59,20 @@ public class ReconMcpTools {
      * 没有它（Agent 未启用）就退回同步试算 —— 慢，但至少能定义规则。
      */
     private final org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialScheduler> trialScheduler;
+    private final PriceCatalogService priceCatalog;
+    private final PriceImpactService priceImpact;
+    private final DiffLifecycleService lifecycle;
+    private final EvidencePackService evidencePack;
+    private final LagoConnectorService lagoConnector;
+    private final ReconProperties properties;
 
     public ReconMcpTools(RuleCatalog catalog, ReconEngine engine, ReconRepository repository, ExplainService explain,
                          ModelBuilder modelBuilder, DiagnosisService diagnosis,
                          org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialRunner> trialRunner,
-                         org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialScheduler> trialScheduler) {
+                         org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialScheduler> trialScheduler,
+                         PriceCatalogService priceCatalog, PriceImpactService priceImpact,
+                         DiffLifecycleService lifecycle, EvidencePackService evidencePack,
+                         LagoConnectorService lagoConnector, ReconProperties properties) {
         this.catalog = catalog;
         this.engine = engine;
         this.repository = repository;
@@ -61,6 +81,12 @@ public class ReconMcpTools {
         this.diagnosis = diagnosis;
         this.trialRunner = trialRunner;
         this.trialScheduler = trialScheduler;
+        this.priceCatalog = priceCatalog;
+        this.priceImpact = priceImpact;
+        this.lifecycle = lifecycle;
+        this.evidencePack = evidencePack;
+        this.lagoConnector = lagoConnector;
+        this.properties = properties;
     }
 
     /**
@@ -443,6 +469,156 @@ public class ReconMcpTools {
         }
         sb.append("源数据变化后要重新构建（再次调 recon_build_model）模型表才是新的。");
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 2.5 之后的能力出口：价格表 / 计量漂移归因 / 生命周期台账 / 证据包 / 连接器
+
+    /** 价格目录：模型先看有什么价、什么窗，再决定 impact 怎么传。 */
+    public String listPrices(String priceCode, String model, String tokenType) {
+        List<PriceEntry> items = priceCatalog.list(blankToNull(priceCode), blankToNull(model), blankToNull(tokenType));
+        if (items.isEmpty()) {
+            return "价格表还没有条目。计价需要先录入价格（REST POST /api/prices）："
+                    + "price_code × model × token_type × 生效窗 × 单价（每百万 token）。";
+        }
+        StringBuilder sb = new StringBuilder("价格表 ").append(items.size()).append(" 条：\n");
+        for (PriceEntry p : items) {
+            sb.append("- #").append(p.id()).append(" ").append(p.priceCode()).append("/")
+                    .append(p.model()).append("/").append(p.tokenType())
+                    .append(" 单价 ").append(p.unitPricePerMillion()).append(" ").append(p.currency())
+                    .append("/百万，生效 ").append(p.effectiveFrom()).append(" → ")
+                    .append(p.effectiveTo() == null ? "长期" : p.effectiveTo());
+            if (p.tierMin() != null || p.tierMax() != null) {
+                sb.append("，阶梯 [").append(p.tierMin()).append(", ").append(p.tierMax()).append(")");
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** 计量漂移归因：job 全部可计价差异 × 价格 = 少收的钱。结构化与文本同源。 */
+    public RunOutcome priceImpactWithView(long jobId, String priceCode, String model, String tokenType, String at) {
+        Instant atInstant = parseAt(at);
+        Map<String, Object> summary = priceImpact.summarizeJob(jobId, priceCode, model, tokenType, atInstant);
+        StringBuilder sb = new StringBuilder();
+        sb.append("任务 #").append(jobId).append(" 的计量漂移归因（")
+                .append(priceCode).append("/").append(orNone(model)).append("/").append(orNone(tokenType)).append("）：\n");
+        sb.append("可计价差异 ").append(summary.get("pricedCount")).append('/')
+                .append(summary.get("diffTotal")).append(" 条");
+        if (((Number) summary.getOrDefault("skippedCount", 0)).longValue() > 0) {
+            sb.append("（").append(summary.get("skippedCount")).append(" 条状态类/文本类无金额语义，跳过）");
+        }
+        sb.append("。\n金额影响合计 ").append(summary.get("totalImpact"))
+                .append("（impact = 我方账单口径 − 对方口径；负数 = 少收，正数 = 多收）\n");
+        Object items = summary.get("items");
+        if (items instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof PriceImpactService.PriceImpact p) {
+                    sb.append("#").append(p.diffId()).append(" ").append(p.diffType()).append(" ")
+                            .append(p.bizKey()).append("：影响 ").append(p.impact()).append(" ")
+                            .append(p.currency()).append("（我方 ").append(p.leftAmount())
+                            .append(" vs 对方 ").append(p.rightAmount()).append("）\n");
+                }
+            }
+        }
+        Map<String, Object> view = new LinkedHashMap<>(summary);
+        return new RunOutcome(sb.toString(), view);
+    }
+
+    /** 差异闭环台账：认领/核销/豁免/撤销豁免/看历史/看汇总，一个工具六种用法。 */
+    public String diffLifecycle(String action, Long diffId, Long jobId, String operator, String note) {
+        String act = blankToNull(action) == null ? "" : action.trim().toUpperCase();
+        String who = blankToNull(operator) == null ? "mcp" : operator;
+        switch (act) {
+            case "CLAIM", "RESOLVE", "EXEMPT", "UNEXEMPT" -> {
+                if (diffId == null) {
+                    throw new IllegalArgumentException("action=" + act + " 需要 diffId");
+                }
+                DiffLifecycle.DiffAction applied = lifecycle.apply(diffId,
+                        DiffLifecycle.Action.valueOf(act), who, blankToNull(note));
+                return "差异 #" + applied.diffId() + " → " + applied.status() + "（动作 " + applied.action()
+                        + "，操作人 " + applied.operator() + "，"
+                        + (applied.note() == null ? "无备注" : "备注：" + applied.note()) + "）。"
+                        + "台账 append-only，历史不可改写；闭环汇总用 action=SUMMARY。";
+            }
+            case "HISTORY" -> {
+                if (diffId == null) {
+                    throw new IllegalArgumentException("action=HISTORY 需要 diffId");
+                }
+                List<DiffLifecycle.DiffAction> history = lifecycle.history(diffId);
+                if (history.isEmpty()) {
+                    return "差异 #" + diffId + " 还没有任何处置记录（当前状态 OPEN）。";
+                }
+                StringBuilder sb = new StringBuilder("差异 #").append(diffId).append(" 的处置历史（最新在前）：\n");
+                for (DiffLifecycle.DiffAction a : history) {
+                    sb.append("- ").append(a.createdAt()).append(" ").append(a.operator())
+                            .append(" ").append(a.action()).append(" → ").append(a.status())
+                            .append(a.note() == null ? "" : "（" + a.note() + "）").append('\n');
+                }
+                return sb.toString();
+            }
+            case "SUMMARY" -> {
+                DiffLifecycleService.Snapshot snap = lifecycle.summary(jobId);
+                StringBuilder sb = new StringBuilder();
+                if (snap.jobId() != null) {
+                    sb.append("任务 #").append(snap.jobId()).append(" ");
+                }
+                sb.append("差异闭环：共 ").append(snap.total()).append(" 条，闭环率 ")
+                        .append(snap.closureRate() == null ? "（无差异）"
+                                : Math.round(snap.closureRate() * 100) + "%").append("。\n");
+                snap.byStatus().forEach((status, count) ->
+                        sb.append("- ").append(status).append("：").append(count).append(" 条\n"));
+                return sb.toString();
+            }
+            default -> throw new IllegalArgumentException(
+                    "action 必须是 CLAIM / RESOLVE / EXEMPT / UNEXEMPT / HISTORY / SUMMARY，收到：" + action);
+        }
+    }
+
+    /** 争议证据包导出：落盘 CSV 并返回路径，Agent 转给用户即可直发客户/财务。 */
+    public String evidencePack(long jobId, String priceCode, String model, String tokenType, String at) {
+        Path file = evidencePack.exportToFile(jobId, blankToNull(priceCode),
+                blankToNull(model), blankToNull(tokenType), parseAt(at));
+        DiffLifecycleService.Snapshot snap = lifecycle.summary(jobId);
+        StringBuilder sb = new StringBuilder("任务 #").append(jobId).append(" 的争议证据包已导出：\n")
+                .append("文件：").append(file.toAbsolutePath()).append('\n')
+                .append("差异 ").append(snap.total()).append(" 条，当前闭环：")
+                .append(snap.byStatus().entrySet().stream()
+                        .filter(e -> e.getValue() > 0)
+                        .map(e -> e.getKey() + "=" + e.getValue())
+                        .collect(Collectors.joining("，"))).append('\n');
+        if (blankToNull(priceCode) == null) {
+            sb.append("未带 priceCode，计价列为空；要出金额影响（少收的钱）带上 priceCode/model/tokenType 再导一次。\n");
+        }
+        sb.append("列含：差异本身、两侧整行 JSON 凭证（落库时刻快照）、适用价格与生效窗、生命周期状态；UTF-8 BOM，Excel 直接打开。");
+        return sb.toString();
+    }
+
+    /** Lago 连接器：拉厂商账单落盘 CSV，提示接着用 recon_import_file 导入（agent 模式）。 */
+    public String lagoSync(String resource) {
+        LagoConnectorService.SyncResult result = lagoConnector.sync(blankToNull(resource));
+        StringBuilder sb = new StringBuilder("Lago 账单拉取完成：resource=").append(result.resource())
+                .append("，").append(result.apiRows()).append(" 行，已落盘 ")
+                .append(result.csvFile()).append('\n');
+        for (String note : result.notes()) {
+            sb.append("- ").append(note).append('\n');
+        }
+        Map<String, String> hint = result.importHint();
+        sb.append("下一步：").append(hint.get("tool")).append("（").append(hint.get("args")).append("）")
+                .append("。注意：").append(hint.get("note"));
+        return sb.toString();
+    }
+
+    private static Instant parseAt(String at) {
+        String value = blankToNull(at);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(value.trim());
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("at 必须是 ISO-8601 UTC 时间（如 2026-11-14T00:00:00Z），收到：" + at);
+        }
     }
 
     private static String formatCounts(Map<String, Long> counts) {

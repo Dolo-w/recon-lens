@@ -84,13 +84,13 @@ class ToolRegistryTest {
     }
 
     @Test
-    void Agent工具名与基础工具名不重叠_合起来正好是宿主看到的18个() {
-        // 这两处注册（目录 12 + Agent 6）本来就是漂移风险的现场：
+    void Agent工具名与基础工具名不重叠_合起来正好是宿主看到的23个() {
+        // 这两处注册（目录 17 + Agent 6）本来就是漂移风险的现场：
         // 名字在这里对不上，宿主 tools/list 与 /api/tools 就会给出不一样的世界
         assertThat(ToolNames.BASE).doesNotContainAnyElementsOf(ToolNames.AGENT);
         assertThat(ToolNames.AGENT).hasSize(6);
-        assertThat(ToolNames.BASE).hasSize(12);
-        assertThat(ToolNames.BASE.size() + ToolNames.AGENT.size()).isEqualTo(18);
+        assertThat(ToolNames.BASE).hasSize(17);
+        assertThat(ToolNames.BASE.size() + ToolNames.AGENT.size()).isEqualTo(23);
         assertThat(ToolNames.BASE).doesNotContain(ToolNames.RECALL);
         assertThat(ToolNames.AGENT).doesNotContain(ToolNames.RECALL);
         assertThat(registry.names()).doesNotContainAnyElementsOf(ToolNames.AGENT);

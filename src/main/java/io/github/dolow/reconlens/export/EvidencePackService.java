@@ -4,6 +4,7 @@ import io.github.dolow.reconlens.domain.DiffEvidence;
 import io.github.dolow.reconlens.domain.DiffLifecycle.Status;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.domain.ReconJob;
+import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.pricing.PriceImpactService;
 import io.github.dolow.reconlens.pricing.PriceImpactService.PriceImpact;
 import io.github.dolow.reconlens.store.DiffLifecycleRepository;
@@ -11,6 +12,11 @@ import io.github.dolow.reconlens.store.ReconRepository;
 
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -39,13 +45,16 @@ public class EvidencePackService {
     private final ReconRepository reconRepository;
     private final DiffLifecycleRepository lifecycleRepository;
     private final PriceImpactService priceImpactService;
+    private final ReconProperties properties;
 
     public EvidencePackService(ReconRepository reconRepository,
                                DiffLifecycleRepository lifecycleRepository,
-                               PriceImpactService priceImpactService) {
+                               PriceImpactService priceImpactService,
+                               ReconProperties properties) {
         this.reconRepository = reconRepository;
         this.lifecycleRepository = lifecycleRepository;
         this.priceImpactService = priceImpactService;
+        this.properties = properties;
     }
 
     /** 导出一个任务的证据包 CSV。priceCode 为空时计价列整体留空。 */
@@ -104,6 +113,26 @@ public class EvidencePackService {
                     p == null ? "" : nz(p.effectiveTo()));
         }
         return csv.bytes();
+    }
+
+    /**
+     * 导出并落盘（MCP 工具用：Agent 拿到的是文件路径而不是几千行 CSV 文本）。
+     * 文件名 {@code evidence-pack-job-<id>.csv}，覆盖旧包 —— 同一任务的证据包随生命周期
+     * 状态演进，最新的就是最准的；旧包在 REST 响应里永远可以重新生成。
+     */
+    public Path exportToFile(long jobId, String priceCode, String model, String tokenType, Instant at) {
+        byte[] body = exportJob(jobId, priceCode, model, tokenType, at);
+        Path dir = Path.of(properties.getExport().getDir()).toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(dir);
+            Path tmp = dir.resolve("evidence-pack-job-" + jobId + ".csv.tmp");
+            Path target = dir.resolve("evidence-pack-job-" + jobId + ".csv");
+            Files.write(tmp, body);
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            return target;
+        } catch (IOException e) {
+            throw new IllegalStateException("证据包写盘失败（目录 " + dir + "）：" + e.getMessage(), e);
+        }
     }
 
     private static Map<String, List<DiffEvidence>> groupEvidence(List<DiffEvidence> all) {

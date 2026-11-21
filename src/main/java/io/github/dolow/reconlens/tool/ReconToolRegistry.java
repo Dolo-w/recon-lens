@@ -54,7 +54,8 @@ public class ReconToolRegistry implements ToolRegistry {
         this.repository = repository;
         this.specs = List.of(
                 listRules(), listJobs(), listTables(), describeTable(), defineRule(), buildModel(), run(),
-                jobSummary(), listDiffs(), explainDiff(), explainJob(), diagnose());
+                jobSummary(), listDiffs(), explainDiff(), explainJob(), diagnose(),
+                listPrices(), priceImpact(), diffLifecycle(), evidencePack(), lagoSync());
     }
 
     @Override
@@ -714,6 +715,123 @@ public class ReconToolRegistry implements ToolRegistry {
                     ReconMcpTools.DiagnosisView view = tools.diagnose(ToolArgs.integer(a, "jobId", 0, true));
                     return ToolOutcome.of(view.text(), view.view());
                 });
+    }
+
+    // ------------------------------------------------------------------ Phase 2.5 之后的工具
+
+    private ToolSpec listPrices() {
+        return new ToolSpec(ToolNames.LIST_PRICES,
+                "列出 token 价格表的条目（priceCode/model/tokenType/单价/生效窗/阶梯）。"
+                        + "出金额影响（recon_price_impact）之前先看这里有什么价可用。",
+                """
+                {"type":"object","properties":{
+                  "priceCode":{"type":"string","description":"可选：按价格编码过滤"},
+                  "model":{"type":"string","description":"可选：按模型过滤"},
+                  "tokenType":{"type":"string","description":"可选：按 token 类型过滤（INPUT/OUTPUT/CACHE_READ…）"}},
+                 "additionalProperties":false}
+                """,
+                null,
+                a -> ToolOutcome.text(tools.listPrices(
+                        ToolArgs.text(a, "priceCode", false),
+                        ToolArgs.text(a, "model", false),
+                        ToolArgs.text(a, "tokenType", false))));
+    }
+
+    private ToolSpec priceImpact() {
+        return new ToolSpec(ToolNames.PRICE_IMPACT,
+                "计量漂移归因：把一个任务的全部可计价差异乘上价格，汇总出金额影响（我方口径 − 对方口径，负数 = 少收）。"
+                        + "「severity 是工程师的口径，金额是财务的口径」这道翻译在这里做；状态类差异没有金额语义，自动跳过并计数。",
+                """
+                {"type":"object","properties":{
+                  "jobId":{"type":"integer","description":"任务号"},
+                  "priceCode":{"type":"string","description":"价格编码，取自 recon_list_prices"},
+                  "model":{"type":"string","description":"模型名，如 gpt-4o"},
+                  "tokenType":{"type":"string","description":"token 类型，如 OUTPUT"},
+                  "at":{"type":"string","description":"可选：ISO-8601 UTC 时间戳，用于匹配生效窗（默认用任务完成时刻，月中调价回溯就传它）"}},
+                 "required":["jobId","priceCode"],"additionalProperties":false}
+                """,
+                """
+                {"type":"object","properties":{
+                  "jobId":{"type":"integer"},"diffTotal":{"type":"integer"},
+                  "pricedCount":{"type":"integer"},"skippedCount":{"type":"integer"},
+                  "totalImpact":{"type":"string","description":"负数=少收，正数=多收"}},
+                 "required":["jobId","diffTotal","pricedCount","totalImpact"],"additionalProperties":true}
+                """,
+                a -> {
+                    ReconMcpTools.RunOutcome outcome = tools.priceImpactWithView(
+                            ToolArgs.integer(a, "jobId", 0, true),
+                            ToolArgs.text(a, "priceCode", true),
+                            ToolArgs.text(a, "model", false),
+                            ToolArgs.text(a, "tokenType", false),
+                            ToolArgs.text(a, "at", false));
+                    return ToolOutcome.of(outcome.text(), outcome.view());
+                });
+    }
+
+    private ToolSpec diffLifecycle() {
+        return new ToolSpec(ToolNames.DIFF_LIFECYCLE,
+                "差异闭环台账：认领（CLAIM）/核销（RESOLVE，必须写依据）/豁免（EXEMPT，必须写依据）/撤销豁免（UNEXEMPT）；"
+                        + "action=HISTORY 看单条处置历史，action=SUMMARY 看闭环率汇总。台账 append-only，改历史等于销毁证据。",
+                """
+                {"type":"object","properties":{
+                  "action":{"type":"string","description":"CLAIM / RESOLVE / EXEMPT / UNEXEMPT / HISTORY / SUMMARY"},
+                  "diffId":{"type":"integer","description":"差异编号（CLAIM/RESOLVE/EXEMPT/UNEXEMPT/HISTORY 必填）"},
+                  "jobId":{"type":"integer","description":"任务号（action=SUMMARY 时可选；不传 = 全库 PROD 口径）"},
+                  "operator":{"type":"string","description":"操作人标识，默认 mcp"},
+                  "note":{"type":"string","description":"处置依据。RESOLVE/EXEMPT 必须写清楚，核销没有依据等于没核销"}},
+                 "required":["action"],"additionalProperties":false}
+                """,
+                null,
+                a -> {
+                    Long diffId = null;
+                    Object rawDiff = a.get("diffId");
+                    if (rawDiff instanceof Number n) {
+                        diffId = n.longValue();
+                    }
+                    Long jobId = null;
+                    Object rawJob = a.get("jobId");
+                    if (rawJob instanceof Number n) {
+                        jobId = n.longValue();
+                    }
+                    return ToolOutcome.text(tools.diffLifecycle(
+                            ToolArgs.text(a, "action", true), diffId, jobId,
+                            ToolArgs.text(a, "operator", false), ToolArgs.text(a, "note", false)));
+                });
+    }
+
+    private ToolSpec evidencePack() {
+        return new ToolSpec(ToolNames.EVIDENCE_PACK,
+                "争议证据包导出：把一个任务的差异导出成一份可直发客户/财务的 CSV（差异本身 + 两侧整行 JSON 凭证 + 适用价格 + 生命周期状态）。"
+                        + "带 priceCode/model/tokenType 会出金额影响列（少收的钱）；返回文件路径，把文件给用户即可。",
+                """
+                {"type":"object","properties":{
+                  "jobId":{"type":"integer","description":"任务号"},
+                  "priceCode":{"type":"string","description":"可选：价格编码，出计价列"},
+                  "model":{"type":"string","description":"可选：模型名"},
+                  "tokenType":{"type":"string","description":"可选：token 类型"},
+                  "at":{"type":"string","description":"可选：ISO-8601 UTC，价格匹配用"}},
+                 "required":["jobId"],"additionalProperties":false}
+                """,
+                null,
+                a -> ToolOutcome.text(tools.evidencePack(
+                        ToolArgs.integer(a, "jobId", 0, true),
+                        ToolArgs.text(a, "priceCode", false),
+                        ToolArgs.text(a, "model", false),
+                        ToolArgs.text(a, "tokenType", false),
+                        ToolArgs.text(a, "at", false))));
+    }
+
+    private ToolSpec lagoSync() {
+        return new ToolSpec(ToolNames.LAGO_SYNC,
+                "拉取 Lago 厂商账单（需先配 recon.connector.lago.api-key）：按 profile 表头落盘成 CSV（原始凭证），"
+                        + "再用 recon_import_file 导入（agent 模式）。resource=fees 是发票×计费项明细，invoices 是发票汇总。",
+                """
+                {"type":"object","properties":{
+                  "resource":{"type":"string","description":"fees（明细，对账粒度最细）或 invoices（汇总）"}},
+                 "required":["resource"],"additionalProperties":false}
+                """,
+                null,
+                a -> ToolOutcome.text(tools.lagoSync(ToolArgs.text(a, "resource", true))));
     }
 
     /** 供会话侧直接取结构化视图（不解析文本）。 */

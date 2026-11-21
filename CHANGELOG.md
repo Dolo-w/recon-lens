@@ -4,6 +4,21 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 下午：MCP 扩展 —— Agent 一句话查差异、出证据包）
+
+- 基础工具 12 → 17，新增五个常驻工具（不挂在 agent 开关下）：
+  - `recon_list_prices`：价格目录（impact 前先看有什么价可用）
+  - `recon_price_impact`：计量漂移归因，一句话出"少收的钱"（文本 + structuredContent）
+  - `recon_diff_lifecycle`：闭环台账六种用法（CLAIM/RESOLVE/EXEMPT/UNEXEMPT/HISTORY/SUMMARY），
+    RESOLVE/EXEMPT 必须带依据（note）——核销没有依据等于没核销
+  - `recon_evidence_pack`：争议证据包落盘 CSV（`recon.export.dir`），返回文件路径给用户直发
+  - `recon_lago_sync`：拉 Lago 账单落盘，返回 `recon_import_file` 导入指引（agent 模式一键接厂商）
+- `recon_diff_lifecycle` / `recon_lago_sync` 计入 ToolNames.WRITES（会话侧先确认再执行）
+- MCP instructions 同步更新；工具目录 17+6=23 处处断言（ToolRegistryTest /
+  McpToolCatalogTest / ToolWriteParityTest）
+- 新增 Phase2ToolInvocationTest(5)：直接走 ToolRegistry.invoke（与宿主同路），
+  全量 961 绿
+
 ### 新增（2026-11-21 下午：原生 Lago API 连接器，杀手级需求①）
 
 - `POST /api/connectors/lago/sync {resource: fees|invoices}`：填

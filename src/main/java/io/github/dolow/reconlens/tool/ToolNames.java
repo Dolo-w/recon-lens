@@ -12,7 +12,7 @@ public final class ToolNames {
     private ToolNames() {
     }
 
-    // ---- 基础工具（MCP 常驻 12 个；控制台与会话用同一套实现）----
+    // ---- 基础工具（MCP 常驻 17 个；控制台与会话用同一套实现）----
     public static final String LIST_RULES = "recon_list_rules";
     public static final String LIST_TABLES = "recon_list_tables";
     public static final String DESCRIBE_TABLE = "recon_describe_table";
@@ -30,6 +30,17 @@ public final class ToolNames {
     public static final String EXPLAIN_DIFF = "recon_explain_diff";
     public static final String EXPLAIN_JOB = "recon_explain_job";
     public static final String DIAGNOSE = "recon_diagnose";
+
+    /**
+     * Phase 2.5 之后补的三组能力（价格表 / 生命周期台账 / 连接器），全部是常驻基础工具：
+     * 它们读写的表（recon_price_entry / recon_diff_lifecycle）不挂在 agent 开关下，
+     * 与 {@code recon.agent.enabled} 无关。
+     */
+    public static final String LIST_PRICES = "recon_list_prices";
+    public static final String PRICE_IMPACT = "recon_price_impact";
+    public static final String DIFF_LIFECYCLE = "recon_diff_lifecycle";
+    public static final String EVIDENCE_PACK = "recon_evidence_pack";
+    public static final String LAGO_SYNC = "recon_lago_sync";
 
     // ---- Agent 专属（只在 recon.agent.enabled=true 时注册，实现在 mcp.AgentMcpTools）----
     public static final String DRAFT_RULE = "recon_draft_rule";
@@ -58,7 +69,8 @@ public final class ToolNames {
      * {@code ChatIntentTest} 再断言两边一致。
      */
     public static final java.util.Set<String> WRITES = java.util.Set.of(
-            DEFINE_RULE, BUILD_MODEL, RUN, DRAFT_RULE, REGISTER_TABLE, IMPORT_FILE, SUBMIT_APPROVAL);
+            DEFINE_RULE, BUILD_MODEL, RUN, DRAFT_RULE, REGISTER_TABLE, IMPORT_FILE, SUBMIT_APPROVAL,
+            DIFF_LIFECYCLE, LAGO_SYNC);
 
     /**
      * 工具跑完之后的"人话下一步"。以前直接拼在工具返回文本里（{@code "\n下一步：recon_list_diffs …"}），
@@ -85,5 +97,6 @@ public final class ToolNames {
     /** MCP 常驻基础工具的注册顺序（与 {@code tools/list} 输出一致，测试据此断言）。 */
     public static final java.util.List<String> BASE = java.util.List.of(
             LIST_RULES, LIST_JOBS, LIST_TABLES, DESCRIBE_TABLE, DEFINE_RULE, BUILD_MODEL, RUN,
-            JOB_SUMMARY, LIST_DIFFS, EXPLAIN_DIFF, EXPLAIN_JOB, DIAGNOSE);
+            JOB_SUMMARY, LIST_DIFFS, EXPLAIN_DIFF, EXPLAIN_JOB, DIAGNOSE,
+            LIST_PRICES, PRICE_IMPACT, DIFF_LIFECYCLE, EVIDENCE_PACK, LAGO_SYNC);
 }

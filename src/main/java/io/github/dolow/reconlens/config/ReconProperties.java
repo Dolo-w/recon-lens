@@ -24,6 +24,7 @@ public class ReconProperties {
     private final Security security = new Security();
     private final Model model = new Model();
     private final Connector connector = new Connector();
+    private final Export export = new Export();
 
     public String getRulesLocation() {
         return rulesLocation;
@@ -75,6 +76,24 @@ public class ReconProperties {
 
     public Connector getConnector() {
         return connector;
+    }
+
+    public Export getExport() {
+        return export;
+    }
+
+    /** 导出文件目录（争议证据包 CSV 等），MCP 工具与 REST 共用。 */
+    public static class Export {
+
+        private String dir = "./data/export";
+
+        public String getDir() {
+            return dir;
+        }
+
+        public void setDir(String dir) {
+            this.dir = dir;
+        }
     }
 
     /**

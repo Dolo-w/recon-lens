@@ -44,7 +44,8 @@ class McpToolCatalogTest {
     private static final List<String> BASE_TOOLS = List.of(
             "recon_list_rules", "recon_list_jobs", "recon_list_tables", "recon_describe_table", "recon_define_rule", "recon_build_model", "recon_run",
             "recon_job_summary", "recon_list_diffs", "recon_explain_diff", "recon_explain_job",
-            "recon_diagnose");
+            "recon_diagnose",
+            "recon_list_prices", "recon_price_impact", "recon_diff_lifecycle", "recon_evidence_pack", "recon_lago_sync");
 
     @Test
     void twelveToolsWhenAgentIsDisabled() {
@@ -58,7 +59,7 @@ class McpToolCatalogTest {
      * 而 mock 的 specifications() 返回 null，addAll(null) 什么也不加 —— 数量断言会假绿/假红。
      */
     @Test
-    void eighteenToolsWhenAgentIsEnabled() {
+    void twentyThreeToolsWhenAgentIsEnabled() {
         AgentMcpTools agent = agent(mock(TrialTaskRegistry.class), mock(AgentRunRepository.class),
                 mock(RuleRepository.class),
                 mock(io.github.dolow.reconlens.agent.TableRegistrar.class),
@@ -66,7 +67,7 @@ class McpToolCatalogTest {
 
         List<String> names = McpServerRunner.toolNames(runnerWithAgent(agent).specifications(jsonMapper));
 
-        assertThat(names).hasSize(18)
+        assertThat(names).hasSize(23)
                 .containsAll(BASE_TOOLS)
                 .contains("recon_draft_rule", "recon_trial_status", "recon_register_table", "recon_import_file",
                         "recon_import_status", "recon_submit_approval");
@@ -76,7 +77,7 @@ class McpToolCatalogTest {
      * 目录与宿主必须给同一份：控制台 {@code /api/tools} 数的是 {@code ToolCatalog}，
      * 宿主 {@code tools/list} 数的是 {@link McpSpecifications} 的产物；两者相等才算"一份目录"。
      *
-     * <p>2026-10-26 之前这条不成立（控制台 12、宿主 18），而且没有任何测试会说它不成立 ——
+     * <p>2026-10-26 之前这条不成立（控制台 17、宿主 23），而且没有任何测试会说它不成立 ——
      * 两个数字各自"对"，模型却照着宿主那一份去调不存在的工具。
      */
     @Test
@@ -99,7 +100,7 @@ class McpToolCatalogTest {
 
         // 宿主看到的就是目录里的，不多不少
         List<String> hostSees = McpServerRunner.toolNames(McpSpecifications.build(jsonMapper, withAgent));
-        assertThat(hostSees).containsExactlyElementsOf(withAgent.names()).hasSize(18);
+        assertThat(hostSees).containsExactlyElementsOf(withAgent.names()).hasSize(23);
     }
 
     /** structuredContent 必须与声明了 outputSchema 的工具配套：有 schema 没内容，客户端会判定结果不合规。 */
