@@ -4,6 +4,23 @@
 
 ## [未发布]
 
+### 新增（2026-11-21：差异生命周期 / 豁免台账）
+
+- **状态机 + append-only 台账**：新表 `recon_diff_lifecycle`（只有 INSERT，处置历史即审计线索，
+  改历史等于销毁证据）。差异本身（recon_diff）不可改写；当前状态 = 最新一条动作的 status，
+  无记录 = OPEN。转移：OPEN→CLAIM→CLAIMED→RELEASE→OPEN；OPEN/CLAIMED→RESOLVE/EXEMPT；
+  EXEMPTED→UNEXEMPT→OPEN（豁免错了随时能撤，不设时限）
+- **REST**（`/api/diffs`）：
+  - `POST /{id}/lifecycle` 执行动作（operator 必填；RESOLVE/EXEMPT 的 note 必填——
+    台账里一句"处理了"没有内容等于没处理）；非法转移 400 并报出当前状态与状态机说明
+  - `GET /{id}/lifecycle` 处置历史（最新在前）；`GET /lifecycle/summary` 闭环率
+    （= (RESOLVED+EXEMPTED)/total，口径与差异 summary 一致：jobId 为空只算 PROD，
+    0 差异时 closureRate 为 null 不冒充 0%/100%）
+  - `GET /api/diffs?withStatus=true` 列表逐条带 lifecycleStatus——处置视图与对账视图同一份
+- **修复**：`listDiffs` 全库分支（jobId 为空）SELECT/ORDER BY 不带表前缀，两表同名列
+  在 H2 报 Ambiguous column name —— 全局差异视图此前一查就 500
+- 回归：**917 tests / 0 failures**（`DiffLifecycleApiTest` +7）
+
 ### 新增（2026-11-21：连接器层第二步，厂商导出 profile）
 
 - **`ColumnProfile` + 内置 Lago 两个 profile**（`lago-invoice-fees` 20 列 /

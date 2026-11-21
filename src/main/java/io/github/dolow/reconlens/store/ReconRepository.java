@@ -519,20 +519,28 @@ public class ReconRepository implements DiffWriter {
     }
 
     public List<DiffRecord> listDiffs(Long jobId, String diffType, int offset, int limit) {
-        StringBuilder sql = new StringBuilder("SELECT " + DIFF_COLUMNS + " FROM recon_diff");
         List<Object> args = new java.util.ArrayList<>();
+        // WHERE / ORDER BY 的拼接顺序不能颠倒：条件必须都在 ORDER BY 之前
+        StringBuilder sql = new StringBuilder();
+        String order;
         if (jobId != null) {
-            sql.append(" WHERE job_id = ?");
+            sql.append("SELECT ").append(DIFF_COLUMNS).append(" FROM recon_diff WHERE job_id = ?");
             args.add(jobId);
+            order = " ORDER BY " + SEVERITY_ORDER + " DESC, id";
         } else {
-            // 与 countDiffs 的全库口径一致：排除试算，任务列表视图与全局视图才说得拢
-            sql.append(" JOIN recon_job j ON j.id = recon_diff.job_id WHERE j.kind = 'PROD'");
+            // 与 countDiffs 的全库口径一致：排除试算，任务列表视图与全局视图才说得拢。
+            // recon_job 与 recon_diff 都有 id/severity 同名列：不加表前缀，H2 直接报
+            // Ambiguous column name —— 全库视图此前一跑就 500
+            sql.append("SELECT d.").append(DIFF_COLUMNS.replace(", ", ", d."))
+                    .append(" FROM recon_diff d JOIN recon_job j ON j.id = d.job_id WHERE j.kind = 'PROD'");
+            order = " ORDER BY " + SEVERITY_ORDER.replace("severity", "d.severity") + " DESC, d.id";
         }
         if (diffType != null && !diffType.isBlank()) {
             sql.append(" AND diff_type = ?");
             args.add(diffType);
         }
-        sql.append(" ORDER BY ").append(SEVERITY_ORDER).append(" DESC, id LIMIT ? OFFSET ?");
+        sql.append(order);
+        sql.append(" LIMIT ? OFFSET ?");
         args.add(limit);
         args.add(offset);
         return jdbc.query(sql.toString(), diffMapper(), args.toArray());

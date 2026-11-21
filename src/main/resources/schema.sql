@@ -64,6 +64,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_diff_shard_key
 CREATE INDEX IF NOT EXISTS idx_diff_job_type ON recon_diff (job_id, diff_type);
 -- 试算的 diffsInWindow(jobId, lo, hi) 按 job_id + biz_key 范围扫；没有这条索引就是整段差异全表扫
 CREATE INDEX IF NOT EXISTS idx_diff_job_key ON recon_diff (job_id, biz_key);
+
+-- 差异生命周期台账（豁免台账）：append-only，只有 INSERT 没有改写 ——
+-- recon_diff 是对账结论快照谁都不能动；处置动作逐条留痕（谁、何时、依据）。
+-- 当前状态 = MAX(id) 那条动作的 status；没有记录 = OPEN。
+-- 闭环率 = (RESOLVED + EXEMPTED) / 总差异，财务画像的核心指标。
+CREATE TABLE IF NOT EXISTS recon_diff_lifecycle (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  diff_id    BIGINT       NOT NULL,
+  job_id     BIGINT       NOT NULL,
+  action     VARCHAR(16)  NOT NULL,  -- CLAIM / RELEASE / RESOLVE / EXEMPT / UNEXEMPT
+  status     VARCHAR(16)  NOT NULL,  -- 动作执行后的状态: OPEN / CLAIMED / RESOLVED / EXEMPTED
+  operator   VARCHAR(64)  NOT NULL,
+  note       VARCHAR(1000),          -- 核销原因 / 豁免依据，RESOLVE 与 EXEMPT 必填
+  created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_dlc_diff ON recon_diff_lifecycle (diff_id, id);
+CREATE INDEX IF NOT EXISTS idx_dlc_job ON recon_diff_lifecycle (job_id, status);
 -- T5-c 的分母来自"最近一次同 code 的 PROD 任务"，按 code + kind 倒序取一条
 CREATE INDEX IF NOT EXISTS idx_job_code_kind ON recon_job (rule_code, kind, id);
 -- listJobs 是 WHERE kind='PROD' ORDER BY id DESC：上面那条索引以 rule_code 打头，服务不了这个查询

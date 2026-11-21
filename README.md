@@ -32,6 +32,7 @@ recon-lens 把这件事拆成四件确定的事：
 - **规则 DSL**：`keyField` 逐笔 / `dimension` 复合维度 / `measures` 聚合 / 自定义 SQL；分片支持取模与 `rangeKey` 范围切分
 - **金额归一导入**：CSV 里的 `¥1,234.50` / `(1,234.50)` / `1.234.567,89` 这类脏金额自动归一成 DECIMAL，币种提示单独摘出、原始值留档 `__raw_*` 旁列——对账引擎能直接比，差异复盘能回看原文
 - **厂商导出 profile**：`recon_import_file` 传 `profile=lago-invoice-fees` / `lago-invoices`，按厂商导出表头重命名列、`_cents` 分单位自动换算成元、强制列类型；表头不匹配直接报错（带期望表头），表尾可选列照走通用推断。profile 是配置不是代码路径——接新厂商 = 加一份映射 + 一组按真实表头写的测试
+- **差异生命周期（豁免台账）**：`POST /api/diffs/{id}/lifecycle` 认领 / 核销 / 豁免 / 撤销豁免，append-only 台账逐条留痕（谁、何时、依据），`GET /api/diffs/lifecycle/summary` 出闭环率；`GET /api/diffs?withStatus=true` 列表逐条带处置状态。差异本身不可改写，RESOLVED/EXEMPT 必须写依据——报出来一百条、闭环了几条，才是"少收的钱"还在不在的真相
 - **归并式对账**：两侧流式游标 + 双指针归并，实测 `-Xmx256m` 跑 200 万×2 行 0 次 Full GC
 - **分片并行 + 断点重跑**：重跑前先清本分片旧差异，幂等
 - **水位/cut-off**：按规则配置两侧水位列，建任务时探测 `MAX(水位列)`；未就绪侧的单边缺失标 `*_PENDING` 而非冒充真缺失——`MISSING ≠ NOT_YET_ARRIVED`

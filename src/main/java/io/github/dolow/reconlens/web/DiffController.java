@@ -1,9 +1,11 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.lifecycle.DiffLifecycleService;
 import io.github.dolow.reconlens.recall.RecallAugmenter;
 import io.github.dolow.reconlens.explain.DiffKnowledgeBase;
 import io.github.dolow.reconlens.explain.ExplainService;
+import io.github.dolow.reconlens.store.DiffLifecycleRepository;
 import io.github.dolow.reconlens.store.ReconRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -28,16 +30,22 @@ public class DiffController {
     private final ReconRepository repository;
     private final ExplainService explainService;
     private final RecallAugmenter recall;
+    private final DiffLifecycleService lifecycleService;
+    private final DiffLifecycleRepository lifecycleRepository;
 
-    public DiffController(ReconRepository repository, ExplainService explainService, RecallAugmenter recall) {
+    public DiffController(ReconRepository repository, ExplainService explainService, RecallAugmenter recall,
+                          DiffLifecycleService lifecycleService, DiffLifecycleRepository lifecycleRepository) {
         this.repository = repository;
         this.explainService = explainService;
         this.recall = recall;
+        this.lifecycleService = lifecycleService;
+        this.lifecycleRepository = lifecycleRepository;
     }
 
     @GetMapping
     public Map<String, Object> list(@RequestParam(required = false) Long jobId,
                                     @RequestParam(required = false) String diffType,
+                                    @RequestParam(defaultValue = "false") boolean withStatus,
                                     @RequestParam(defaultValue = "0") int offset,
                                     @RequestParam(defaultValue = "50") int limit) {
         int safeLimit = Math.min(Math.max(limit, 1), MAX_LIMIT);
@@ -53,8 +61,99 @@ public class DiffController {
         // 只写在文案里（"共 137 条"）机器翻不动，宿主/前端还得去正则。
         body.put("truncated", truncated);
         body.put("nextOffset", truncated ? from + items.size() : null);
-        body.put("items", items);
+        // withStatus=true 时逐条带生命周期状态（OPEN/CLAIMED/RESOLVED/EXEMPTED）——
+        // 处置视图和对账视图用同一份列表，避免"全局口径"和"台账口径"对不上
+        body.put("items", withStatus ? withStatus(items) : items);
         return body;
+    }
+
+    /** 差异 + 当前处置状态。状态键固定 lifecycleStatus，没有台账记录 = OPEN。 */
+    private List<Map<String, Object>> withStatus(List<DiffRecord> items) {
+        Map<Long, io.github.dolow.reconlens.domain.DiffLifecycle.Status> statuses =
+                lifecycleRepository.currentStatuses(items.stream().map(DiffRecord::id).toList());
+        List<Map<String, Object>> out = new java.util.ArrayList<>(items.size());
+        for (DiffRecord d : items) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("id", d.id());
+            row.put("jobId", d.jobId());
+            row.put("shardId", d.shardId());
+            row.put("diffType", d.diffType());
+            row.put("severity", d.severity());
+            row.put("bizKey", d.bizKey());
+            row.put("field", d.field());
+            row.put("leftValue", d.leftValue());
+            row.put("rightValue", d.rightValue());
+            row.put("deltaValue", d.deltaValue());
+            row.put("deltaRatio", d.deltaRatio());
+            row.put("explanation", d.explanation());
+            row.put("lifecycleStatus", statuses.getOrDefault(d.id(),
+                    io.github.dolow.reconlens.domain.DiffLifecycle.Status.OPEN).name());
+            out.add(row);
+        }
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    // 差异生命周期（豁免台账）：claim / release / resolve / exempt / unexempt
+
+    /** 执行一次处置动作。RESOLVE 与 EXEMPT 必须带 note（核销原因 / 豁免依据）。 */
+    @PostMapping("/{id}/lifecycle")
+    public Map<String, Object> act(@PathVariable long id, @RequestBody LifecycleRequest request) {
+        io.github.dolow.reconlens.domain.DiffLifecycle.Action action;
+        String raw = request.action() == null ? "" : request.action().trim().toUpperCase(java.util.Locale.ROOT);
+        try {
+            action = io.github.dolow.reconlens.domain.DiffLifecycle.Action.valueOf(raw);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("未知 action: " + request.action()
+                    + "，可用: CLAIM / RELEASE / RESOLVE / EXEMPT / UNEXEMPT");
+        }
+        DiffActionSnapshot snapshot = DiffActionSnapshot.of(
+                lifecycleService.apply(id, action, request.operator(), request.note()));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", id);
+        body.put("action", snapshot.action());
+        body.put("status", snapshot.status());
+        body.put("operator", snapshot.operator());
+        body.put("note", snapshot.note());
+        body.put("actedAt", snapshot.actedAt());
+        return body;
+    }
+
+    /** 单条差异的处置历史（append-only 台账，最新在前）。 */
+    @GetMapping("/{id}/lifecycle")
+    public Map<String, Object> history(@PathVariable long id) {
+        List<io.github.dolow.reconlens.domain.DiffLifecycle.DiffAction> items = lifecycleService.history(id);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", id);
+        body.put("status", items.isEmpty()
+                ? io.github.dolow.reconlens.domain.DiffLifecycle.Status.OPEN.name()
+                : items.get(0).status().name());
+        body.put("history", items);
+        return body;
+    }
+
+    /** 闭环率汇总：jobId 为空 = 全库且只算 PROD 任务（与 /summary 同口径）。 */
+    @GetMapping("/lifecycle/summary")
+    public Map<String, Object> lifecycleSummary(@RequestParam(required = false) Long jobId) {
+        DiffLifecycleService.Snapshot s = lifecycleService.summary(jobId);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("jobId", jobId);
+        body.put("total", s.total());
+        Map<String, Long> byStatus = new LinkedHashMap<>();
+        s.byStatus().forEach((k, v) -> byStatus.put(k.name(), v));
+        body.put("byStatus", byStatus);
+        // closureRate null = 没有差异；0/0 不冒充 0% 也不冒充 100%
+        body.put("closureRate", s.closureRate());
+        return body;
+    }
+
+    private record DiffActionSnapshot(io.github.dolow.reconlens.domain.DiffLifecycle.Action action,
+                                      io.github.dolow.reconlens.domain.DiffLifecycle.Status status,
+                                      String operator, String note, java.time.Instant actedAt) {
+
+        static DiffActionSnapshot of(io.github.dolow.reconlens.domain.DiffLifecycle.DiffAction a) {
+            return new DiffActionSnapshot(a.action(), a.status(), a.operator(), a.note(), a.createdAt());
+        }
     }
 
     @GetMapping("/summary")
@@ -138,6 +237,10 @@ public class DiffController {
 
     /** 人工修正归因的请求体。{@code operator} 必填 —— 不知道谁改的，就没法追溯。 */
     public record AttributionRequest(String cause, String action, String operator) {
+    }
+
+    /** 差异处置请求体。{@code operator} 必填；RESOLVE / EXEMPT 时 {@code note} 必填。 */
+    public record LifecycleRequest(String action, String operator, String note) {
     }
 
     @org.springframework.web.bind.annotation.ExceptionHandler(IllegalArgumentException.class)

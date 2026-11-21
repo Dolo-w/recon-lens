@@ -75,6 +75,22 @@ CREATE TABLE IF NOT EXISTS recon_diff (
   KEY idx_diff_job_key (job_id, biz_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 差异生命周期台账（豁免台账）：append-only，只有 INSERT 没有改写 ——
+-- recon_diff 是对账结论快照谁都不能动；处置动作逐条留痕（谁、何时、依据）。
+-- 当前状态 = MAX(id) 那条动作的 status；没有记录 = OPEN。
+CREATE TABLE IF NOT EXISTS recon_diff_lifecycle (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  diff_id    BIGINT       NOT NULL,
+  job_id     BIGINT       NOT NULL,
+  action     VARCHAR(16)  NOT NULL,
+  status     VARCHAR(16)  NOT NULL,
+  operator   VARCHAR(64)  NOT NULL,
+  note       VARCHAR(1000),
+  created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_dlc_diff (diff_id, id),
+  KEY idx_dlc_job (job_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ============ 规则库：使用方可以不改代码、不重启就新增/修改对账维度 ============
 CREATE TABLE IF NOT EXISTS recon_rule (
   id          BIGINT AUTO_INCREMENT PRIMARY KEY,
