@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.ChatTurn;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

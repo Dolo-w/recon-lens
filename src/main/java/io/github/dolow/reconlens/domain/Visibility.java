@@ -1,4 +1,4 @@
-package io.github.dolow.reconlens.chat;
+package io.github.dolow.reconlens.domain;
 
 /**
  * 谁能读这条会话。

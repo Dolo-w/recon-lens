@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.SessionScope;
 import io.github.dolow.reconlens.chat.plan.ChatPlan;
 import io.github.dolow.reconlens.chat.plan.ChatPlanner;
 import java.util.ArrayList;

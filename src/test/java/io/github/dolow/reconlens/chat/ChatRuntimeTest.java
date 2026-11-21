@@ -1,5 +1,7 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.SessionScope;
+import io.github.dolow.reconlens.domain.ChatSession;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;

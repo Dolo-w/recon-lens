@@ -1,5 +1,7 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.SessionScope;
+import io.github.dolow.reconlens.domain.ChatSession;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dolow.reconlens.store.AgentRunRepository;
 import io.github.dolow.reconlens.store.ChatSessionRepository;

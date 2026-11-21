@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.ChatTurn;
 import io.github.dolow.reconlens.chat.plan.LlmChatClient;
 import java.util.LinkedHashSet;
 import java.util.List;

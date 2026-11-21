@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.SessionScope;
 import java.util.List;
 import java.util.Map;
 

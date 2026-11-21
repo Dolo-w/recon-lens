@@ -1,4 +1,4 @@
-package io.github.dolow.reconlens.chat;
+package io.github.dolow.reconlens.domain;
 
 import java.time.Instant;
 import java.util.List;

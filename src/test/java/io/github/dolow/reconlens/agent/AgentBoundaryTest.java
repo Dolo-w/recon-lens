@@ -1,5 +1,10 @@
 package io.github.dolow.reconlens.agent;
 
+import io.github.dolow.reconlens.domain.Visibility;
+import io.github.dolow.reconlens.domain.SessionScope;
+import io.github.dolow.reconlens.domain.SessionHit;
+import io.github.dolow.reconlens.domain.ChatTurn;
+import io.github.dolow.reconlens.domain.ChatSession;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
@@ -41,6 +46,29 @@ class AgentBoundaryTest {
                     + "recon.agent.enabled=false 就不再等于\"回到引入 Agent 之前\"。"
                     + "唯一的例外是 mcp.AgentMcpTools —— 它是 Agent 能力的 MCP 注册桥，"
                     + "条件装配 + List 注入保证了 Bean 层面的隔离");
+
+    /**
+     * chat 与 agent 同一条可插拔纪律（评审短板 #14 的另一半）：会话/记忆/规划挂在
+     * {@code recon.agent.enabled} 下，关掉开关时 chat 的 Bean 全部退场。
+     * 允许依赖 chat 的只有 {@code web} 的几个 Chat*Controller（条件装配的入口）；
+     * 引擎层（engine / dsl / tool / mcp / pricing / lifecycle / export / connector / store / domain）
+     * 碰它一下，"关掉 Agent = 回到引入之前"就再度失真。
+     *
+     * <p>2026-11-21 之前的现状是反面教材：会话领域模型（ChatSession / ChatTurn / SessionScope /
+     * SessionHit / Visibility）放在 chat 包、而仓储 ChatSessionRepository 在 store 包 ——
+     * 最底层的 store 反向 import 了最上层的 chat。修法不是删仓储，而是模型归位 domain
+     * （store 与 chat 都依赖 domain，方向才顺）。这条规则保证同类倒置不再回来。</p>
+     */
+    @ArchTest
+    static final ArchRule 除_web_外不得依赖_chat = noClasses()
+            .that().resideOutsideOfPackage("io.github.dolow.reconlens.chat..")
+            .and().doNotHaveFullyQualifiedName("io.github.dolow.reconlens.web.ChatController")
+            .and().doNotHaveFullyQualifiedName("io.github.dolow.reconlens.web.ChatSessionController")
+            .and().doNotHaveFullyQualifiedName("io.github.dolow.reconlens.web.ChatRecallController")
+            .and().doNotHaveFullyQualifiedName("io.github.dolow.reconlens.web.ChatStatsController")
+            .should().dependOnClassesThat().resideInAPackage("io.github.dolow.reconlens.chat..")
+            .because("chat 是可选子系统（挂 recon.agent.enabled）：store 反向 import chat 的"
+                    + "领域模型是最底层的层次倒置 —— 模型归位 domain 后，这条规则钉死依赖方向");
 
     @ArchTest
     static final ArchRule agent_不得依赖_web_与_mcp = noClasses()

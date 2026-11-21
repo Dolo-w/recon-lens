@@ -1,14 +1,14 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.chat.ChatClaims;
-import io.github.dolow.reconlens.chat.ChatSession;
+import io.github.dolow.reconlens.domain.ChatSession;
 import io.github.dolow.reconlens.chat.ChatSessionService;
 import io.github.dolow.reconlens.chat.ChatSummaryService;
-import io.github.dolow.reconlens.chat.ChatTurn;
+import io.github.dolow.reconlens.domain.ChatTurn;
 import io.github.dolow.reconlens.chat.SessionNotFoundException;
 import io.github.dolow.reconlens.chat.SessionNotWritableException;
-import io.github.dolow.reconlens.chat.SessionScope;
-import io.github.dolow.reconlens.chat.Visibility;
+import io.github.dolow.reconlens.domain.SessionScope;
+import io.github.dolow.reconlens.domain.Visibility;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;

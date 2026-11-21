@@ -1,4 +1,4 @@
-package io.github.dolow.reconlens.chat;
+package io.github.dolow.reconlens.domain;
 
 /**
  * 会话读取的唯一收窄入口（ADR-0001 D8 / N8）。

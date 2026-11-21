@@ -1,5 +1,6 @@
 package io.github.dolow.reconlens.web;
 
+import io.github.dolow.reconlens.domain.SessionScope;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

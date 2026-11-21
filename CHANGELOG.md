@@ -4,6 +4,12 @@
 
 ## [未发布]
 
+### 修复（2026-11-21 下午：评审短板 #14 收尾 —— chat 层次倒置清零）
+
+- 会话领域模型（`ChatSession` / `ChatTurn` / `SessionHit` / `SessionScope` / `Visibility`）从 chat 包归位 domain 包：此前最底层的 store（`ChatSessionRepository`）反向 import 最上层的 chat，层次倒置
+- AgentBoundaryTest 新增规则：除 web 的 4 个 Chat*Controller 外，任何包不得依赖 chat —— 与 agent 可插拔纪律对称，关掉 `recon.agent.enabled` 时 chat Bean 全部退场且引擎零依赖
+- 全量 962 绿（961→962，+1 为新边界规则）
+
 ### 新增（2026-11-21 下午：MCP 扩展 —— Agent 一句话查差异、出证据包）
 
 - 基础工具 12 → 17，新增五个常驻工具（不挂在 agent 开关下）：

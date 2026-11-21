@@ -1,10 +1,10 @@
 package io.github.dolow.reconlens.store;
 
-import io.github.dolow.reconlens.chat.ChatSession;
-import io.github.dolow.reconlens.chat.SessionHit;
-import io.github.dolow.reconlens.chat.ChatTurn;
-import io.github.dolow.reconlens.chat.SessionScope;
-import io.github.dolow.reconlens.chat.Visibility;
+import io.github.dolow.reconlens.domain.ChatSession;
+import io.github.dolow.reconlens.domain.SessionHit;
+import io.github.dolow.reconlens.domain.ChatTurn;
+import io.github.dolow.reconlens.domain.SessionScope;
+import io.github.dolow.reconlens.domain.Visibility;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;

@@ -1,8 +1,8 @@
 package io.github.dolow.reconlens.web;
 
-import io.github.dolow.reconlens.chat.SessionHit;
+import io.github.dolow.reconlens.domain.SessionHit;
 import io.github.dolow.reconlens.chat.SessionRecallService;
-import io.github.dolow.reconlens.chat.SessionScope;
+import io.github.dolow.reconlens.domain.SessionScope;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;

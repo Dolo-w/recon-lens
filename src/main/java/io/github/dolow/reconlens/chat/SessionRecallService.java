@@ -1,5 +1,7 @@
 package io.github.dolow.reconlens.chat;
 
+import io.github.dolow.reconlens.domain.SessionScope;
+import io.github.dolow.reconlens.domain.SessionHit;
 import io.github.dolow.reconlens.store.ChatSessionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
