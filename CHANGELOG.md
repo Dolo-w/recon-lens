@@ -4,6 +4,20 @@
 
 ## [未发布]
 
+### 新增（2026-11-21 下午：token 感知价格规则表，Phase 2.5）
+
+- 新表 `recon_price_entry`：`price_code × model × token_type × 时间窗 × tier` 五维价格，
+  单价口径=每百万 token（行业报价惯例），金额 = tokens × price / 1_000_000（BigDecimal 全程）
+- 月中调价回溯：按**请求时间戳**匹配所在窗（左闭右开），11-14 请求走旧价 11-15 走新价
+- cache write/read 分价、阶梯价按本次请求 tokens 落档（下含上不含）
+- 录入时重叠检测 fail-loud（时间窗×tier 相交即拒），model/tokenType 归一存储，
+  tierMin 统一归一 0 保证唯一索引真正生效
+- 解析 fail-loud：未命中报可用窗列表（"调价衔接漏了一段"可直接看出）、歧义报撞车
+  条目并明说"绝不允许取第一条"——取第一条等于把配置错误洗成账单对上了
+- REST：GET/POST/DELETE /api/prices + POST /api/prices/resolve（单笔试算）
+- 新增 TokenPriceResolverTest(7) + PriceApiTest(5)，全量 942 绿
+
+
 ### 新增（2026-11-21 下午：差异原始行凭证）
 
 - 每条差异落库时在同一事务里快照两侧整行 JSON 进 `recon_diff_evidence`（append-only，

@@ -451,3 +451,21 @@ CREATE TABLE IF NOT EXISTS bill_right (
   updated_at  TIMESTAMP     NOT NULL,
   KEY idx_right_order (order_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- token 感知价格规则表（快照/口径见 schema.sql 同名表注释）
+CREATE TABLE IF NOT EXISTS recon_price_entry (
+  id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+  price_code    VARCHAR(64)   NOT NULL,
+  model         VARCHAR(128)  NOT NULL,
+  token_type    VARCHAR(32)   NOT NULL,
+  unit_price_per_million DECIMAL(20,8) NOT NULL,
+  currency      VARCHAR(8)    NOT NULL DEFAULT 'CNY',
+  effective_from TIMESTAMP   NOT NULL,
+  effective_to   TIMESTAMP    NULL,
+  tier_min      DECIMAL(24,2) NOT NULL DEFAULT 0,
+  tier_max      DECIMAL(24,2) NULL,
+  source_note   VARCHAR(255)  NULL,
+  created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_price_entry (price_code, model, token_type, effective_from, tier_min),
+  KEY idx_price_lookup (price_code, model, token_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

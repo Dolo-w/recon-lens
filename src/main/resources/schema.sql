@@ -491,3 +491,25 @@ CREATE TABLE IF NOT EXISTS recon_eval_case (
   passed          BOOLEAN      NOT NULL,
   created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- token 感知价格规则表（Phase 2.5 护城河）：model × 时间段 × 单价。
+-- cache write/read 分价、阶梯价、月中调价按请求时间戳回溯匹配旧价格 ——
+-- 这是"通用引擎"和"懂 AI 成本引擎"的分水岭：比对内核不知道 1M tokens 值多少钱，
+-- 价格表知道；计量漂移归因（我方 token × 单价 vs 厂商账单）从这里出数。
+-- 单价口径：每百万 token（行业报价惯例），金额 = tokens × price / 1_000_000。
+CREATE TABLE IF NOT EXISTS recon_price_entry (
+  id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+  price_code    VARCHAR(64)   NOT NULL,
+  model         VARCHAR(128)  NOT NULL,
+  token_type    VARCHAR(32)   NOT NULL,
+  unit_price_per_million DECIMAL(20,8) NOT NULL,
+  currency      VARCHAR(8)    NOT NULL DEFAULT 'CNY',
+  effective_from TIMESTAMP   NOT NULL,
+  effective_to   TIMESTAMP    NULL,
+  tier_min      DECIMAL(24,2) NOT NULL DEFAULT 0,
+  tier_max      DECIMAL(24,2) NULL,
+  source_note   VARCHAR(255)  NULL,
+  created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_price_entry ON recon_price_entry (price_code, model, token_type, effective_from, tier_min);
+CREATE INDEX IF NOT EXISTS idx_price_lookup ON recon_price_entry (price_code, model, token_type);
