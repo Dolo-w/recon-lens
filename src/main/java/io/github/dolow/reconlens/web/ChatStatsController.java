@@ -1,12 +1,14 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.chat.ChatIntent;
+import io.github.dolow.reconlens.chat.FallbackMiningService;
 import io.github.dolow.reconlens.chat.RoutingMetrics;
 import io.github.dolow.reconlens.store.ChatStatsRepository;
 import io.github.dolow.reconlens.tool.ToolNames;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
@@ -28,10 +30,13 @@ public class ChatStatsController {
 
     private final ChatStatsRepository stats;
     private final RoutingMetrics routing;
+    private final FallbackMiningService mining;
 
-    public ChatStatsController(ChatStatsRepository stats, RoutingMetrics routing) {
+    public ChatStatsController(ChatStatsRepository stats, RoutingMetrics routing,
+                               FallbackMiningService mining) {
         this.stats = stats;
         this.routing = routing;
+        this.mining = mining;
     }
 
     @GetMapping
@@ -53,6 +58,23 @@ public class ChatStatsController {
         body.put("avgUserTurnsPerSession", stats.avgTurnsPerSession());
         body.put("routing", routing.snapshot());
         body.put("note", "emptyToolTurns 是「空手回」的轮次数，含 HELP/审批说明这类合理空手回，只适合看趋势");
+        return body;
+    }
+
+    /**
+     * fallback 语料挖掘出口（路由评估闭环的最后一公里）：
+     * 「没听懂」的原话按路由归一化分组、按频次排序——反复出现的说法就是词表缺口。
+     * goldenYaml 是可直接粘进 {@code src/test/resources/golden/intent-golden.yml}
+     * 的片段（intent 留 TODO 人工填），粘完测试会替你验证词表是否真认识这条说法。
+     */
+    @GetMapping("/fallbacks")
+    public Map<String, Object> fallbacks(@RequestParam(defaultValue = "2") int minCount,
+                                         @RequestParam(defaultValue = "20") int limit) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("groups", mining.mine(minCount, limit));
+        body.put("goldenYaml", mining.goldenYaml(minCount, limit));
+        body.put("note", "归一化分组与词表 CANON 同源；频次=真实痛点次数。确认的说法粘进 "
+                + "golden/intent-golden.yml 卡住回归，然后它就不再是 fallback");
         return body;
     }
 }

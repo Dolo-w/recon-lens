@@ -1,0 +1,79 @@
+# 意图 golden 回归集 —— 路由层的「golden benchmark」。
+#
+# 业界共识（2026）：golden set 卡住每一次 prompt/词表/模型改动，是原型与系统的分界线。
+# 用法：
+#   1. /api/chat/stats/fallbacks 挖出反复出现的「没听懂」说法；
+#   2. 人工确认它应该是什么意图，把对应说法按下面的格式补到 cases 里（intent 必填）；
+#   3. IntentGoldenTest 会逐条跑词表路由断言——从此这条说法被测试卡住，
+#      CANON/档位顺序/正则的任何改动跑歪了它都会翻红；红了一条先改路由再合码。
+# 纪律：只钉 intent 不钉参数（参数归 SlotProtocol/参数抽取测试管）；没听懂兜底也值得钉。
+cases:
+  # HELP：包括「随便说一句」这种兜底——期望就是没听懂，别打错别的东西
+  - text: "你能做什么"
+    intent: HELP
+  - text: "有什么功能"
+    intent: HELP
+  - text: "随便说一句"
+    intent: HELP
+
+  # 规则列表
+  - text: "有哪些规则"
+    intent: LIST_RULES
+  - text: "现在有哪些对账规则"
+    intent: LIST_RULES
+
+  # 起草
+  - text: "帮我新建一条对账规则"
+    intent: DEFINE_RULE
+  - text: "我想加一条按订单号对的口径"
+    intent: DEFINE_RULE
+  - text: "搞一条规则出来"
+    intent: DEFINE_RULE
+
+  # 差异
+  - text: "新增的差异有哪些"
+    intent: LIST_DIFFS
+  - text: "看差异"
+    intent: LIST_DIFFS
+
+  # 任务概览
+  - text: "123 号任务怎么样"
+    intent: JOB_SUMMARY
+  - text: "这次对账跑完了吗"
+    intent: JOB_SUMMARY
+  - text: "这单扫了多少行"
+    intent: JOB_SUMMARY
+
+  # 归因（顺序敏感：归因先于看差异）
+  - text: "为什么差这么多"
+    intent: EXPLAIN_JOB
+  - text: "第 137 条差异为什么"
+    intent: EXPLAIN_DIFF
+
+  # 跑批
+  - text: "跑一下 BILL_VS_SETTLE"
+    intent: RUN
+  - text: "按 BILL_VS_SETTLE 对一次账"
+    intent: RUN
+
+  # 重跑
+  - text: "重跑 123 号任务"
+    intent: RETRY
+  - text: "把失败的分片重新跑一遍"
+    intent: RETRY
+
+  # 审批 / 试算 / 建模型
+  - text: "我要批准这条规则"
+    intent: APPROVE
+  - text: "规则能不能批"
+    intent: APPROVE
+  - text: "这条规则试算通过了吗"
+    intent: TRIAL_STATUS
+  - text: "给 BILL_VS_SETTLE 建模型"
+    intent: BUILD_MODEL
+
+  # 数据面
+  - text: "有哪些数据"
+    intent: LIST_DATA
+  - text: "库里有几张表"
+    intent: LIST_DATA

@@ -62,20 +62,26 @@ class GoWorkerGoldenSetTest {
 
     private static Path workerBinary;
 
+    /** 探测到的 go 命令：裸名（走 PATH）或绝对路径。保持原始字符串，不做 toAbsolutePath。 */
+    private static String goCommand;
+
     private String previousExecution;
     private String previousWorkerPath;
     private String previousWorkerDir;
 
     @BeforeAll
     static void buildWorker() throws IOException, InterruptedException {
-        Path go = findGo();
-        Assumptions.assumeTrue(go != null, "本机没有 Go 工具链，跳过 golden-set 对照（CI 上有）");
+        goCommand = findGo();
+        Assumptions.assumeTrue(goCommand != null, "本机没有 Go 工具链，跳过 golden-set 对照（CI 上有）");
         Path projectRoot = Path.of("").toAbsolutePath().normalize();
         Path goWorkerDir = projectRoot.resolve("go-worker");
         Assumptions.assumeTrue(Files.isDirectory(goWorkerDir), "go-worker 目录不存在，跳过");
         workerBinary = workRoot.resolve("recon-worker"
                 + (System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("win") ? ".exe" : ""));
-        Process process = new ProcessBuilder(go.toAbsolutePath().toString(), "build", "-o",
+        // 关键：可执行文件名保持探测到的原始形态（裸名交给 ProcessBuilder 按 PATH 解析，
+        // 绝对路径原样用）。这里绝不能 toAbsolutePath——JVM 的 cwd 是项目根而不是
+        // go-worker，把裸名 "go" 拼成 "项目根/go" 会造出一个不存在的路径。
+        Process process = new ProcessBuilder(goCommand, "build", "-o",
                 workerBinary.toAbsolutePath().toString(), ".")
                 .directory(goWorkerDir.toFile())
                 .redirectErrorStream(true)
@@ -86,7 +92,7 @@ class GoWorkerGoldenSetTest {
                 "worker 编译失败（exit=" + (ok ? process.exitValue() : "timeout") + "）:\n" + output);
     }
 
-    private static Path findGo() {
+    private static String findGo() {
         for (String candidate : List.of("go",
                 "C:\\Program Files\\Go\\bin\\go.exe",
                 "/usr/local/go/bin/go",
@@ -94,8 +100,9 @@ class GoWorkerGoldenSetTest {
             try {
                 Process p = new ProcessBuilder(candidate, "version").redirectErrorStream(true).start();
                 if (p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0) {
-                    // Windows 上直接用 "go" 依赖 PATH；能跑通就说明找得到
-                    return Path.of(candidate.contains("\\") || candidate.startsWith("/") ? candidate : candidate);
+                    // 返回原始形态：裸名在 build 时同样走 PATH（CreateProcess/exec 都按
+                    // PATH + directory 解析），绝对路径候选本来就是可执行的完整地址
+                    return candidate;
                 }
             } catch (IOException | InterruptedException e) {
                 // 试下一个候选

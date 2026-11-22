@@ -147,6 +147,12 @@ public class ChatConfiguration {
         return new RoutingMetrics(jdbcTemplate);
     }
 
+    /** fallback 语料挖掘：归一化分组 + 频次排序，出口接 golden 回归集。 */
+    @Bean
+    public FallbackMiningService fallbackMiningService(JdbcTemplate jdbcTemplate) {
+        return new FallbackMiningService(jdbcTemplate);
+    }
+
     /**
      * 人话总结。默认开，但它自己会在没配 key 时变成空操作（{@link ChatNarrator#active()}）。
      *

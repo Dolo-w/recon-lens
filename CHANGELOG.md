@@ -4,6 +4,20 @@
 
 ## [未发布]
 
+### 新增（2026-11-22 下午：fallback 挖掘出口 + golden 意图回归集 —— 路由闭环最后一公里）
+
+- `FallbackMiningService` + `GET /api/chat/stats/fallbacks?minCount=2&limit=20`：把 recon_chat_fallback
+  收到的「没听懂」原话按**路由归一化**（与词表 CANON 同源）分组、频次降序——反复出现的说法就是词表缺口；
+  同时输出可直接粘进 golden 语料的 YAML 片段（intent 留 TODO 人工确认）。表不存在按空处理，不带炸 stats 页面
+- **golden 意图回归集**（`src/test/resources/golden/intent-golden.yml`，26 条手工核证语料）+ `IntentGoldenTest`：
+  业界共识「golden benchmark 卡住每次改动」落地——每条说法跑真实词表路由断言期望意图；只钉 intent 不钉参数；
+  文件缺失/cases 为空/intent=TODO 都算失败（防空集假绿）；fallback 挖掘确认的新说法沉淀进来即被永久卡住
+- 修复 `GoWorkerGoldenSetTest` 潜伏 bug：`findGo()` 探测到 PATH 里的 go 后返回裸相对路径，
+  build 时 `toAbsolutePath()` 基于 JVM cwd（项目根）拼出不存在的 `项目根/go` → 之前本机一直是
+  assumeTrue 跳过的假绿；现在保持原始命令形态（裸名走 PATH），本机 golden-set 真跑 4/4 绿
+
+全量 1041 绿（1034 → 1041，+7：FallbackMining 5 + IntentGolden 2；GoWorkerGoldenSet 4 条由 skip 转真跑）。
+
 ### 新增（2026-11-22：意图路由补齐业界共识栈 —— 槽位状态机 / 评估闭环 / 意图缓存 / 复合意图）
 
 - **通用槽位协议（SlotProtocol，missingSlots 的落地）**：追问必挂起、一次只问一个、补答只填参数不重判意图。
