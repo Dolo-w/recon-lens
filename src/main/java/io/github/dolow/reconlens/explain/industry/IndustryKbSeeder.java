@@ -1,22 +1,24 @@
 package io.github.dolow.reconlens.explain.industry;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dolow.reconlens.domain.IndustryKnowledge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Component;
+import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 /**
@@ -31,7 +33,8 @@ import java.util.stream.Stream;
 public class IndustryKbSeeder implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(IndustryKbSeeder.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** YAML 解析用 SnakeYAML：spring-boot 自带（application.yml 就是它解析的），零新增依赖面。 */
+    private final Yaml yamlParser = new Yaml();
 
     private final IndustryKbService service;
     private final String externalDir;
@@ -64,13 +67,19 @@ public class IndustryKbSeeder implements ApplicationRunner {
         }
     }
 
-    private List<String> loadAll() {
+    List<String> loadAll() {
         List<String> yamls = new ArrayList<>();
         try {
-            Path cpDir = new ClassPathResource("patterns/industry-knowledge").getFile().toPath();
-            collect(yamls, cpDir);
+            // PathMatchingResourcePatternResolver 而非 getFile()：后者在 jar 内对目录资源必炸，
+            // 症状就是"本地跑有种子、生产 jar 里静默归零"
+            PathMatchingResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
+            for (Resource resource : resolver.getResources("classpath*:patterns/industry-knowledge/*.yml")) {
+                try (InputStream in = resource.getInputStream()) {
+                    yamls.add(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+                }
+            }
         } catch (IOException e) {
-            // classpath 目录不可达（打成 jar 后 getFile 失败）：不致命，外部目录还有机会
+            // classpath 种子不可达：不致命，外部目录还有机会
             log.debug("classpath 种子目录不可达: {}", e.toString());
         }
         if (externalDir != null && !externalDir.isBlank()) {
@@ -96,41 +105,50 @@ public class IndustryKbSeeder implements ApplicationRunner {
         }
     }
 
-    /** 解析 seed YAML 为候选条目（手动解析极简结构，避免为 seeds 引入 snakeyaml 依赖面）。 */
+    /** 解析 seed YAML 为候选条目（SnakeYAML：Jackson readTree 不认识 YAML，曾让 24 条种子静默归零）。 */
     List<IndustryKnowledge> parse(String yaml) {
         List<IndustryKnowledge> entries = new ArrayList<>();
-        JsonNode root;
+        Object root;
         try {
-            root = MAPPER.readTree(yaml);
-        } catch (IOException e) {
+            root = yamlParser.load(yaml);
+        } catch (RuntimeException e) {
             log.warn("种子 YAML 解析失败，整文件跳过: {}", e.toString());
             return entries;
         }
-        for (JsonNode node : root.path("entries")) {
+        if (!(root instanceof Map<?, ?> rootMap) || !(rootMap.get("entries") instanceof List<?> list)) {
+            return entries;
+        }
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> node)) {
+                continue;
+            }
             try {
-                JsonNode when = node.path("appliesWhen");
+                Map<?, ?> when = node.get("appliesWhen") instanceof Map<?, ?> w ? w : Map.of();
                 IndustryKnowledge.AppliesWhen applies = new IndustryKnowledge.AppliesWhen(
-                        toStringList(when.path("ruleCodes")),
-                        toStringList(when.path("diffTypes")),
-                        when.path("fieldRegex").asText(null),
-                        toStringList(when.path("directions")));
-                entries.add(new IndustryKnowledge(null, node.path("key").asText(),
-                        applies, node.path("text").asText(), node.path("source").asText(),
+                        toStringList(when.get("ruleCodes")),
+                        toStringList(when.get("diffTypes")),
+                        when.get("fieldRegex") == null ? null : String.valueOf(when.get("fieldRegex")),
+                        toStringList(when.get("directions")));
+                entries.add(new IndustryKnowledge(null, text(node.get("key")),
+                        applies, text(node.get("text")), text(node.get("source")),
                         IndustryKnowledge.Origin.SEED,
                         IndustryKnowledge.Origin.SEED.initialConfidence(),
                         IndustryKnowledge.Status.ACTIVE, 0, 0, null));
             } catch (RuntimeException e) {
-                log.warn("种子条目解析失败，跳过: {} — {}", node.path("key").asText("?"), e.toString());
+                log.warn("种子条目解析失败，跳过: {} — {}", node.get("key"), e.toString());
             }
         }
         return entries;
     }
 
-    private static List<String> toStringList(JsonNode array) {
-        List<String> out = new ArrayList<>();
-        if (array.isArray()) {
-            array.forEach(n -> out.add(n.asText()));
+    private static String text(Object o) {
+        return o == null ? "" : String.valueOf(o);
+    }
+
+    private static List<String> toStringList(Object o) {
+        if (o instanceof List<?> list) {
+            return list.stream().map(String::valueOf).toList();
         }
-        return out;
+        return List.of();
     }
 }
