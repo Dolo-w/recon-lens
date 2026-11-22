@@ -1,5 +1,6 @@
 # 业界知识种子语料（SEED 通道，confidence 0.7）
 # 条目 = 适用条件(appliesWhen) + 知识短句(text) + 来源(source)。
+# 收录标准见 docs/industry-knowledge-criteria.md（定义/该收/红线/来源分级/好条目五标准）。
 # 适用条件全部可选；全空条目会被机器准入拒绝（无条件=对每条差异注入=常驻加税）。
 # fields: entries[].key / appliesWhen.ruleCodes[].diffTypes[].fieldRegex.directions[] / text / source
 # 想投放更多条目：外部目录（recon.explain.industry.dir）同名机制，mtime 热加载。

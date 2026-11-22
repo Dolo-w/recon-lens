@@ -49,6 +49,11 @@ public class KnowledgeHarvestService {
             3. 条件不能全空（无条件条目会对每条差异生效，等于常驻加税）；
             4. 只输出 JSON 数组，每项 {key, appliesWhen, text}，key 用 THEME-SLUG 形式；
                没有可提炼的内容输出 []。不要 markdown 代码块。
+            收录红线（docs/industry-knowledge-criteria.md）：
+            - 只收跨客户成立的普遍先验；客户特定配置、孤例事故不收（那是客户知识，不是行业先验）；
+            - 不收精确数字断言（费率/上限/阈值会过时，且会被误当计算依据）——写排查方向不写具体数值；
+            - 不收瞬时事实、教程、营销内容；与对账差异归因无关的通用知识不收；
+            - 写法用概率语言（"通常/优先/先对齐口径"），只指排查方向，不做定论。
             """;
 
     private final IndustryKbService service;
