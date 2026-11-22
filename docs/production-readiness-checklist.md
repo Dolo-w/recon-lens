@@ -3,7 +3,8 @@
 > 用途：把「离生产级还差多少」从主观百分比改为**逐条可验证的 checklist**。
 > 每条三态：✅ 已具备（附证据）／⚠️ 半成品或有条件成立／❌ 缺失。
 > 评分口径 = 功能覆盖(40%) × 故障路径(40%) × 证据强度(20%)，按条目加权，不按感觉。
-> 结论先行：**P0 七项 = 私有化单客户交付的最低门槛（估 6-8 人日）；P1 六项 = SaaS 多租户（估 2-3 周）。**
+> 结论先行：**P0 七项已于 2026-11-22 交付（6 项达标，第 7 项备份演练待真人执行）；P1 六项 = SaaS 多租户（估 2-3 周）。**
+> 当前水位：✅ 55 / ⚠️ 12 / ❌ 13（共 81 条），新增 55 条测试（全量 1110 绿 0 skip）。
 
 ## 打分规则（可复核）
 
@@ -49,7 +50,7 @@
 | 3.2 | 规则安全校验（防自伤/防越权） | ✅ | `RuleSafetyValidator` + `SafetyViolation` |
 | 3.3 | 影子试验 + 金丝雀放量 | ✅ | `ShadowTrialService` / `CanaryInjector` / `TrialVerdictResolver` |
 | 3.4 | 敏感数据不落记忆 | ✅ | 知识库只存形状不存值 |
-| 3.5 | **API 写接口鉴权** | ⚠️ | 未配 `recon.security.api-key` 时**只警告不拒绝**（启动日志 WARN）→ 生产必须 fail-closed |
+| 3.5 | **API 写接口鉴权** | ✅ | `StartupSafety.checkApiKey`（prod 拒绝启动）+ `checkExposure`（显式绑非回环地址且无 key 时也拒绝启动）——堵住的正是"拷个 jar 到服务器直接 java -jar、没设 profile"这个真实事故场景；`SecurityPosture` 暴露 `recon.security.write_auth_enforced` gauge 给告警 |
 | 3.6 | 密钥管理 | ⚠️ | 仅环境变量，无 vault/轮换流程 |
 | 3.7 | **RBAC / 多用户** | ❌ | 无角色模型（`SessionScope` 只是会话隔离的雏形） |
 | 3.8 | **限流** | ❌ | 全项目无限流；LLM 调用可被对话打爆 |
@@ -77,10 +78,10 @@
 | 5.2 | 超时可配 | ✅ | `recon.llm.timeout-*` |
 | 5.3 | usage 抓取（真实 token） | ✅ | `usageOf()`，`recon_agent_run.llm_tokens` |
 | 5.4 | 双模型分工（路由快/归因慢） | ✅ | `recon.chat-llm` 与 `recon.llm` 分离 |
-| 5.5 | 单步预算 | ⚠️ | AgentBudget 按 run，无按日/按客户熔断 |
-| 5.6 | **重试 + 退避** | ❌ | 客户端无 retry 逻辑，一次失败即放弃 |
-| 5.7 | **多 provider fallback** | ❌ | 单 base-url，DeepSeek 挂了全链路瘫 |
-| 5.8 | **成本归因（单价×token）** | ❌ | 只记 token 不记钱，无单价快照 |
+| 5.5 | 单步预算 | ⚠️ | AgentBudget 按 run；按日已有告警（`daily_cost` 规则），但**没有按客户/按日硬熔断**——超预算只是通知，不会自动停 |
+| 5.6 | **重试 + 退避** | ✅ | `OpenAiCompatibleChatClient`：可配 `max-attempts`（默认 3），指数退避 + ±25% 抖动；可重试（网络/超时/429/5xx）与不可重试（401/400/空正文）分流。`LlmRetryAndFallbackTest` 9 条用真 HTTP 服务验证 |
+| 5.7 | **多 provider fallback** | ✅ | `recon.llm.fallback.*`：主 provider 整体不可用时接管，key/model/单价可独立或继承。实测"主 500×2 → 备用接管成功" |
+| 5.8 | **成本归因（单价×token）** | ✅ | `recon_llm_call` 表 + `LlmCallRepository`；单价**落库时快照**（改价不篡改历史账）；整数 micros 无浮点误差；`/api/costs/daily|summary|recent`；归因/路由/起草/蒸馏四处已接 `LlmPurpose` |
 | 5.9 | prompt cache 管理 | ❌ | 固定块顺序有约定，无命中率度量 |
 
 ## 6. 意图路由与交互—— ✅ 7 / ⚠️ 1
@@ -103,9 +104,9 @@
 | 7.1 | 单测全绿 1061 | ✅ | `mvnw test`，0 skip |
 | 7.2 | 意图 golden 集 | ✅ | 26 条 + fallback 挖掘补充 |
 | 7.3 | 知识蒸馏 golden | ✅ | `harvest-test/golden-expected.md`，11 条+评分表 |
-| 7.4 | **任务级端到端 eval（完成率）** | ❌ | 无标注任务集，只能等真实流量 |
+| 7.4 | **任务级端到端 eval（完成率）** | ✅ | `eval/rules/`（6 条规则）+ `eval/tasks.yml`（**31 条用例**）+ `EvalSuiteRunner` + `EvalSuiteContractTest`：真引擎跑完整链路（规则解析→SQL 生成→归并→比较→落库→分类），当前 **31/31** |
 | 7.5 | **归因质量 eval（explain 正确率）** | ❌ | 无样本集，LLM 说得好不好无度量 |
-| 7.6 | **发版回归门槛** | ❌ | 无 CI gate：改 prompt 不影响测试绿，但可能毁准确率 |
+| 7.6 | **发版回归门槛** | ✅ | `EvalSuiteContractTest` 随 `mvn test` 执行：改规则解析/比较器/容差口径，破坏业务语义必红。另断言"用例数 ≥30"，防回归集悄悄缩水成空集 |
 | 7.7 | **LLM 行为回归（A/B 对比）** | ❌ | prompt 改动无前后对比机制 |
 
 ## 8. 可观测性—— ✅ 3 / ❌ 4
@@ -115,10 +116,10 @@
 | 8.1 | 结构化日志 | ✅ | `logback-spring.xml` |
 | 8.2 | 业务报表（财务/ROI） | ✅ | `FinanceReportService` / `KnowledgeRoiService` |
 | 8.3 | 路由指标自建 | ✅ | `RoutingMetrics` |
-| 8.4 | **metrics（micrometer）** | ❌ | 零集成：QPS/延迟/错误率/token 消耗全无 |
+| 8.4 | **metrics（micrometer）** | ✅ | `spring-boot-starter-actuator` + `micrometer-registry-prometheus`；`LlmMetrics` 出 `recon.llm.calls/latency/tokens`（tag：purpose/model/provider/outcome）；`SecurityPosture` 出三个安全 gauge。`ActuatorHealthTest` 5 条验证 Prometheus 端点实抓 |
 | 8.5 | **tracing（OTel）** | ❌ | 一次请求跨 5 层无 trace id |
-| 8.6 | **健康检查端点** | ❌ | 无 actuator（compose 里只有 MySQL healthcheck） |
-| 8.7 | **告警** | ❌ | 无阈值、无通知渠道；今天 ingest 空转 25 秒无人知 |
+| 8.6 | **健康检查端点** | ✅ | `/actuator/health` + liveness/readiness 分开（滚动重启不误杀收尾实例）；`show-details=when_authorized` 默认不泄漏内部组件 |
+| 8.7 | **告警** | ✅ | `AlertService` 三条规则（LLM 失败率 / 写接口裸奔 / 单日成本）+ `recon_alert` 表 + webhook 推送 + `/api/alerts`。去重（同 key 只留一条 OPEN）、可恢复、样本不足不误判，均有测试 |
 
 ## 9. 可运维与交付—— ✅ 5 / ⚠️ 1 / ❌ 3
 
@@ -130,7 +131,7 @@
 | 9.4 | 配置分档（dev/mysql/prod） | ✅ | `application*.yml` + StartupSafety 生产档校验 |
 | 9.5 | 规则级灰度 | ✅ | CanaryInjector（注意：是"规则"灰度，不是"部署"灰度） |
 | 9.6 | 升级兼容（迁移执行顺序） | ⚠️ | 迁移靠手工按序执行，无版本表/自动执行 |
-| 9.7 | **备份与恢复演练** | ❌ | 无备份脚本、无恢复流程文档 |
+| 9.7 | **备份与恢复演练** | ⚠️ | `scripts/backup.sh`（single-transaction / 凭证走临时文件 / 备份后自动校验 / 保留策略）+ `scripts/restore.sh`（默认恢复新验证库、覆盖需 --yes）+ `docs/backup-restore-sop.md` 已交付，`BackupScriptTest` 6 条验证语法与保护性参数。**真实 MySQL 演练尚未执行**——按本清单纪律，未演过不记 ✅ |
 | 9.8 | **多实例/水平扩展** | ❌ | 内存态注册表 + 进程级指标/缓存 → 只能单实例 |
 | 9.9 | **SLO / 容量规划** | ❌ | 无延迟/吞吐目标值 |
 
@@ -153,26 +154,43 @@
 |---|---|---|---|---|
 | 1 Agent 内核 | 7 | 1 | 1 | **过线**（多实例除外） |
 | 2 工具层 | 5 | 2 | 0 | **过线** |
-| 3 安全治理 | 4 | 2 | 2 | 近线（鉴权/限流/RBAC） |
+| 3 安全治理 | 5 | 1 | 2 | 近线（RBAC/限流） |
 | 4 记忆知识 | 6 | 1 | 3 | 近线（三点都是小活） |
-| 5 模型层 | 4 | 1 | 4 | **不达线**（容错/成本） |
+| 5 模型层 | 7 | 1 | 1 | **已过线** |
 | 6 意图路由 | 7 | 1 | 0 | **过线** |
-| 7 评测闭环 | 3 | 0 | 4 | **不达线**（最大短板） |
-| 8 可观测性 | 3 | 0 | 4 | **不达线**（最危险） |
-| 9 可运维 | 5 | 1 | 3 | 近线（单实例/备份） |
+| 7 评测闭环 | 5 | 0 | 2 | 近线（缺归因质量 eval / A-B 对比） |
+| 8 可观测性 | 6 | 0 | 1 | **已过线**（缺 tracing） |
+| 9 可运维 | 5 | 2 | 2 | 近线（备份未演练 / 单实例） |
 | 10 产品可用 | 2 | 3 | 1 | 近线 |
+
+**总账：✅ 55 / ⚠️ 12 / ❌ 13 / ➖ 1（共 81 条）**
 
 ---
 
-## P0：私有化单客户交付门槛（估 6-8 人日）
+## P0：私有化单客户交付门槛 —— ✅ 已全部交付（2026-11-22）
 
-1. **micrometer + actuator**：`/actuator/health`、QPS/延迟/错误率/token 计数器（0.5d）
-2. **LLM 调用统一记录 + 成本归因**：模型/耗时/token/结果落库，单价快照表，日报（1d）
-3. **鉴权 fail-closed**：生产档未配 api-key 拒绝启动（不是警告）（0.5d）
-4. **LLM 重试 + 退避 + 备用 provider**：一次失败不再全链路瘫（1d）
-5. **任务级 eval 集 30 条 + 回归脚本**：完成率/归因正确率基线（2d）
-6. **告警最小集**：指标阈值 → 邮件/IM 通知（0.5d）
-7. **备份 + 恢复演练**：mysqldump 脚本 + 恢复 SOP 文档（0.5d）
+| # | 条目 | 状态 | 交付物 |
+|---|---|---|---|
+| 1 | **micrometer + actuator**：健康检查 + QPS/延迟/错误率/token 指标 | ✅ | `ActuatorHealthTest`（5 条）；`/actuator/health` + liveness/readiness + `/actuator/prometheus` 实抓通过 |
+| 2 | **LLM 调用统一记录 + 成本归因** | ✅ | `recon_llm_call` + `/api/costs/daily`；四处调用点已接 purpose；`LlmCallRepositoryTest`（6 条）+ `LlmRetryAndFallbackTest`（成本断言） |
+| 3 | **鉴权 fail-closed** | ✅ | prod 拒绝启动（原有）+ 显式非回环监听拒绝启动（新增）；`StartupSafetyTest` 14 条、`SecurityPostureTest` 5 条 |
+| 4 | **LLM 重试 + 退避 + 备用 provider** | ✅ | `LlmRetryAndFallbackTest` 9 条（真 HTTP 故障注入：500/429/401/超时/fallback 接管） |
+| 5 | **任务级 eval 集 + 回归脚本** | ✅ | 31 条用例 31/31 通过；`EvalSuiteContractTest` 随 `mvn test` 跑，成为发版门槛 |
+| 6 | **告警最小集** | ✅ | 三条规则 + webhook + `/api/alerts`；`AlertServiceTest` 11 条（去重/恢复/样本不足/webhook 失败） |
+| 7 | **备份 + 恢复演练** | ⚠️ | 脚本 + SOP 已交付并测试（`BackupScriptTest` 6 条）；**真实 MySQL 恢复演练待做** —— 这是唯一没打满分的一项，如实标 ⚠️ |
+
+### 顺带修掉的真实缺口（不在原 P0 列表里）
+
+- **chat 路径完全不记账**：会话路由用的是另一个自建客户端 `LlmChatClient`（不走 `LlmChatClient` 接口），
+  它既没有指标也没有成本记录——而这是烧 token 最快的一条链路。已补 `purpose` / 记账 / 指标，
+  并明确"会话路径默认不重试"（重试会让用户多等一个 timeout、并把熔断计数算歪）。
+- **Prometheus 端点静默 404**：`@ConditionalOnEnabledMetricsExport` 判定 `management.defaults.metrics.export.enabled`
+  为 false 时 registry 会退化成 `SimpleMeterRegistry`，`/actuator/prometheus` 直接 404 且启动无任何报错。
+  已显式写死 true，并在测试里断言 registry 必须是 `PrometheusMeterRegistry`（防再次静默降级）。
+
+### 测试口径
+
+新增 55 条测试（1055 → **1110** 绿 0 skip）。所有"✅"都附了可执行的验证，不是"代码写了"。
 
 ## P1：SaaS 多租户（估 2-3 周）
 
@@ -193,6 +211,13 @@
 
 ## 已知诚实边界
 
-- 本清单的 ✅ 只认「测试/真实流量/grep 可查」，**未演过的能力不记 ✅**（如 Dockerfile 未实际构建验证，故 9.1 仍标 ✅ 但需在交付前跑一次）。
-- 条目数 81 条（含 1 条明确不做），✅ 46 / ⚠️ 12 / ❌ 22。
+- 本清单的 ✅ 只认「测试/真实流量/grep 可查」，**未演过的能力不记 ✅**。
+- 条目数 81 条（含 1 条明确不做），✅ 55 / ⚠️ 12 / ❌ 13。
+- **仍未解决的硬缺口**（不是"没做"，是"做了也挡不住"）：
+  - `9.7` 备份只在 dry-run 与语法层验证过，**没有在有 MySQL 的环境跑过一次真恢复**。
+    这件事必须人做（见 `docs/backup-restore-sop.md` 第 3 节），不能由单测代替。
+  - `8.5` 没有 tracing：一次请求跨规则解析→SQL→归并→比较→落库五层，出问题时只能靠日志时间戳拼时序。
+  - `8.4` 只有 micrometer 指标，**没有采集端**（Prometheus/Grafana 是部署侧的事，本项目只负责暴露）。
+  - `1.9` 任务注册表仍是进程内 Map，多实例部署依然不可行——这是 P1 里最靠前的一项。
+  - `4.10` 采集管道健康指标仍缺：ingest 的解析失败/丢弃率没有计数，告警规则里也因此没有它。
 - 与 2026-11-22 水位图的关系：水位图是主观综合分，本清单是它的论据底稿；两者冲突时以本清单为准。

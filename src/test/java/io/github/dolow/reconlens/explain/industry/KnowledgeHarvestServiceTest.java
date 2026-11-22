@@ -55,7 +55,7 @@ class KnowledgeHarvestServiceTest {
     @DisplayName("蒸馏：模型输出解析→机器准入→入库；非法条目被闸拒绝但管道继续")
     void distillPipeline() {
         when(llm.available()).thenReturn(true);
-        when(llm.complete(anyString(), anyString())).thenReturn(java.util.Optional.of(MODEL_OUTPUT));
+        when(llm.complete(anyString(), anyString(), anyString())).thenReturn(java.util.Optional.of(MODEL_OUTPUT));
 
         KnowledgeHarvestService.HarvestReport report = harvester.distill("billing-pricing", 12);
         assertThat(report.failed()).isFalse();
@@ -82,7 +82,7 @@ class KnowledgeHarvestServiceTest {
     @DisplayName("多源摄取：HTML 清洗剥标签、分块后提炼入库；图片如实拒绝")
     void ingestPipeline() {
         when(llm.available()).thenReturn(true);
-        when(llm.complete(anyString(), anyString())).thenReturn(java.util.Optional.of(MODEL_OUTPUT));
+        when(llm.complete(anyString(), anyString(), anyString())).thenReturn(java.util.Optional.of(MODEL_OUTPUT));
 
         String html = "<html><head><style>body{color:red}</style></head><body>"
                 + "<h1>对账手册</h1>" + "段落一：".repeat(1) + "税额口径说明，".repeat(30)
@@ -113,7 +113,7 @@ class KnowledgeHarvestServiceTest {
     @DisplayName("模型输出夹带 markdown 代码块也能解析")
     void markdownFenceTolerated() {
         when(llm.available()).thenReturn(true);
-        when(llm.complete(anyString(), anyString())).thenReturn(
+        when(llm.complete(anyString(), anyString(), anyString())).thenReturn(
                 java.util.Optional.of("```json\n" + MODEL_OUTPUT + "\n```"));
         assertThat(harvester.distill("any", 12).created()).isEqualTo(1);
     }

@@ -25,6 +25,7 @@ public class ReconProperties {
     private final Model model = new Model();
     private final Connector connector = new Connector();
     private final Export export = new Export();
+    private final Alert alert = new Alert();
 
     public String getRulesLocation() {
         return rulesLocation;
@@ -80,6 +81,98 @@ public class ReconProperties {
 
     public Export getExport() {
         return export;
+    }
+
+    public Alert getAlert() {
+        return alert;
+    }
+
+    /**
+     * 告警配置（清单 P0-6）。
+     *
+     * <p><b>为什么是"最小集"</b>：告警系统最常见的失败模式不是"没告警"，而是"告警太多被无视"。
+     * 所以这里只放三条能直接对应钱和风险、且数据现成的规则：
+     * LLM 失败率（能力瘫痪）、写接口裸奔（安全事故）、单日成本（烧钱）。
+     * 每条都要求"有最小样本量"才判定，避免一次失败就报警。
+     */
+    public static class Alert {
+
+        /** 关掉就不跑检查线程、不写表（本地开发默认关闭，减少噪音）。 */
+        private boolean enabled = false;
+
+        /** 检查间隔（毫秒），默认 5 分钟。 */
+        private long checkIntervalMs = 300_000L;
+
+        /** 通知地址（企业微信/钉钉/自建 relay），收到 POST JSON。留空 = 只落库不推送。 */
+        private String webhookUrl = "";
+
+        /** LLM 失败率告警阈值（0~1）。 */
+        private double llmFailureRateThreshold = 0.3;
+
+        /** 最小样本量：窗口内调用少于这个数就不判失败率（避免 1 次失败 = 100%）。 */
+        private int llmFailureMinCalls = 5;
+
+        /** 失败率统计窗口（分钟）。 */
+        private int llmFailureWindowMinutes = 30;
+
+        /** 单日成本告警阈值（元）。0 = 不检查。 */
+        private double dailyCostYuanThreshold = 50.0;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getCheckIntervalMs() {
+            return checkIntervalMs;
+        }
+
+        public void setCheckIntervalMs(long checkIntervalMs) {
+            this.checkIntervalMs = Math.max(10_000L, checkIntervalMs);
+        }
+
+        public String getWebhookUrl() {
+            return webhookUrl;
+        }
+
+        public void setWebhookUrl(String webhookUrl) {
+            this.webhookUrl = webhookUrl;
+        }
+
+        public double getLlmFailureRateThreshold() {
+            return llmFailureRateThreshold;
+        }
+
+        public void setLlmFailureRateThreshold(double llmFailureRateThreshold) {
+            this.llmFailureRateThreshold = Math.min(1.0, Math.max(0.0, llmFailureRateThreshold));
+        }
+
+        public int getLlmFailureMinCalls() {
+            return llmFailureMinCalls;
+        }
+
+        public void setLlmFailureMinCalls(int llmFailureMinCalls) {
+            this.llmFailureMinCalls = Math.max(1, llmFailureMinCalls);
+        }
+
+        public int getLlmFailureWindowMinutes() {
+            return llmFailureWindowMinutes;
+        }
+
+        public void setLlmFailureWindowMinutes(int llmFailureWindowMinutes) {
+            this.llmFailureWindowMinutes = Math.max(1, llmFailureWindowMinutes);
+        }
+
+        public double getDailyCostYuanThreshold() {
+            return dailyCostYuanThreshold;
+        }
+
+        public void setDailyCostYuanThreshold(double dailyCostYuanThreshold) {
+            this.dailyCostYuanThreshold = Math.max(0, dailyCostYuanThreshold);
+        }
     }
 
     /** 导出文件目录（争议证据包 CSV 等），MCP 工具与 REST 共用。 */
@@ -891,6 +984,24 @@ public class ReconProperties {
         /** 一次批量归因最多处理多少条差异 */
         private int batchLimit = 50;
 
+        /**
+         * 重试：一次 API 抖动不该毁掉整条链路。只对可重试错误（网络/超时/5xx/429）生效，
+         * 401/400 这类配置错重试一万次也一样，直接失败更快暴露问题。
+         */
+        private int maxAttempts = 3;
+        /** 退避基数（毫秒）：第 n 次失败后等 baseDelay * 2^(n-1)，带 ±25% 抖动防同步重试风暴。 */
+        private long retryBaseDelayMillis = 400;
+
+        /** 备用 provider：主 provider 连续失败时接管。空 base-url = 不启用。 */
+        private Fallback fallback = new Fallback();
+
+        /**
+         * 单价快照（元 / 百万 token）。默认取 DeepSeek 公开价，用别人的模型必须自己改。
+         * 记成"落库时快照"而不是"报表时现算"：改价后历史成本不会被篡改。
+         */
+        private double priceInputPerMtok = 2.0;
+        private double priceOutputPerMtok = 8.0;
+
         public boolean isEnabled() {
             return enabled;
         }
@@ -939,6 +1050,47 @@ public class ReconProperties {
             this.batchLimit = batchLimit;
         }
 
+        public int getMaxAttempts() {
+            return maxAttempts;
+        }
+
+        /** 下限 1：0 次尝试等于永远不调用，是个只会带来困惑的配置。 */
+        public void setMaxAttempts(int maxAttempts) {
+            this.maxAttempts = Math.max(1, maxAttempts);
+        }
+
+        public long getRetryBaseDelayMillis() {
+            return retryBaseDelayMillis;
+        }
+
+        public void setRetryBaseDelayMillis(long retryBaseDelayMillis) {
+            this.retryBaseDelayMillis = Math.max(0, retryBaseDelayMillis);
+        }
+
+        public Fallback getFallback() {
+            return fallback;
+        }
+
+        public void setFallback(Fallback fallback) {
+            this.fallback = fallback == null ? new Fallback() : fallback;
+        }
+
+        public double getPriceInputPerMtok() {
+            return priceInputPerMtok;
+        }
+
+        public void setPriceInputPerMtok(double priceInputPerMtok) {
+            this.priceInputPerMtok = Math.max(0, priceInputPerMtok);
+        }
+
+        public double getPriceOutputPerMtok() {
+            return priceOutputPerMtok;
+        }
+
+        public void setPriceOutputPerMtok(double priceOutputPerMtok) {
+            this.priceOutputPerMtok = Math.max(0, priceOutputPerMtok);
+        }
+
         /** 配置优先，其次读环境变量，便于 CI / 容器里注入密钥 */
         public String resolveApiKey() {
             if (apiKey != null && !apiKey.isBlank()) {
@@ -950,6 +1102,68 @@ public class ReconProperties {
 
         public boolean usable() {
             return enabled && !resolveApiKey().isEmpty() && baseUrl != null && !baseUrl.isBlank();
+        }
+
+        /** 备用 provider 的配置。它自己决定能不能用：base-url 空就当没配。 */
+        public static class Fallback {
+            private String baseUrl = "";
+            private String apiKey = "";
+            private String model = "";
+            /** 备用 provider 的单价，空则沿用主 provider 的价（同价模型很常见）。 */
+            private Double priceInputPerMtok;
+            private Double priceOutputPerMtok;
+
+            public String getBaseUrl() {
+                return baseUrl;
+            }
+
+            public void setBaseUrl(String baseUrl) {
+                this.baseUrl = baseUrl;
+            }
+
+            public String getApiKey() {
+                return apiKey;
+            }
+
+            public void setApiKey(String apiKey) {
+                this.apiKey = apiKey;
+            }
+
+            public String getModel() {
+                return model;
+            }
+
+            public void setModel(String model) {
+                this.model = model;
+            }
+
+            public Double getPriceInputPerMtok() {
+                return priceInputPerMtok;
+            }
+
+            public void setPriceInputPerMtok(Double priceInputPerMtok) {
+                this.priceInputPerMtok = priceInputPerMtok;
+            }
+
+            public Double getPriceOutputPerMtok() {
+                return priceOutputPerMtok;
+            }
+
+            public void setPriceOutputPerMtok(Double priceOutputPerMtok) {
+                this.priceOutputPerMtok = priceOutputPerMtok;
+            }
+
+            public boolean configured() {
+                return baseUrl != null && !baseUrl.isBlank();
+            }
+
+            /** 没单独配 key 时沿用主 provider 的 key（很多网关共用一把）。 */
+            public String resolveApiKey(String primaryKey) {
+                if (apiKey != null && !apiKey.isBlank()) {
+                    return apiKey.trim();
+                }
+                return primaryKey == null ? "" : primaryKey;
+            }
         }
     }
 }

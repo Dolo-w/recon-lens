@@ -6,6 +6,7 @@ import io.github.dolow.reconlens.chat.plan.CompositePlanner;
 import io.github.dolow.reconlens.chat.plan.KeywordPlanner;
 import io.github.dolow.reconlens.chat.plan.LlmChatClient;
 import io.github.dolow.reconlens.chat.plan.LlmPlanner;
+import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.engine.ReconEngine;
 import io.github.dolow.reconlens.tool.ToolRegistry;
 import io.github.dolow.reconlens.recall.RecallAugmenter;
@@ -104,8 +105,18 @@ public class ChatConfiguration {
                                        @Value("${recon.chat.llm.api-key:}") String apiKey,
                                        @Value("${recon.chat.llm.model:deepseek-chat}") String model,
                                        @Value("${recon.chat.llm.timeout-ms:8000}") int timeoutMs,
-                                       ObjectMapper objectMapper) {
-        return new LlmChatClient(baseUrl, apiKey, model, timeoutMs, objectMapper);
+                                       @Value("${recon.chat.llm.max-attempts:1}") int maxAttempts,
+                                       ObjectMapper objectMapper,
+                                       io.github.dolow.reconlens.store.LlmCallRepository llmCallRepository,
+                                       io.github.dolow.reconlens.llm.LlmMetrics llmMetrics,
+                                       ReconProperties properties) {
+        // 会话路径同样记账：这是烧 token 最快的一条链路，不记就等于"路由花了多少钱"永远说不清。
+        // 单价沿用 recon.llm 的配置（同一套价目表），chat 模型更便宜时在部署档单独覆盖即可。
+        return new LlmChatClient(baseUrl, apiKey, model, timeoutMs, objectMapper,
+                llmCallRepository, llmMetrics,
+                properties.getLlm().getPriceInputPerMtok(),
+                properties.getLlm().getPriceOutputPerMtok(),
+                maxAttempts);
     }
 
     /**

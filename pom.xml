@@ -72,6 +72,18 @@
       <artifactId>spring-boot-starter-validation</artifactId>
     </dependency>
 
+    <!-- 生产级可观测性：/actuator/health 给编排系统探活，micrometer 出 QPS/延迟/错误率/token 指标。
+         2026 年这已是采购硬门槛而不是加分项（清单 8.4/8.6）。starter 自带 micrometer-core，
+         prometheus registry 用于抓取；两者都不改变业务行为，关掉 actuator 端点项目照常跑。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
     <!-- 规则 DSL 用 YAML 表达；显式声明，不依赖传递依赖 -->
     <dependency>
       <groupId>org.yaml</groupId>

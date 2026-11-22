@@ -4,6 +4,7 @@ import io.github.dolow.reconlens.config.ReconProperties;
 import io.github.dolow.reconlens.domain.DiffRecord;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.llm.LlmChatClient;
+import io.github.dolow.reconlens.llm.LlmPurpose;
 import io.github.dolow.reconlens.llm.PromptGuard;
 import org.springframework.stereotype.Component;
 
@@ -102,7 +103,7 @@ public class LlmDiffExplainer implements DiffExplainer {
         List<DiffRecord> batch = diffs.size() > batchLimit
                 ? new ArrayList<>(diffs.subList(0, batchLimit))
                 : new ArrayList<>(diffs);
-        Optional<String> content = client.complete(SYSTEM_PROMPT,
+        Optional<String> content = client.complete(LlmPurpose.EXPLAIN, SYSTEM_PROMPT,
                 buildUserPrompt(rule, batch, industryContext));
         if (content.isEmpty()) {
             breaker.onFailure();

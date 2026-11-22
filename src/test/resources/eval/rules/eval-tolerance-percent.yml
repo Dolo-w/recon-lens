@@ -1,0 +1,31 @@
+# 相对容差 0.01%：金额在容差内不算差异（业界最常见口径）
+code: EVAL_TOLERANCE_PERCENT
+name: eval 相对容差金额对账
+left:
+  label: 账单
+  table: eval_left
+  keyType: STRING
+  dimension: [biz_key]
+right:
+  label: 结算
+  table: eval_right
+  keyType: STRING
+  dimension: [biz_key]
+shard:
+  count: 1
+  parallelism: 1
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerancePercent: 0.0001
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 1

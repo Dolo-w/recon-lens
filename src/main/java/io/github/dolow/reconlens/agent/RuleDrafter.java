@@ -6,6 +6,7 @@ import io.github.dolow.reconlens.dsl.RuleException;
 import io.github.dolow.reconlens.dsl.RuleParser;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.llm.LlmChatClient;
+import io.github.dolow.reconlens.llm.LlmPurpose;
 import io.github.dolow.reconlens.llm.PromptGuard;
 import io.github.dolow.reconlens.rule.RuleCatalog;
 import org.slf4j.Logger;
@@ -154,7 +155,7 @@ public class RuleDrafter {
 
             long roundStarted = System.nanoTime();
             String user = feedback.isEmpty() ? basePrompt : basePrompt + "\n\n" + feedback;
-            Optional<String> reply = client.complete(SYSTEM_PROMPT, user);
+            Optional<String> reply = client.complete(LlmPurpose.DRAFT, SYSTEM_PROMPT, user);
             // 真实用量：客户端从响应 usage 里读到多少就记多少；读不到才退回字符数估算
             int used = reply.isPresent() ? client.lastTokens() : 0;
             if (reply.isEmpty()) {

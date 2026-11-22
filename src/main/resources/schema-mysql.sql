@@ -504,3 +504,42 @@ CREATE TABLE IF NOT EXISTS recon_price_entry (
   UNIQUE KEY uk_price_entry (price_code, model, token_type, effective_from, tier_min),
   KEY idx_price_lookup (price_code, model, token_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ 大模型调用账本（清单 P0-2 成本归因） ============
+-- 单价落库时快照：改价不篡改历史账。cost_micros 单位是元的百万分之一，
+-- 数值上等于 prompt_tokens × price_input_per_mtok + completion_tokens × price_output_per_mtok。
+CREATE TABLE IF NOT EXISTS recon_llm_call (
+  id                    BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  purpose               VARCHAR(32)   NOT NULL,
+  provider              VARCHAR(32)   NOT NULL,
+  model                 VARCHAR(128)  NOT NULL,
+  prompt_tokens         INT           NOT NULL DEFAULT 0,
+  completion_tokens     INT           NOT NULL DEFAULT 0,
+  total_tokens          INT           NOT NULL DEFAULT 0,
+  latency_ms            BIGINT        NOT NULL DEFAULT 0,
+  attempt               INT           NOT NULL DEFAULT 1,
+  outcome               VARCHAR(16)   NOT NULL,
+  error_kind            VARCHAR(64)   NULL,
+  cost_micros           BIGINT        NOT NULL DEFAULT 0,
+  price_input_snapshot  DECIMAL(12,4) NOT NULL DEFAULT 0,
+  price_output_snapshot DECIMAL(12,4) NOT NULL DEFAULT 0,
+  called_at             TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_llm_call_at (called_at),
+  KEY idx_llm_call_purpose (purpose, called_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ============ 告警（清单 P0-6 最小集） ============
+CREATE TABLE IF NOT EXISTS recon_alert (
+  id              BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  alert_key       VARCHAR(64)   NOT NULL,
+  severity        VARCHAR(16)   NOT NULL,
+  message         VARCHAR(500)  NOT NULL,
+  metric_value    DECIMAL(20,4) NOT NULL DEFAULT 0,
+  threshold_value DECIMAL(20,4) NOT NULL DEFAULT 0,
+  status          VARCHAR(16)   NOT NULL DEFAULT 'OPEN',
+  notified        TINYINT(1)    NOT NULL DEFAULT 0,
+  created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at     TIMESTAMP     NULL,
+  KEY idx_alert_status (status, alert_key),
+  KEY idx_alert_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -557,3 +557,47 @@ CREATE TABLE IF NOT EXISTS recon_price_entry (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_price_entry ON recon_price_entry (price_code, model, token_type, effective_from, tier_min);
 CREATE INDEX IF NOT EXISTS idx_price_lookup ON recon_price_entry (price_code, model, token_type);
+
+-- ============ 大模型调用账本（清单 P0-2 成本归因） ============
+-- 在这张表之前只知道"花了多少 token"，不知道是哪个功能、哪个模型、失败几次、折成钱是多少。
+-- 单价是"落库时快照"而不是报表时现算：改价不篡改历史账。
+-- cost_micros = prompt_tokens × price_input_per_mtok + completion_tokens × price_output_per_mtok
+--   （单价口径是"元/百万 token"，所以 1 token × 1 元/Mtok 恰好 = 1 micro 元，全整数无浮点误差）
+CREATE TABLE IF NOT EXISTS recon_llm_call (
+  id                   BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  purpose              VARCHAR(32)   NOT NULL,
+  provider             VARCHAR(32)   NOT NULL,
+  model                VARCHAR(128)  NOT NULL,
+  prompt_tokens        INT           NOT NULL DEFAULT 0,
+  completion_tokens    INT           NOT NULL DEFAULT 0,
+  total_tokens         INT           NOT NULL DEFAULT 0,
+  latency_ms           BIGINT        NOT NULL DEFAULT 0,
+  attempt              INT           NOT NULL DEFAULT 1,
+  outcome              VARCHAR(16)   NOT NULL,
+  error_kind           VARCHAR(64)   NULL,
+  cost_micros          BIGINT        NOT NULL DEFAULT 0,
+  price_input_snapshot DECIMAL(12,4) NOT NULL DEFAULT 0,
+  price_output_snapshot DECIMAL(12,4) NOT NULL DEFAULT 0,
+  called_at            TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_llm_call_at ON recon_llm_call (called_at);
+CREATE INDEX IF NOT EXISTS idx_llm_call_purpose ON recon_llm_call (purpose, called_at);
+
+-- ============ 告警（清单 P0-6 最小集） ============
+-- 只落三类能直接对应钱和风险的告警：LLM 失败率 / 写接口裸奔 / 单日成本。
+-- 同一 alert_key 同时只保留一条 OPEN（避免每 5 分钟刷一条，把告警变成噪音）；
+-- 恢复时把 OPEN 置 RESOLVED 并记 resolved_at —— 这样"这次故障持续了多久"是可查的。
+CREATE TABLE IF NOT EXISTS recon_alert (
+  id              BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  alert_key       VARCHAR(64)   NOT NULL,
+  severity        VARCHAR(16)   NOT NULL,
+  message         VARCHAR(500)  NOT NULL,
+  metric_value    DECIMAL(20,4) NOT NULL DEFAULT 0,
+  threshold_value DECIMAL(20,4) NOT NULL DEFAULT 0,
+  status          VARCHAR(16)   NOT NULL DEFAULT 'OPEN',
+  notified        BOOLEAN       NOT NULL DEFAULT FALSE,
+  created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at     TIMESTAMP     NULL
+);
+CREATE INDEX IF NOT EXISTS idx_alert_status ON recon_alert (status, alert_key);
+CREATE INDEX IF NOT EXISTS idx_alert_created ON recon_alert (created_at);

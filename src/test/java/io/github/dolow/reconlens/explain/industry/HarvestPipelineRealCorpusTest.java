@@ -107,7 +107,7 @@ class HarvestPipelineRealCorpusTest {
     private static LlmChatClient fakeLlm(AtomicInteger calls) {
         LlmChatClient llm = mock(LlmChatClient.class);
         when(llm.available()).thenReturn(true);
-        when(llm.complete(anyString(), anyString())).thenAnswer(inv -> {
+        when(llm.complete(anyString(), anyString(), anyString())).thenAnswer(inv -> {
             calls.incrementAndGet();
             return Optional.of(FAKE_LLM_JSON);
         });

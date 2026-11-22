@@ -1,0 +1,439 @@
+# 任务级 eval 用例集（清单 P0-5 / 7.4）
+#
+# 每条 = 一组输入数据 + 业务上应该得到的结果。
+# 期望值写的是"业务上应该是什么"，不是"当前实现输出什么"——
+# 如果实现和这里不一致，那是实现的问题，不是改期望的理由。
+#
+# 字段：
+#   rule   : 引用 eval/rules/ 下的规则 code
+#   left   : 左侧数据行（键 biz_key + 若干业务列）；省略或空 = 该侧无数据
+#   right  : 右侧数据行
+#   expect : total（差异总条数）+ types（分类型条数）
+#
+# 覆盖矩阵（31 条）：
+#   金额精确比对        13 条（一致/差异/缺失/重复/大额/负数/厘级/批量）
+#   相对容差 0.01%       4 条（容差内/外/大基数/多行混合）
+#   绝对容差 0.01        3 条（容差内/外/负数）
+#   状态字段             3 条（一致/单条/多条）
+#   双字段               2 条（同时不一致算两条/只一条不一致）
+#   数字键               3 条（一致/金额差异/缺失）
+#   规模与综合           3 条（左空/右空/混合场景）
+#
+# 写新用例时只改这个文件，不要动代码。
+
+tasks:
+  # ========== 金额精确比对（EVAL_AMOUNT，容差 0） ==========
+
+  - key: amount-identical
+    title: 单行完全一致 → 零差异
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    expect:
+      total: 0
+
+  - key: amount-mismatch-single
+    title: 金额不一致 → 一条金额差异
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "101.00", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: missing-right-single
+    title: 左侧有、右侧无 → 右侧缺失
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right: []
+    expect:
+      total: 1
+      types: {MISSING_RIGHT: 1}
+
+  - key: missing-left-single
+    title: 右侧有、左侧无 → 左侧缺失
+    rule: EVAL_AMOUNT
+    left: []
+    right:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    expect:
+      total: 1
+      types: {MISSING_LEFT: 1}
+
+  - key: both-sides-missing
+    title: 两侧各有独有键 → 各一条缺失
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A2, amount: "200.00", status: PAID}
+    expect:
+      total: 2
+      types: {MISSING_RIGHT: 1, MISSING_LEFT: 1}
+
+  - key: duplicate-key-left
+    title: 左侧同键两行 → 重复键差异
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    expect:
+      total: 1
+      types: {DUPLICATE_KEY: 1}
+
+  - key: duplicate-key-right
+    title: 右侧同键两行 → 重复键差异
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    expect:
+      total: 1
+      types: {DUPLICATE_KEY: 1}
+
+  - key: empty-both-sides
+    title: 两侧都空 → 零差异（不是"任务失败"）
+    rule: EVAL_AMOUNT
+    left: []
+    right: []
+    expect:
+      total: 0
+
+  - key: large-amount-cent-diff
+    title: 千万级金额差 1 分 → 仍是差异（大额场景不能放过厘位）
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "12345678.90", status: PAID}
+    right:
+      - {biz_key: A1, amount: "12345678.91", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: negative-amount-mismatch
+    title: 负数金额（退款）差异
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "-100.00", status: REFUND}
+    right:
+      - {biz_key: A1, amount: "-100.01", status: REFUND}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: sub-cent-diff
+    title: 厘位差异（第六位小数）也算差异 —— 容差 0 时不做任何宽容
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: A1, amount: "100.000001", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.000000", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: many-identical-rows
+    title: 20 行全部一致 → 零差异（防"批量场景误报"）
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: K01, amount: "1.00", status: PAID}
+      - {biz_key: K02, amount: "2.00", status: PAID}
+      - {biz_key: K03, amount: "3.00", status: PAID}
+      - {biz_key: K04, amount: "4.00", status: PAID}
+      - {biz_key: K05, amount: "5.00", status: PAID}
+      - {biz_key: K06, amount: "6.00", status: PAID}
+      - {biz_key: K07, amount: "7.00", status: PAID}
+      - {biz_key: K08, amount: "8.00", status: PAID}
+      - {biz_key: K09, amount: "9.00", status: PAID}
+      - {biz_key: K10, amount: "10.00", status: PAID}
+      - {biz_key: K11, amount: "11.00", status: PAID}
+      - {biz_key: K12, amount: "12.00", status: PAID}
+      - {biz_key: K13, amount: "13.00", status: PAID}
+      - {biz_key: K14, amount: "14.00", status: PAID}
+      - {biz_key: K15, amount: "15.00", status: PAID}
+      - {biz_key: K16, amount: "16.00", status: PAID}
+      - {biz_key: K17, amount: "17.00", status: PAID}
+      - {biz_key: K18, amount: "18.00", status: PAID}
+      - {biz_key: K19, amount: "19.00", status: PAID}
+      - {biz_key: K20, amount: "20.00", status: PAID}
+    right:
+      - {biz_key: K01, amount: "1.00", status: PAID}
+      - {biz_key: K02, amount: "2.00", status: PAID}
+      - {biz_key: K03, amount: "3.00", status: PAID}
+      - {biz_key: K04, amount: "4.00", status: PAID}
+      - {biz_key: K05, amount: "5.00", status: PAID}
+      - {biz_key: K06, amount: "6.00", status: PAID}
+      - {biz_key: K07, amount: "7.00", status: PAID}
+      - {biz_key: K08, amount: "8.00", status: PAID}
+      - {biz_key: K09, amount: "9.00", status: PAID}
+      - {biz_key: K10, amount: "10.00", status: PAID}
+      - {biz_key: K11, amount: "11.00", status: PAID}
+      - {biz_key: K12, amount: "12.00", status: PAID}
+      - {biz_key: K13, amount: "13.00", status: PAID}
+      - {biz_key: K14, amount: "14.00", status: PAID}
+      - {biz_key: K15, amount: "15.00", status: PAID}
+      - {biz_key: K16, amount: "16.00", status: PAID}
+      - {biz_key: K17, amount: "17.00", status: PAID}
+      - {biz_key: K18, amount: "18.00", status: PAID}
+      - {biz_key: K19, amount: "19.00", status: PAID}
+      - {biz_key: K20, amount: "20.00", status: PAID}
+    expect:
+      total: 0
+
+  - key: all-rows-mismatch
+    title: 5 行全部金额不一致 → 5 条差异
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: K1, amount: "1.00", status: PAID}
+      - {biz_key: K2, amount: "2.00", status: PAID}
+      - {biz_key: K3, amount: "3.00", status: PAID}
+      - {biz_key: K4, amount: "4.00", status: PAID}
+      - {biz_key: K5, amount: "5.00", status: PAID}
+    right:
+      - {biz_key: K1, amount: "9.00", status: PAID}
+      - {biz_key: K2, amount: "9.00", status: PAID}
+      - {biz_key: K3, amount: "9.00", status: PAID}
+      - {biz_key: K4, amount: "9.00", status: PAID}
+      - {biz_key: K5, amount: "9.00", status: PAID}
+    expect:
+      total: 5
+      types: {AMOUNT_MISMATCH: 5}
+
+  # ========== 相对容差 0.01%（EVAL_TOLERANCE_PERCENT） ==========
+
+  - key: within-relative-tolerance
+    title: 偏差 0.005% < 0.01% → 不算差异
+    rule: EVAL_TOLERANCE_PERCENT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.005", status: PAID}
+    expect:
+      total: 0
+
+  - key: outside-relative-tolerance
+    title: 偏差 0.02% > 0.01% → 算差异
+    rule: EVAL_TOLERANCE_PERCENT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.02", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: relative-tolerance-large-base
+    title: 大基数下同样比例偏差（10000 差 0.5 元）→ 容差内不算差异
+    rule: EVAL_TOLERANCE_PERCENT
+    left:
+      - {biz_key: A1, amount: "10000.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "10000.50", status: PAID}
+    expect:
+      total: 0
+
+  - key: relative-tolerance-mixed
+    title: 容差内 1 行 + 容差外 1 行 → 只报 1 条
+    rule: EVAL_TOLERANCE_PERCENT
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+      - {biz_key: A2, amount: "200.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.005", status: PAID}
+      - {biz_key: A2, amount: "200.10", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  # ========== 绝对容差 0.01（EVAL_TOLERANCE_ABS） ==========
+
+  - key: within-abs-tolerance
+    title: 绝对差 0.005 < 0.01 → 不算差异（分位舍入场景）
+    rule: EVAL_TOLERANCE_ABS
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.005", status: PAID}
+    expect:
+      total: 0
+
+  - key: outside-abs-tolerance
+    title: 绝对差 0.02 > 0.01 → 算差异
+    rule: EVAL_TOLERANCE_ABS
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.02", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: abs-tolerance-negative-side
+    title: 负数方向同样按绝对差判断（-100 vs -100.005 → 容差内）
+    rule: EVAL_TOLERANCE_ABS
+    left:
+      - {biz_key: A1, amount: "-100.00", status: REFUND}
+    right:
+      - {biz_key: A1, amount: "-100.005", status: REFUND}
+    expect:
+      total: 0
+
+  # ========== 状态字段（EVAL_STATUS） ==========
+
+  - key: status-identical
+    title: 状态一致 → 零差异（金额不参与这条规则）
+    rule: EVAL_STATUS
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    expect:
+      total: 0
+
+  - key: status-mismatch-single
+    title: 状态不一致 → 一条状态差异
+    rule: EVAL_STATUS
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "100.00", status: UNPAID}
+    expect:
+      total: 1
+      types: {STATUS_MISMATCH: 1}
+
+  - key: status-mismatch-multiple
+    title: 三行状态都不一致 → 三条
+    rule: EVAL_STATUS
+    left:
+      - {biz_key: K1, amount: "1.00", status: PAID}
+      - {biz_key: K2, amount: "2.00", status: PAID}
+      - {biz_key: K3, amount: "3.00", status: PAID}
+    right:
+      - {biz_key: K1, amount: "1.00", status: UNPAID}
+      - {biz_key: K2, amount: "2.00", status: VOID}
+      - {biz_key: K3, amount: "3.00", status: REFUND}
+    expect:
+      total: 3
+      types: {STATUS_MISMATCH: 3}
+
+  # ========== 双字段（EVAL_BOTH） ==========
+
+  - key: both-fields-mismatch-one-row
+    title: 同一行金额与状态都不一致 → 两条差异（不是一条）
+    rule: EVAL_BOTH
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "101.00", status: UNPAID}
+    expect:
+      total: 2
+      types: {AMOUNT_MISMATCH: 1, STATUS_MISMATCH: 1}
+
+  - key: both-only-amount-mismatch
+    title: 只有金额不一致 → 一条（状态一致的字段不该误报）
+    rule: EVAL_BOTH
+    left:
+      - {biz_key: A1, amount: "100.00", status: PAID}
+    right:
+      - {biz_key: A1, amount: "101.00", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  # ========== 数字键（EVAL_INT_KEY） ==========
+
+  - key: int-key-identical
+    title: 数字键一致 → 零差异
+    rule: EVAL_INT_KEY
+    left:
+      - {biz_key: 10001, amount: "50.00", status: PAID}
+    right:
+      - {biz_key: 10001, amount: "50.00", status: PAID}
+    expect:
+      total: 0
+
+  - key: int-key-mismatch
+    title: 数字键下金额差异
+    rule: EVAL_INT_KEY
+    left:
+      - {biz_key: 10001, amount: "50.00", status: PAID}
+    right:
+      - {biz_key: 10001, amount: "50.50", status: PAID}
+    expect:
+      total: 1
+      types: {AMOUNT_MISMATCH: 1}
+
+  - key: int-key-missing
+    title: 数字键缺失
+    rule: EVAL_INT_KEY
+    left:
+      - {biz_key: 10001, amount: "50.00", status: PAID}
+    right:
+      - {biz_key: 10002, amount: "60.00", status: PAID}
+    expect:
+      total: 2
+      types: {MISSING_RIGHT: 1, MISSING_LEFT: 1}
+
+  # ========== 规模与综合 ==========
+
+  - key: left-empty-right-ten
+    title: 左侧空、右侧 10 行 → 10 条左侧缺失（不能只报一条）
+    rule: EVAL_AMOUNT
+    left: []
+    right:
+      - {biz_key: K01, amount: "1.00", status: PAID}
+      - {biz_key: K02, amount: "2.00", status: PAID}
+      - {biz_key: K03, amount: "3.00", status: PAID}
+      - {biz_key: K04, amount: "4.00", status: PAID}
+      - {biz_key: K05, amount: "5.00", status: PAID}
+      - {biz_key: K06, amount: "6.00", status: PAID}
+      - {biz_key: K07, amount: "7.00", status: PAID}
+      - {biz_key: K08, amount: "8.00", status: PAID}
+      - {biz_key: K09, amount: "9.00", status: PAID}
+      - {biz_key: K10, amount: "10.00", status: PAID}
+    expect:
+      total: 10
+      types: {MISSING_LEFT: 10}
+
+  - key: right-empty-ten
+    title: 右侧空、左侧 10 行 → 10 条右侧缺失
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: K01, amount: "1.00", status: PAID}
+      - {biz_key: K02, amount: "2.00", status: PAID}
+      - {biz_key: K03, amount: "3.00", status: PAID}
+      - {biz_key: K04, amount: "4.00", status: PAID}
+      - {biz_key: K05, amount: "5.00", status: PAID}
+      - {biz_key: K06, amount: "6.00", status: PAID}
+      - {biz_key: K07, amount: "7.00", status: PAID}
+      - {biz_key: K08, amount: "8.00", status: PAID}
+      - {biz_key: K09, amount: "9.00", status: PAID}
+      - {biz_key: K10, amount: "10.00", status: PAID}
+    right: []
+    expect:
+      total: 10
+      types: {MISSING_RIGHT: 10}
+
+  - key: mixed-scenario
+    title: 综合场景（1 一致 + 1 金额差 + 1 右缺 + 1 左缺）→ 分类必须准确
+    rule: EVAL_AMOUNT
+    left:
+      - {biz_key: K1, amount: "100.00", status: PAID}
+      - {biz_key: K2, amount: "200.00", status: PAID}
+      - {biz_key: K3, amount: "300.00", status: PAID}
+    right:
+      - {biz_key: K1, amount: "100.00", status: PAID}
+      - {biz_key: K2, amount: "201.00", status: PAID}
+      - {biz_key: K4, amount: "400.00", status: PAID}
+    expect:
+      total: 3
+      types: {AMOUNT_MISMATCH: 1, MISSING_RIGHT: 1, MISSING_LEFT: 1}

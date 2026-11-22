@@ -47,6 +47,7 @@ public class StartupSafety implements InitializingBean {
         boolean production = isProduction(profiles);
         checkModelApproval(production, profiles);
         checkApiKey(production, profiles);
+        checkExposure(production, profiles);
         checkReviewKey(production, profiles);
         reportLlmOptional(profiles);
     }
@@ -88,6 +89,49 @@ public class StartupSafety implements InitializingBean {
                 + (production ? "生产 profile（" + profiles + "）下写接口会变成匿名可调" : "已显式要求校验密钥")
                 + "。请设置 --recon.security.api-key=<密钥>，或把 recon.security.require-api-key 设为 false "
                 + "（只应在开发档这么做）。");
+    }
+
+    /**
+     * 对外监听时的上锁检查（清单 3.5 补强）。
+     *
+     * <p><b>为什么这条不是冗余</b>：{@link #checkApiKey} 的判定依据是「profile 名里有没有 prod」，
+     * 而真实事故的场景是：客户把 jar 拷到服务器上直接 {@code java -jar}，没设任何 profile，
+     * 也没配 api-key —— profile 判定说"开发档"，于是只打一条 WARN，服务带着匿名写接口对外跑起来。
+     *
+     * <p>所以这里换一个更硬的判据：<b>显式绑定到非回环地址</b>就说明部署者明确表达了"要对外提供服务"，
+     * 此时没有密钥就不再是"方便开发"，而是"裸奔上线"，必须起不来。
+     *
+     * <p>刻意不把「未设置 server.address」也判为对外：Spring Boot 默认绑 0.0.0.0，
+     * 若按它判，所有本地开发都会起不来。缺省仍按 profile 判，显式绑定才升级判定。
+     */
+    private void checkExposure(boolean production, List<String> profiles) {
+        if (production) {
+            return; // 生产档已由 checkApiKey 兜住，避免同一个问题报两次
+        }
+        String address = environment.getProperty("server.address", "").trim();
+        if (address.isEmpty() || isLoopback(address)) {
+            return; // 未显式绑定 / 只绑本机：开发常态
+        }
+        if (properties.getSecurity().enforced()) {
+            return;
+        }
+        if (Boolean.FALSE.equals(properties.getSecurity().getRequireApiKey())) {
+            log.warn("server.address={} 表示对外监听，但显式关闭了密钥校验"
+                    + "（recon.security.require-api-key=false）：写接口匿名可调。请确认这是你想要的。", address);
+            return;
+        }
+        throw new IllegalStateException("server.address=" + address + " 表示对外监听，"
+                + "但 recon.security.api-key 未配置：写接口（导入/建表/跑批/规则审批）会变成匿名可调。"
+                + "请设置 --recon.security.api-key=<密钥>；确实要在无密钥的情况下对外暴露，"
+                + "请显式设 --recon.security.require-api-key=false 并承担风险。"
+                + "（profile=" + profiles + "）");
+    }
+
+    /** 回环地址判定：本机开发只该绑这几个。 */
+    static boolean isLoopback(String address) {
+        String a = address.trim().toLowerCase(Locale.ROOT);
+        return a.equals("localhost") || a.equals("::1") || a.equals("[::1]")
+                || a.startsWith("127.");
     }
 
     /**

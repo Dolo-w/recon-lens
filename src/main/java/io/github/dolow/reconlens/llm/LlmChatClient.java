@@ -29,6 +29,21 @@ public interface LlmChatClient {
     Optional<String> complete(String system, String user);
 
     /**
+     * 带用途标注的一次对话往返。
+     *
+     * <p><b>为什么要加这个重载</b>：成本归因的整个价值在于"按功能算账"，而 {@code complete(system,user)}
+     * 里没有任何信息能告诉账本"这次是路由还是归因"。加参数而不是猜，是最诚实的做法。
+     *
+     * <p>默认实现直接委托给两参版本（标签记 {@code other}）——这样既有的实现与调用点不用一次性全改，
+     * 而新调用点只要传 {@link LlmPurpose} 就能拿到细粒度账。
+     *
+     * @param purpose 用途标签，取自 {@link LlmPurpose}（必须是常量，不能是用户输入）
+     */
+    default Optional<String> complete(String purpose, String system, String user) {
+        return complete(system, user);
+    }
+
+    /**
      * 最近一次 {@link #complete} 的真实 token 用量（{@code usage.total_tokens}）；拿不到时返回 0。
      *
      * <p>为什么不放进返回值：返回 {@code Optional<String>} 是接口的稳定契约，多包一层 record 会让

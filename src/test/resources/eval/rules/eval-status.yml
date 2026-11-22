@@ -1,0 +1,30 @@
+# 字符串字段比对：状态机口径不一致是最常见的"金额对但业务不对"
+code: EVAL_STATUS
+name: eval 状态字段对账
+left:
+  label: 账单
+  table: eval_left
+  keyType: STRING
+  dimension: [biz_key]
+right:
+  label: 结算
+  table: eval_right
+  keyType: STRING
+  dimension: [biz_key]
+shard:
+  count: 1
+  parallelism: 1
+compare:
+  - field: status
+    type: STRING
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 1

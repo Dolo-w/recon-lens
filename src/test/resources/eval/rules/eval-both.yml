@@ -1,0 +1,35 @@
+# 多字段：同一行可能同时有金额和状态两处不一致（两条差异，不是一条）
+code: EVAL_BOTH
+name: eval 金额+状态双字段对账
+left:
+  label: 账单
+  table: eval_left
+  keyType: STRING
+  dimension: [biz_key]
+right:
+  label: 结算
+  table: eval_right
+  keyType: STRING
+  dimension: [biz_key]
+shard:
+  count: 1
+  parallelism: 1
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+  - field: status
+    type: STRING
+    diffType: STATUS_MISMATCH
+    severity: MEDIUM
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 1

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.dolow.reconlens.domain.IndustryKnowledge;
 import io.github.dolow.reconlens.llm.LlmChatClient;
+import io.github.dolow.reconlens.llm.LlmPurpose;
 import io.github.dolow.reconlens.llm.PromptGuard;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -140,7 +141,7 @@ public class KnowledgeHarvestService {
     /** 蒸馏/摄取共用：调 LLM → 解析条目 → 机器准入 → 入库。autoKey 时自动生成 entry_key。 */
     private HarvestReport harvest(String system, String user, String autoKey,
                                   IndustryKnowledge.Origin origin, String source) {
-        Optional<String> content = llm.complete(system, user);
+        Optional<String> content = llm.complete(LlmPurpose.HARVEST, system, user);
         if (content.isEmpty()) {
             return HarvestReport.failed("模型调用无返回");
         }

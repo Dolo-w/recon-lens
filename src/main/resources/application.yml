@@ -1,6 +1,36 @@
 server:
   port: 8080
 
+# 生产级可观测性（清单 P0-1 / 8.4 / 8.6）。
+# health 给编排系统探活（liveness/readiness 分开，滚动重启不会误杀还在收尾的实例）；
+# metrics/prometheus 给监控抓取；info 用于发布时核对版本。
+# show-details 默认 when_authorized：没接认证时等于不吐内部细节，生产安全；排障时临时加
+#   --management.endpoint.health.show-details=always 即可。
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: recon-lens
+  # 显式开启：Boot 的 @ConditionalOnEnabledMetricsExport 会读 management.defaults.metrics.export.enabled，
+  # 在某些配置组合下它被判为 false，Prometheus registry 就不会注册（表现为 /actuator/prometheus 404
+  # 且 registry 退化成 SimpleMeterRegistry）。写死 true 比依赖默认值稳。
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  defaults:
+    metrics:
+      export:
+        enabled: true
+
 spring:
   application:
     name: recon-lens
@@ -24,6 +54,20 @@ spring:
     default-property-inclusion: non_null
 
 recon:
+  # ---- 告警最小集（清单 P0-6）----
+  # 只放三条能直接对应钱和风险的规则：LLM 失败率 / 写接口裸奔 / 单日成本。
+  # enabled=false 只是关掉自动检查，POST /api/alerts/check 手动触发仍可用。
+  alert:
+    enabled: false
+    check-interval-ms: 300000
+    # 通知地址（企业微信/钉钉/自建 relay），收到 POST JSON；留空则只落库不推送
+    webhook-url: ""
+    llm-failure-rate-threshold: 0.3
+    # 最小样本量：窗口内调用少于这个数就不判失败率（避免 1 次失败 = 100%）
+    llm-failure-min-calls: 5
+    llm-failure-window-minutes: 30
+    # 单日成本阈值（元）；0 = 不检查
+    daily-cost-yuan-threshold: 50.0
   # 规则 DSL 所在位置（classpath: 或 file: 前缀），启动时全部加载
   rules-location: classpath:rules/
   # 是否把上面的 YAML 规则与规则库里的同名规则对齐（库里没有的作 v1；不一致按文件覆盖成新版本；已下线的不复活）
@@ -71,6 +115,21 @@ recon:
     timeout-seconds: 30
     # 单次批量归因最多处理的差异条数
     batch-limit: 50
+    # ---- 容错（清单 P0-4）：一次 API 抖动不该毁掉整条采集链 ----
+    # 只对可重试错误生效（网络/超时/429/5xx）；401/400 这类配置错会直接换 provider，不做无用重试。
+    max-attempts: 3
+    # 指数退避基数（毫秒），带 ±25% 抖动防多实例同步重试
+    retry-base-delay-millis: 400
+    # ---- 成本归因（清单 P0-2）：单位「元 / 百万 token」，默认取 DeepSeek 公开价 ----
+    # 这是落库时的快照，改价只影响之后的记录，不会篡改历史账。换模型务必改这两行。
+    price-input-per-mtok: 2.0
+    price-output-per-mtok: 8.0
+    # 备用 provider：主 provider 整体不可用时接管。base-url 留空 = 不启用（行为与旧版一致）。
+    fallback:
+      base-url: ""
+      api-key: ""      # 留空则沿用主 provider 的 key
+      model: ""        # 留空则沿用主 provider 的 model
+      # price-input-per-mtok / price-output-per-mtok 不填则沿用主 provider 的价
   # 看表结构（recon_describe_table / GET /api/tables/{table}）的样例值开关。
   # 默认 false = 样例一律打码（手机、证件、邮箱、卡号、姓名、地址）。
   # 打开等于让"看字段"接口把原文吐给任何能调它的人 —— 生产上除非有脱敏视图，否则别开。
@@ -92,6 +151,10 @@ recon:
       api-key: ${DEEPSEEK_API_KEY:}
       model: deepseek-chat
       timeout-ms: 8000
+      # 会话路径默认不重试：用户在看屏幕，重试一次就是再等一个 timeout，
+      # 而且会把上行熔断器看到的"失败一次"变成"底层请求两次"，把阈值算歪。
+      # 模型挂掉的正解是立刻退回词表（已实现），不是原地重试。想在部署档开就改这里。
+      max-attempts: 1
       # 把引擎/工具的输出改写成"先一句结论、再明细"的人话。关掉只影响读法，不影响听懂。
       # 没有 api-key 时这一层自动空转，行为与 P1 一致。
       summarize: true

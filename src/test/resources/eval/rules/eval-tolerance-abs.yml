@@ -1,0 +1,31 @@
+# 绝对容差 0.01 元：用于"分位舍入差异不该报"的场景
+code: EVAL_TOLERANCE_ABS
+name: eval 绝对容差金额对账
+left:
+  label: 账单
+  table: eval_left
+  keyType: STRING
+  dimension: [biz_key]
+right:
+  label: 结算
+  table: eval_right
+  keyType: STRING
+  dimension: [biz_key]
+shard:
+  count: 1
+  parallelism: 1
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0.01
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 1

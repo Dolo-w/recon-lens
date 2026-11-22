@@ -1,0 +1,41 @@
+# eval 规则集：只用于任务级回归（清单 P0-5）。
+#
+# 设计：6 条通用规则 + 30 组数据。不写 30 条规则的理由是 ——
+# 差异类型（缺失/重复/金额/状态）由**数据**决定，不由规则决定；
+# 30 条各写一套规则会得到 30 份几乎相同的 YAML，改一处要改 30 处，
+# 那种回归集会很快腐烂成没人维护的摆设。
+#
+# 所有规则共用两张表 eval_left / eval_right，每个用例跑前重建 —— 用例之间零耦合。
+# 分片一律 count=1：eval 数据量小，分片只增加不确定性（分片逻辑本身另有专门测试）。
+
+code: EVAL_AMOUNT
+name: eval 基础金额对账（无容差）
+description: 精确比对金额，任何分位差异都算差异
+left:
+  label: 账单
+  table: eval_left
+  keyType: STRING
+  dimension: [biz_key]
+right:
+  label: 结算
+  table: eval_right
+  keyType: STRING
+  dimension: [biz_key]
+shard:
+  count: 1
+  parallelism: 1
+compare:
+  - field: amount
+    type: DECIMAL
+    tolerance: 0
+    diffType: AMOUNT_MISMATCH
+    severity: HIGH
+missing:
+  leftMissingDiffType: MISSING_LEFT
+  rightMissingDiffType: MISSING_RIGHT
+  severity: HIGH
+duplicate:
+  diffType: DUPLICATE_KEY
+  severity: MEDIUM
+options:
+  maxAttempts: 1

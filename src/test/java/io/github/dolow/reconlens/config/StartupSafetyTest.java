@@ -105,4 +105,69 @@ class StartupSafetyTest {
         assertFalse(StartupSafety.isProduction(java.util.List.of("mysql")));
         assertFalse(StartupSafety.isProduction(java.util.List.of("mcp", "test")));
     }
+
+    // ------------------------------------------------------------------
+    // 清单 3.5 补强：默认档（无 profile）但对外监听 —— 真实事故场景
+    // ------------------------------------------------------------------
+
+    @Test
+    void 开发档显式绑定对外地址且没密钥时启动失败() {
+        // 事故原型：客户把 jar 拷到服务器 java -jar，没设 profile、没配 key，
+        // 绑了 0.0.0.0。改之前只打一条 WARN，服务带着匿名写接口对外跑起来。
+        MockEnvironment environment = environment();
+        environment.setProperty("server.address", "0.0.0.0");
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> new StartupSafety(properties(null), environment).afterPropertiesSet());
+
+        assertTrue(e.getMessage().contains("server.address"), e.getMessage());
+        assertTrue(e.getMessage().contains("recon.security.api-key"), e.getMessage());
+    }
+
+    @Test
+    void 开发档绑回环地址仍能起() {
+        // 127.0.0.1 / localhost 明确表示"只本机可访问"，是开发常态，不该拦住
+        for (String address : new String[]{"127.0.0.1", "localhost", "::1"}) {
+            MockEnvironment environment = environment();
+            environment.setProperty("server.address", address);
+            new StartupSafety(properties(null), environment).afterPropertiesSet();
+        }
+    }
+
+    @Test
+    void 开发档未设置监听地址仍能起_缺省不按对外判() {
+        // Spring Boot 默认绑 0.0.0.0，若把"未设置"也判成对外，所有本地开发都会起不来
+        new StartupSafety(properties(null), environment()).afterPropertiesSet();
+    }
+
+    @Test
+    void 开发档对外监听但显式开了逃生门仍能起() {
+        MockEnvironment environment = environment();
+        environment.setProperty("server.address", "0.0.0.0");
+        ReconProperties properties = properties(null);
+        properties.getSecurity().setRequireApiKey(false);
+
+        new StartupSafety(properties, environment).afterPropertiesSet();
+    }
+
+    @Test
+    void 对外监听时配了密钥就能起() {
+        MockEnvironment environment = environment();
+        environment.setProperty("server.address", "0.0.0.0");
+        ReconProperties properties = properties("k-1");
+        properties.getReview().setApiKey("review-key");
+
+        new StartupSafety(properties, environment).afterPropertiesSet();
+    }
+
+    @Test
+    void 回环地址判定() {
+        assertTrue(StartupSafety.isLoopback("127.0.0.1"));
+        assertTrue(StartupSafety.isLoopback("127.1.2.3"));
+        assertTrue(StartupSafety.isLoopback("LocalHost"));
+        assertTrue(StartupSafety.isLoopback("[::1]"));
+        assertFalse(StartupSafety.isLoopback("0.0.0.0"));
+        assertFalse(StartupSafety.isLoopback("10.0.0.8"));
+        assertFalse(StartupSafety.isLoopback("recon.example.com"));
+    }
 }
