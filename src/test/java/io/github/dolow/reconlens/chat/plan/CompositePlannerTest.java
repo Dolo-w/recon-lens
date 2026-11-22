@@ -260,4 +260,67 @@ class CompositePlannerTest {
         planner.plan("跑一下 BILL_VS_SETTLE", ChatSlots.EMPTY);
         assertThat(calls.get()).isZero();
     }
+
+    @Test
+    @DisplayName("意图缓存：同一句自包含的话复用上次的模型计划，不付第二次往返")
+    void 缓存命中不再问模型() {
+        io.github.dolow.reconlens.chat.RoutingMetrics metrics =
+                new io.github.dolow.reconlens.chat.RoutingMetrics(null);
+        CompositePlanner planner = new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
+                new LlmPlanner(new LlmChatClient(baseUrl(), "sk-test", "deepseek-chat", 2000, json), json),
+                0.7, metrics);
+        ChatPlan first = planner.plan("帮我把所有的规则都列出来看看", ChatSlots.EMPTY).orElseThrow();
+        ChatPlan second = planner.plan("帮我把所有的规则都列出来看看", ChatSlots.EMPTY).orElseThrow();
+
+        assertThat(first.call().intent()).isEqualTo(second.call().intent());
+        assertThat(calls.get()).isEqualTo(1);
+        assertThat(((Number) metrics.snapshot().get("cacheHits")).longValue()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("invalidate 清空缓存：写动作之后世界变了，必须重新问模型")
+    void invalidate清空缓存() {
+        CompositePlanner planner = new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
+                new LlmPlanner(new LlmChatClient(baseUrl(), "sk-test", "deepseek-chat", 2000, json), json));
+        planner.plan("帮我把所有的规则都列出来看看", ChatSlots.EMPTY).orElseThrow();
+        planner.invalidate();
+        planner.plan("帮我把所有的规则都列出来看看", ChatSlots.EMPTY).orElseThrow();
+        assertThat(calls.get()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("带指代的话不缓存：『它』换一轮历史就是另一个计划")
+    void 指代句不缓存() {
+        CompositePlanner planner = new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
+                new LlmPlanner(new LlmChatClient(baseUrl(), "sk-test", "deepseek-chat", 2000, json), json));
+        planner.plan("把它的执行历史也列出来看看", ChatSlots.EMPTY).orElseThrow();
+        planner.plan("把它的执行历史也列出来看看", ChatSlots.EMPTY).orElseThrow();
+        assertThat(calls.get()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("槽位指纹变了缓存就失效：同一个说法挂着不同焦点不是同一个问题")
+    void 槽位变化缓存失效() {
+        CompositePlanner planner = new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
+                new LlmPlanner(new LlmChatClient(baseUrl(), "sk-test", "deepseek-chat", 2000, json), json));
+        planner.plan("帮我把这个规则的执行历史列出来看看", ChatSlots.EMPTY).orElseThrow();
+        planner.plan("帮我把这个规则的执行历史列出来看看",
+                ChatSlots.EMPTY.withRuleCode("BILL_VS_SETTLE")).orElseThrow();
+        assertThat(calls.get()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("熔断跳闸记进路由指标：连续三次失败后 breakerTrips 记一笔")
+    void 熔断记进指标() {
+        io.github.dolow.reconlens.chat.RoutingMetrics metrics =
+                new io.github.dolow.reconlens.chat.RoutingMetrics(null);
+        CompositePlanner planner = new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()),
+                new LlmPlanner(new LlmChatClient(baseUrl(), "sk-test", "deepseek-chat", 2000, json), json),
+                0.7, metrics);
+        nextStatus.set(500);
+        for (int i = 0; i < 3; i++) {
+            planner.plan("帮我把所有的规则都列出来看看", ChatSlots.EMPTY);
+        }
+        assertThat(((Number) metrics.snapshot().get("breakerTrips")).longValue()).isEqualTo(1);
+    }
 }

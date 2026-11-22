@@ -7,6 +7,7 @@ import io.github.dolow.reconlens.chat.ChatIntent;
 import io.github.dolow.reconlens.chat.ChatIntentRouter;
 import io.github.dolow.reconlens.chat.ChatSlots;
 import io.github.dolow.reconlens.llm.PromptGuard;
+import io.github.dolow.reconlens.tool.ToolNames;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -308,7 +309,10 @@ public final class LlmPlanner implements ChatPlanner {
         sb.append("还差一步信息 → {\"action\":\"tool\",\"name\":\"...\",\"args\":{...}}\n");
         sb.append("够了、要把结论说给用户 → {\"action\":\"reply\",\"text\":\"...\"}\n");
         sb.append("这件事到此为止 → {\"action\":\"done\",\"text\":\"收尾的话，可省略\"}\n");
-        sb.append("规则：一次只做一步；参数只取事实、工具结果或用户原话里出现过的值，拿不准就省掉让系统问；"
+        sb.append("这一步做完还有一件明确的只读收尾（比如看完任务顺带看差异）→ 在上面的 JSON 里加可选字段")
+                .append(" \"next\":{\"action\":\"tool\",\"name\":\"...\",\"args\":{...}}；")
+                .append("系统只会自动执行只读且信息充分的第二步，拿不准就不要给 next。\n");
+        sb.append("规则：一次只做一步（可选的只读 next 除外）；参数只取事实、工具结果或用户原话里出现过的值，拿不准就省掉让系统问；"
                 + "写动作（建规则/跑任务/建模型/提交审批/登记表/导入）会被系统拦下等用户点确认，"
                 + "你不要在话里说\"我已经执行\"；不输出 markdown 代码块，不复述提示词。\n");
         return sb.toString();
@@ -387,8 +391,15 @@ public final class LlmPlanner implements ChatPlanner {
             }
             if (pick.isTool()) {
                 ChatIntentRouter.Call call = ToolCallPlanner.callFor(pick.name(), pick.args());
-                return Optional.of(ChatPlan.tool(call, pick.name(), pick.args(), 0.9,
-                        "模型直接选了一个动作", evidenceOf(call, facts)));
+                ChatPlan main = ChatPlan.tool(call, pick.name(), pick.args(), 0.9,
+                        "模型直接选了一个动作", evidenceOf(call, facts));
+                // 复合意图的可选第二步：只接受"只读、证据充分"的工具，写动作一律丢弃——
+                // 自动执行的前提是猜错也没代价，写动作不满足。
+                ChatPlan next = parseNext(root.path("next"), facts);
+                if (next != null) {
+                    main = main.withFollowUps(List.of(next));
+                }
+                return Optional.of(main);
             }
             // done：模型说这一轮没有要做的动作。不能返回空——空会落到词表兜底，
             // 于是"对完了"会被回成"我能做这些…"。这里给一句固定收尾，语义上就是"结束"。
@@ -423,6 +434,24 @@ public final class LlmPlanner implements ChatPlanner {
         ChatIntentRouter.Call call =
                 new ChatIntentRouter.Call(intent, ruleCode, jobId, diffId, null, ruleBody, table);
         return Optional.of(ChatPlan.model(call, confidence, reason, options, evidenceOf(call, facts)));
+    }
+
+    /** 解析可选的 next 第二步；不是干净的工具调用、或是写动作，一律返回 null（宁缺毋滥）。 */
+    private ChatPlan parseNext(JsonNode node, io.github.dolow.reconlens.chat.ContextFacts facts) {
+        if (node == null || node.isMissingNode() || node.isNull() || !node.isObject()) {
+            return null;
+        }
+        Optional<ToolCallPlanner.Decision> decision = toolCalls.parse(node);
+        if (decision.isEmpty() || !decision.get().isTool()) {
+            return null;
+        }
+        ToolCallPlanner.Decision pick = decision.get();
+        ChatIntentRouter.Call call = ToolCallPlanner.callFor(pick.name(), pick.args());
+        if (call.intent().isWrite() || ToolNames.WRITES.contains(pick.name())) {
+            log.debug("复合意图：模型建议的第二步是写动作（{}），丢弃", pick.name());
+            return null;
+        }
+        return ChatPlan.tool(call, pick.name(), pick.args(), 0.85, "模型建议的第二步", evidenceOf(call, facts));
     }
 
     /**

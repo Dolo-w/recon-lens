@@ -121,7 +121,8 @@ public class ChatConfiguration {
                                    @Value("${recon.chat.loop.enabled:false}") boolean loopEnabled,
                                    @Value("${recon.chat.mode:legacy}") String mode,
                                    @Value("${recon.chat.loop.max-hops:5}") int maxHops,
-                                   ToolRegistry toolRegistry, ChatHandbook handbook) {
+                                   ToolRegistry toolRegistry, ChatHandbook handbook,
+                                   RoutingMetrics routingMetrics) {
         // 工具清单从注册表读（不手抄）：模型看到的参数名和真正被调用的工具必须同源，
         // 否则工具改了参数、提示词还写着旧名，表现成"调用成功但没答案"。
         io.github.dolow.reconlens.chat.plan.ToolCallPlanner tools =
@@ -137,7 +138,13 @@ public class ChatConfiguration {
             // 都有同一个副作用——把模型本来答得出的话换成固定菜单。
             return llm;
         }
-        return new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()), llm);
+        return new CompositePlanner(new KeywordPlanner(new ChatIntentRouter()), llm, 0.7, routingMetrics);
+    }
+
+    /** 路由评估指标：per-intent 计数 + fallback 语料收集（落库），出口在 /api/chat/stats。 */
+    @Bean
+    public RoutingMetrics routingMetrics(JdbcTemplate jdbcTemplate) {
+        return new RoutingMetrics(jdbcTemplate);
     }
 
     /**
@@ -178,13 +185,15 @@ public class ChatConfiguration {
                                    ChatNarrator chatNarrator, RuleNamer ruleNamer,
                                    io.github.dolow.reconlens.store.ChatDraftRepository chatDraftRepository,
                                    DraftSlotFiller draftSlotFiller, ChatClaims chatClaims,
-                                   FactsCache factsCache, TurnLedger turnLedger,
+                                   FactsCache factsCache, TurnLedger turnLedger, RoutingMetrics routingMetrics,
                                    @Value("${recon.chat.mode:legacy}") String mode,
                                    @Value("${recon.chat.loop.max-hops:5}") int maxHops) {
-        return new ChatRuntime(chatSessionService, chatSummaryService, toolRegistry, recallAugmenter,
+        ChatRuntime runtime = new ChatRuntime(chatSessionService, chatSummaryService, toolRegistry, recallAugmenter,
                 reconRepository, reconEngine, ruleCatalog, objectMapper, chatPlanner, chatNarrator,
                 chatDraftRepository, ruleNamer, draftSlotFiller, chatClaims, factsCache, turnLedger,
                 ChatMode.of(mode), maxHops);
+        runtime.attachMetrics(routingMetrics);
+        return runtime;
     }
 
     /** 表单入口：与会话共用 {@link ChatRuntime#submit}，不另起一套动作实现。 */

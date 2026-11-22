@@ -4,6 +4,24 @@
 
 ## [未发布]
 
+### 新增（2026-11-22：意图路由补齐业界共识栈 —— 槽位状态机 / 评估闭环 / 意图缓存 / 复合意图）
+
+- **通用槽位协议（SlotProtocol，missingSlots 的落地）**：追问必挂起、一次只问一个、补答只填参数不重判意图。
+  此前 jobSummary/listDiffs/explainJob/explainDiff/retry/buildModel 六个读动作的反问全是"空问"——
+  用户回「123」会被判成 HELP 没听懂；现在全部挂起（带时间戳），回裸数字/「第 N 条」直接续上。
+  挂起 15 分钟过期（起草状态机豁免）：**过期的确认不是确认**——隔天回「好」不会执行昨天的写操作
+- **路由评估闭环（RoutingMetrics）**：per-intent 命中 / 通道归档（词表/模型/工具/说话）/ 澄清数 /
+  fallback 数 / 熔断跳闸 / 缓存命中，出口挂 `/api/chat/stats` 的 `routing` 段（进程累计重启归零）；
+  **没听懂的原话落库 `recon_chat_fallback`**（append-only，跨重启积累）——每一条都是候选的新词表条目，
+  路由层从开环变成闭环（迁移脚本 docs/migrations/2026-11-22-chat-fallback.sql，带回滚）
+- **意图缓存（CompositePlanner）**：同一句自包含（无指代）的话 + 相同槽位指纹，10 分钟内复用上次模型计划，
+  不再付一次往返；带指代词（它/那条/刚才…）一律不缓存；写动作执行后 `invalidate()` 作废——
+  缓存的计划可能指向旧任务
+- **复合意图（followUps）**：模型协议新增可选 `next` 字段（第二步只读工具）；解析层只接
+  "干净工具调用 + 非写 + 证据充分"的第二步，宁缺毋滥；运行时自动执行并标注「顺手做的第二步」，
+  写动作永远不自动跟跑
+- 全量 1034 绿（+17：SlotProtocol 6 / RoutingMetrics 3 / CompositePlanner 缓存与熔断 5 / LlmPlanner followUp 3）
+
 ### 新增（2026-11-21 深夜：财务可读报告 + 知识层 ROI 报表 —— 出口层收口）
 
 - **财务可读报告**：`GET /api/reports/finance?days=30&priceCode=&model=&tokenType=` ——

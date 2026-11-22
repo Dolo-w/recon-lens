@@ -3,7 +3,9 @@ package io.github.dolow.reconlens.chat.plan;
 import io.github.dolow.reconlens.chat.ChatIntent;
 import io.github.dolow.reconlens.chat.ChatIntentRouter;
 import io.github.dolow.reconlens.chat.ChatSlots;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +41,20 @@ public final class CompositePlanner implements ChatPlanner {
     private static final java.util.regex.Pattern QUESTION_WORDS = java.util.regex.Pattern.compile(
             "什么|怎么|为什么|为啥|多少|是不是|能不能|可不可以|关系|如何|区别");
 
+    /** 意图缓存的容量与时效。 */
+    static final int CACHE_MAX = 64;
+    static final long CACHE_TTL_MS = 10 * 60 * 1000L;
+    /**
+     * 指代词：句子里有它，理解就依赖历史，缓存键里没有历史 → 不能缓存。
+     * 「它呢」「刚才那个任务」换一轮历史就是另一个计划。
+     */
+    private static final java.util.regex.Pattern ANAPHORA = java.util.regex.Pattern.compile(
+            "它|他们|她们|它们|哪个|那条|这条|该|上述|刚才|刚刚|之前|上次|同上|上面|前面|上一|再来|同样");
+
+    /** 缓存条目：计划 + 写入时刻。过期由命中时判断，不在后台清扫。 */
+    private record Cached(ChatPlan plan, long at) {
+    }
+
     private final KeywordPlanner keyword;
     private final LlmPlanner llm;
     private final double keywordAccept;
@@ -46,14 +62,38 @@ public final class CompositePlanner implements ChatPlanner {
     private final io.github.dolow.reconlens.llm.LlmCircuitBreaker breaker =
             new io.github.dolow.reconlens.llm.LlmCircuitBreaker("模型规划器", FAILURES_BEFORE_OPEN, COOL_DOWN_MS);
 
+    /** 路由指标（可空：老构造器/单测不接）。熔断跳闸在这里记账，因为只有它知道。 */
+    private final io.github.dolow.reconlens.chat.RoutingMetrics metrics;
+    /** 意图缓存：同一句自包含的话在短窗内复用上次的模型计划，不再付一次往返。 */
+    private final Map<String, Cached> planCache = java.util.Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Cached> eldest) {
+                    return size() > CACHE_MAX;
+                }
+            });
+
     public CompositePlanner(KeywordPlanner keyword, LlmPlanner llm) {
-        this(keyword, llm, 0.7);
+        this(keyword, llm, 0.7, null);
     }
 
     public CompositePlanner(KeywordPlanner keyword, LlmPlanner llm, double keywordAccept) {
+        this(keyword, llm, keywordAccept, null);
+    }
+
+    public CompositePlanner(KeywordPlanner keyword, LlmPlanner llm, double keywordAccept,
+                            io.github.dolow.reconlens.chat.RoutingMetrics metrics) {
         this.keyword = keyword;
         this.llm = llm;
         this.keywordAccept = keywordAccept;
+        this.metrics = metrics;
+    }
+
+    @Override
+    public void invalidate() {
+        synchronized (planCache) {
+            planCache.clear();
+        }
     }
 
     @Override
@@ -90,6 +130,18 @@ public final class CompositePlanner implements ChatPlanner {
         if (fastPath(message, keywordPlan, slots) || !llmReady()) {
             return Optional.of(keywordPlan);
         }
+        // 意图缓存：自包含（无指代）的话 + 相同槽位指纹 → 直接复用上次的模型计划。
+        // 只在进模型之前查——词表快路径本来就是零成本，不必缓存。
+        String cacheKey = cacheKey(message, slots, phase);
+        if (cacheKey != null) {
+            Cached hit = planCache.get(cacheKey);
+            if (hit != null && System.currentTimeMillis() - hit.at() <= CACHE_TTL_MS) {
+                if (metrics != null) {
+                    metrics.cacheHit();
+                }
+                return Optional.of(hit.plan());
+            }
+        }
         // 摘要只喂模型层：词表是确定性匹配，它不需要"更早聊过什么"
         Optional<ChatPlan> modelPlan = llm.plan(message, slots, facts, history, summary, phase);
         if (modelPlan.isEmpty()) {
@@ -125,7 +177,35 @@ public final class CompositePlanner implements ChatPlanner {
                 && !plan.hasOptions() && certainHit(keywordPlan)) {
             return Optional.of(keywordPlan);
         }
+        // 只缓存"确定可执行"的结果：工具调用或证据充分的计划。
+        // 澄清/没听懂不缓存——同一个说法下一轮应该再给用户一次机会，也该再试一次词表。
+        if (cacheKey != null && (plan.isToolCall() || plan.confident())
+                && plan.call().intent() != ChatIntent.HELP && !plan.hasOptions()) {
+            planCache.put(cacheKey, new Cached(plan, System.currentTimeMillis()));
+        }
         return Optional.of(plan);
+    }
+
+    /**
+     * 缓存键：规范化原文 + 槽位指纹 + 预算档。返回 null 表示这句不可缓存。
+     *
+     * <p>为什么键里没有历史和事实：有历史的句子必然带指代（被 {@link #ANAPHORA} 拦下），
+     * 而事实变了本来就该靠 TTL（10 分钟）和新写动作后的 {@link #invalidate()} 兜住——
+     * 为它们建键等于永远不命中。
+     */
+    private String cacheKey(String message, ChatSlots slots, io.github.dolow.reconlens.chat.TurnBudget.Phase phase) {
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        String text = message.strip();
+        if (ANAPHORA.matcher(text).find()) {
+            return null;
+        }
+        String norm = text.toLowerCase(java.util.Locale.ROOT).replaceAll("\\s+", "");
+        String fingerprint = (slots == null ? "" : String.valueOf(java.util.Objects.hash(
+                slots.pendingAction(), slots.ruleCode(), slots.jobId(), slots.diffId(),
+                slots.table(), slots.lastIntent()))) + "|" + phase;
+        return norm + "|" + fingerprint;
     }
 
     /**
@@ -241,6 +321,11 @@ public final class CompositePlanner implements ChatPlanner {
 
     private void onFailure() {
         breaker.onFailure();
+        // 连续失败到跳闸只发生在 onFailure 内部（breaker 自己数），这里记的是"失败"这一笔：
+        // 指标只关心"模型通道不好使"的趋势，精确的跳闸时刻由 state() 现场判。
+        if (metrics != null && breaker.remainingMs() > 0) {
+            metrics.breakerTrip();
+        }
     }
 
     private void onSuccess() {

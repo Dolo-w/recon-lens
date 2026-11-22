@@ -82,6 +82,16 @@ public interface ChatPlanner {
         return plan(message, slots, ContextFacts.EMPTY, List.of());
     }
 
+    /**
+     * 「世界变了，之前的理解作废」：写动作执行完之后由运行时调用。
+     *
+     * <p>为什么放在接口上：有缓存的规划器（CompositePlanner）必须知道"刚跑完一次对账，
+     * 上一句缓存的计划可能已经指向旧任务"；没有缓存的实现是无操作。默认空实现保证
+     * 老实现与单测里的 mock 不用跟着改。
+     */
+    default void invalidate() {
+    }
+
     default Optional<ChatPlan> plan(String message, ChatSlots slots, List<String> history) {
         return plan(message, slots, ContextFacts.EMPTY, history);
     }

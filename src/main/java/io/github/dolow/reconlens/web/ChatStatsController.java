@@ -1,6 +1,7 @@
 package io.github.dolow.reconlens.web;
 
 import io.github.dolow.reconlens.chat.ChatIntent;
+import io.github.dolow.reconlens.chat.RoutingMetrics;
 import io.github.dolow.reconlens.store.ChatStatsRepository;
 import io.github.dolow.reconlens.tool.ToolNames;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -26,9 +27,11 @@ import java.util.Map;
 public class ChatStatsController {
 
     private final ChatStatsRepository stats;
+    private final RoutingMetrics routing;
 
-    public ChatStatsController(ChatStatsRepository stats) {
+    public ChatStatsController(ChatStatsRepository stats, RoutingMetrics routing) {
         this.stats = stats;
+        this.routing = routing;
     }
 
     @GetMapping
@@ -48,6 +51,7 @@ public class ChatStatsController {
                 ? 0.0
                 : Math.round((double) empty / assistant * 1000.0) / 1000.0);
         body.put("avgUserTurnsPerSession", stats.avgTurnsPerSession());
+        body.put("routing", routing.snapshot());
         body.put("note", "emptyToolTurns 是「空手回」的轮次数，含 HELP/审批说明这类合理空手回，只适合看趋势");
         return body;
     }

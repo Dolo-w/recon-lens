@@ -24,6 +24,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -212,6 +213,16 @@ public class ChatRuntime {
     /** 自由循环最多几跳（含第一跳）。0 表示不开放多跳，行为与单步一样。 */
     private final int loopHops;
 
+    /**
+     * 路由评估指标（可空：老构造器/单测不接）。旁路记账——它的任何失败都不许影响主链路。
+     */
+    private volatile RoutingMetrics metrics;
+
+    /** 装配时接上指标。不挤构造器签名：给 16 个参数的构造器再添一位，每个单测都得跟着改。 */
+    public void attachMetrics(RoutingMetrics routingMetrics) {
+        this.metrics = routingMetrics;
+    }
+
     public ChatRuntime(ChatSessionService sessions, ChatSummaryService summaries, ToolRegistry registry,
             io.github.dolow.reconlens.recall.RecallAugmenter recall,
             io.github.dolow.reconlens.store.ReconRepository repository,
@@ -265,6 +276,11 @@ public class ChatRuntime {
             int userSeq = session.turnCount() + 1;
 
             ChatSlots slots = readSlots(session);
+            // 挂起过期（SlotProtocol）：15 分钟前问出去的"确认吗 / 哪个任务"不再等答案。
+            // 过期的确认尤其危险——用户隔天回一句「好」，绝不能变成执行昨天的写操作。
+            if (SlotProtocol.pendingExpired(slots, System.currentTimeMillis())) {
+                slots = slots.clearPending();
+            }
             // 会话刚开、话里却带着"刚才/上面"：这句在续一段本会话里没有的上下文
             // （常见于服务重启后内存库清零，或换了会话）。不装作接得上，也不去猜——
             // 猜错的代价是拿错对象去执行，比多问一句贵得多。
@@ -336,6 +352,9 @@ public class ChatRuntime {
                             contextText, phase)
                     .orElseGet(this::planFallback);
             ChatIntentRouter.Call call = plan.call();
+            if (metrics != null) {
+                metrics.plan(plan);
+            }
             // 起草的收集是状态机：上一问还没答完时，"这句是不是在回答它"由槽位判定，
             // 不能由模型今天愿不愿意多聊一句决定。实测：问完左侧表，用户回「bill_left」，
             // 模型把它接过去答了一段，已经收下的表当场丢了，下一句又从"左侧用哪张表"开始。
@@ -407,7 +426,7 @@ public class ChatRuntime {
                 args.put("a", conflict.a().value());
                 args.put("b", conflict.b().value());
                 args.put("summary", "历史口径二选一");
-                Reply ask = Reply.text(conflict.describe(), slots.withPending(PICK_CLAIM, args));
+                Reply ask = Reply.text(conflict.describe(), slots.withPending(PICK_CLAIM, SlotProtocol.stamped(args)));
                 ChatSlots next = ask.slots().withIntent(ChatIntent.HELP.name());
                 sessions.append(scope, sessionId, "assistant", ask.text(),
                         envelope(ChatIntent.HELP, tools));
@@ -435,6 +454,9 @@ public class ChatRuntime {
                 reply = loopTurn(scope, message, facts, history, contextText, plan, slots, tools, sink, executed);
             } else if (call.intent() == ChatIntent.HELP && plan.hasOptions()) {
                 // 带候选的"没听懂"不是"要说明书"：给一句短问句 + 候选项，别甩整页帮助
+                if (metrics != null) {
+                    metrics.clarify();
+                }
                 reply = Reply.text(clarifyText(plan), slots);
             } else if (plan.isReply()) {
                 // 模型自己选了「说话/反问」：它的原话就是回答，任何总结层改写都算篡改
@@ -451,12 +473,25 @@ public class ChatRuntime {
                 boolean verbatim = !plan.isToolCall()
                         && io.github.dolow.reconlens.chat.plan.IntentReview.question(message, call.intent()) != null;
                 Reply first = dispatch(scope, plan, slots, message, tools, sink);
-                Reply merged = plan.isToolCall()
-                        ? first
-                        : followUp(scope, sessionId, message, facts, call, first, tools, sink, executed);
+                Reply merged;
+                if (plan.isToolCall() && plan.hasFollowUps()) {
+                    // 复合意图：模型建议的第二步由这里执行（只读、证据充分的才动）
+                    merged = dispatchFollowUps(scope, plan, first, tools, sink);
+                } else {
+                    merged = plan.isToolCall()
+                            ? first
+                            : followUp(scope, sessionId, message, facts, call, first, tools, sink, executed);
+                }
                 reply = verbatim ? merged : narrate(merged, call.intent(), message);
             }
             ChatSlots next = reply.slots().withIntent(executed.get().name());
+            if (metrics != null) {
+                metrics.intent(executed.get());
+                // 真没听懂：HELP 且没有候选、模型也没说话。原话进 fallback 语料。
+                if (executed.get() == ChatIntent.HELP && !plan.hasOptions() && !plan.isReply()) {
+                    metrics.fallback(sessionId, message);
+                }
+            }
             // 起草成功才记一条账本：这是"本会话产生过哪些规则版本"的唯一事实来源。
             recordDraftIfNeeded(session, sessionId, call, reply, null, userSeq);
 
@@ -1090,6 +1125,8 @@ public class ChatRuntime {
         sink.accept(ChatEvent.plan(plan));
         sink.accept(ChatEvent.intent(call.intent()));
         Reply reply = dispatch(scope, plan, slots.clearPending(), text, tools, sink, true);
+        // 写动作真的执行了，世界变了：作废规划器的意图缓存——缓存的计划可能指向旧任务/旧规则
+        planner.invalidate();
         recordDraftIfNeeded(sessionOrNull(scope, sessionId), sessionId, call, reply,
                 slots.pendingArgs().get("spoken"), userSeq);
         return new Confirmed(Reply.text(reply.text(), reply.slots().clearPending()), call.intent());
@@ -1128,6 +1165,8 @@ public class ChatRuntime {
             args.put("table", call.table());
         }
         args.put("summary", summary);
+        // 挂起时间戳：过期的确认（见 SlotProtocol）不再等点头——隔天回"好"不能执行昨天的写操作
+        args.put(SlotProtocol.STAMP, Long.toString(System.currentTimeMillis()));
         return args;
     }
 
@@ -1472,6 +1511,21 @@ public class ChatRuntime {
                 return ChatIntentRouter.Call.of(ChatIntent.DESCRIBE_TABLE).withTable(trimmed);
             }
         }
+        if (ChatIntent.BUILD_MODEL.name().equals(slots.pendingAction())) {
+            // 刚问过"给哪条规则建模型"，这一句带了个真实存在的规则编码就是答案
+            String code = ruleCodeMentioned(message);
+            if (code != null) {
+                return ChatIntentRouter.Call.of(ChatIntent.BUILD_MODEL).withRuleCode(code);
+            }
+        }
+        // 通用补答：RETRY/JOB_SUMMARY/LIST_DIFFS/EXPLAIN_JOB 认任务号，EXPLAIN_DIFF 认"第 N 条"。
+        // 填不上就落回正常路由——填是"在回答上一问"，填不上是新话题。
+        if (SlotProtocol.handles(slots.pendingAction())) {
+            Optional<ChatIntentRouter.Call> filled = SlotProtocol.fill(slots.pendingAction(), message);
+            if (filled.isPresent()) {
+                return filled.get();
+            }
+        }
         return call;
     }
 
@@ -1504,6 +1558,30 @@ public class ChatRuntime {
             log.debug("规则库不可读，跳过续接判定", e);
         }
         return null;
+    }
+
+    /**
+     * 复合意图的执行：把模型建议的第二步顺手做掉。
+     *
+     * <p>执行门槛是三重的：必须是工具调用（有 name+args，不是猜的）、必须是只读
+     * （写动作猜错有代价，宁可让用户自己开口）、证据必须充分（CONFLICT/UNVERIFIED 的
+     * 第二步宁可丢弃）。任何一条不满足就停在这里——少做一步比做错一步便宜。
+     */
+    private Reply dispatchFollowUps(SessionScope scope, io.github.dolow.reconlens.chat.plan.ChatPlan plan,
+                                    Reply first, List<String> tools, Consumer<ChatEvent> sink) {
+        StringBuilder sb = new StringBuilder(first.text());
+        ChatSlots slots = first.slots();
+        for (io.github.dolow.reconlens.chat.plan.ChatPlan next : plan.followUps()) {
+            if (!next.isToolCall() || ToolNames.WRITES.contains(next.toolName()) || !next.confident()) {
+                break;
+            }
+            sink.accept(ChatEvent.intent(next.call().intent()));
+            Reply step = dispatch(scope, next, slots, null, tools, sink);
+            sb.append("\n\n―― 顺手做的第二步（").append(next.call().intent().form()).append("）――\n")
+                    .append(step.text());
+            slots = step.slots();
+        }
+        return Reply.text(sb.toString(), slots);
     }
 
     private Reply dispatch(SessionScope scope, io.github.dolow.reconlens.chat.plan.ChatPlan plan, ChatSlots slots,
@@ -1744,7 +1822,7 @@ public class ChatRuntime {
                     ? "还没有注册过可对账的表。"
                     : "看哪张表的字段？可选：" + String.join(" / ", names);
             return Reply.text(hint + "\n（说「看一下 bill_left 的字段」就行。）",
-                    slots.withPending(ChatIntent.DESCRIBE_TABLE.name(), Map.of("question", hint)));
+                    slots.withPending(ChatIntent.DESCRIBE_TABLE.name(), SlotProtocol.stamped(Map.of("question", hint))));
         }
         // "看样例"要显式说：默认一个数据行都不读，这是"看结构"对业务库的承诺
         boolean withSample = message != null && WANTS_SAMPLE.matcher(message).find();
@@ -2226,7 +2304,7 @@ public class ChatRuntime {
                     + call(ToolNames.LIST_RULES, Map.of(), tools).text()
                     + "\n说「跑一下 规则编码」就行。",
                     slots.withPending(ChatIntent.RUN.name(),
-                            Map.of("question", "要跑哪条规则？（规则编码）")));
+                            SlotProtocol.stampedQuestion("要跑哪条规则？（规则编码）")));
         }
         // 先看能不能跑，再动手：草稿被"未找到规则"打发掉会让人以为规则没存进去
         String blocked = whyNotRunnable(code);
@@ -2280,7 +2358,9 @@ public class ChatRuntime {
             assumed = true;
         }
         if (jobId == null) {
-            return Reply.text("要看哪个任务？给我任务号就行，比如「123 号任务怎么样」。", slots);
+            String ask = "要看哪个任务？给我任务号就行，比如「123 号任务怎么样」。";
+            return Reply.text(ask, slots.withPending(ChatIntent.JOB_SUMMARY.name(),
+                    SlotProtocol.stampedQuestion(ask)));
         }
         sink.accept(ChatEvent.tool(ToolNames.JOB_SUMMARY, "任务 " + jobId));
         ToolOutcome outcome = call(ToolNames.JOB_SUMMARY, Map.of("jobId", jobId), tools);
@@ -2296,7 +2376,9 @@ public class ChatRuntime {
             assumed = true;
         }
         if (jobId == null) {
-            return Reply.text("要看哪个任务的差异？给我任务号，比如「123 号任务的差异」。", slots);
+            String ask = "要看哪个任务的差异？给我任务号，比如「123 号任务的差异」。";
+            return Reply.text(ask, slots.withPending(ChatIntent.LIST_DIFFS.name(),
+                    SlotProtocol.stampedQuestion(ask)));
         }
 
         // diffType 在 DSL 里是自由字符串（业务可以写 AMOUNT_MISMATCH），而用户说的是语义类别
@@ -2375,7 +2457,9 @@ public class ChatRuntime {
             assumed = true;
         }
         if (jobId == null) {
-            return Reply.text("要解释哪个任务？给我任务号，比如「123 号任务为什么差这么多」。", slots);
+            String ask = "要解释哪个任务？给我任务号，比如「123 号任务为什么差这么多」。";
+            return Reply.text(ask, slots.withPending(ChatIntent.EXPLAIN_JOB.name(),
+                    SlotProtocol.stampedQuestion(ask)));
         }
         sink.accept(ChatEvent.tool(ToolNames.EXPLAIN_JOB, "任务 " + jobId + " 的整单归因"));
         String text = call(ToolNames.EXPLAIN_JOB, Map.of("jobId", jobId, "limit", 10), tools).text();
@@ -2402,7 +2486,9 @@ public class ChatRuntime {
                               Consumer<ChatEvent> sink) {
         Long diffId = call.diffId() != null ? call.diffId() : slots.diffId();
         if (diffId == null) {
-            return Reply.text("要解释第几条差异？比如「第 137 条差异为什么」。", slots);
+            String ask = "要解释第几条差异？比如「第 137 条差异为什么」。";
+            return Reply.text(ask, slots.withPending(ChatIntent.EXPLAIN_DIFF.name(),
+                    SlotProtocol.stampedQuestion(ask)));
         }
         sink.accept(ChatEvent.tool(ToolNames.EXPLAIN_DIFF, "差异 " + diffId));
         String text = call(ToolNames.EXPLAIN_DIFF, Map.of("diffId", diffId), tools).text();
@@ -2435,7 +2521,9 @@ public class ChatRuntime {
                         Consumer<ChatEvent> sink) {
         Long jobId = resolveJob(call.jobId(), slots);
         if (jobId == null) {
-            return Reply.text("要重跑哪个任务？给我任务号，比如「重跑 123 号任务」。", slots);
+            String ask = "要重跑哪个任务？给我任务号，比如「重跑 123 号任务」。";
+            return Reply.text(ask, slots.withPending(ChatIntent.RETRY.name(),
+                    SlotProtocol.stampedQuestion(ask)));
         }
         sink.accept(ChatEvent.tool("recon_retry", "任务 " + jobId + " 只重跑失败分片"));
         engine.retry(jobId, true);
@@ -2448,7 +2536,9 @@ public class ChatRuntime {
                              List<String> tools, Consumer<ChatEvent> sink) {
         String code = firstNonNull(call.ruleCode(), slots.ruleCode(), onlyRuleCode());
         if (code == null) {
-            return Reply.text("给哪条规则建模型？给我规则编码，比如「给 BILL_VS_SETTLE 建模型」。", slots);
+            String ask = "给哪条规则建模型？给我规则编码，比如「给 BILL_VS_SETTLE 建模型」。";
+            return Reply.text(ask, slots.withPending(ChatIntent.BUILD_MODEL.name(),
+                    SlotProtocol.stampedQuestion(ask)));
         }
         sink.accept(ChatEvent.tool(ToolNames.BUILD_MODEL, "物化预处理表：" + code));
         Map<String, Object> args = new LinkedHashMap<>();

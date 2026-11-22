@@ -379,6 +379,18 @@ CREATE TABLE IF NOT EXISTS recon_chat_turn (
 -- seq 在会话内唯一：顺序错乱在复盘时等于"对话不可读"，而唯一索引是唯一拦得住重复 seq 的地方
 CREATE UNIQUE INDEX IF NOT EXISTS uk_chat_turn_seq ON recon_chat_turn (session_id, seq);
 
+-- ============ 意图路由 fallback 语料：没听懂的原话，append-only ============
+-- 这是路由层的负样本挖掘：每一条都是候选的新词表条目或新意图。
+-- 语料的价值在跨重启积累，所以落库而不是放内存（计数器本身仍在进程内，重启归零）。
+CREATE TABLE IF NOT EXISTS recon_chat_fallback (
+  id          BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id  BIGINT,
+  query_text  VARCHAR(512) NOT NULL,
+  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_chat_fallback_time ON recon_chat_fallback (created_at);
+
+
 -- ============ 会话草稿账本：这个会话起草过哪些规则 ============
 -- 为什么单独一张表而不是塞进 state_json：它是**事实**（发生过），不是焦点（会被覆盖）。
 -- 塞进槽位的话，压缩/覆盖一次，"我改过三版"这件事就没了 —— 而审批人恰恰要拿它做判断。

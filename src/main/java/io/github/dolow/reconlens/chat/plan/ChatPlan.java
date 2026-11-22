@@ -24,7 +24,8 @@ import java.util.Map;
  */
 public record ChatPlan(ChatIntentRouter.Call call, double confidence, String reason,
                        Source source, List<String> options, Evidence evidence,
-                       String toolName, Map<String, String> toolArgs, String reply) {
+                       String toolName, Map<String, String> toolArgs, String reply,
+                       List<ChatPlan> followUps) {
 
     /** 理解从哪来。写进 SSE 事件和审计，用户能看出这一句是词表认的还是模型认的。 */
     public enum Source {
@@ -65,17 +66,18 @@ public record ChatPlan(ChatIntentRouter.Call call, double confidence, String rea
         }
         toolArgs = Map.copyOf(args);
         reply = reply == null || reply.isBlank() ? null : reply;
+        followUps = followUps == null ? List.of() : List.copyOf(followUps);
     }
 
     public static ChatPlan keyword(ChatIntentRouter.Call call, double confidence, String reason) {
         return new ChatPlan(call, confidence, reason, Source.KEYWORD, List.of(), Evidence.EXACT,
-                null, Map.of(), null);
+                null, Map.of(), null, null);
     }
 
     public static ChatPlan model(ChatIntentRouter.Call call, double confidence, String reason,
                                  List<String> options, Evidence evidence) {
         return new ChatPlan(call, confidence, reason, Source.LLM, options, evidence,
-                null, Map.of(), null);
+                null, Map.of(), null, null);
     }
 
     /**
@@ -94,7 +96,7 @@ public record ChatPlan(ChatIntentRouter.Call call, double confidence, String rea
     public static ChatPlan tool(ChatIntentRouter.Call call, String name, Map<String, String> args,
                                 double confidence, String reason, Evidence evidence) {
         return new ChatPlan(call, confidence, reason, Source.LLM, List.of(), evidence,
-                name, args, null);
+                name, args, null, null);
     }
 
     /**
@@ -106,12 +108,19 @@ public record ChatPlan(ChatIntentRouter.Call call, double confidence, String rea
     public static ChatPlan reply(String text, double confidence) {
         return new ChatPlan(new ChatIntentRouter.Call(ChatIntent.HELP, null, null, null, null, null, null),
                 confidence, "模型直接回复", Source.LLM, List.of(), Evidence.UNVERIFIED,
-                null, Map.of(), text);
+                null, Map.of(), text, null);
     }
 
     /** 换一批候选（澄清时把"模型猜的"与"词表猜的"一起摆出来）。 */
     public ChatPlan withOptions(List<String> next) {
-        return new ChatPlan(call, confidence, reason, source, next, evidence, toolName, toolArgs, reply);
+        return new ChatPlan(call, confidence, reason, source, next, evidence, toolName, toolArgs, reply,
+                followUps);
+    }
+
+    /** 带上建议的第二步（复合意图）：调用方决定是否自动执行，见运行时的 followUp 门。 */
+    public ChatPlan withFollowUps(List<ChatPlan> next) {
+        return new ChatPlan(call, confidence, reason, source, options, evidence, toolName, toolArgs, reply,
+                next);
     }
 
     /** 确定到可以直接执行：只看证据，不看数字。 */
@@ -133,6 +142,11 @@ public record ChatPlan(ChatIntentRouter.Call call, double confidence, String rea
     /** 模型只是说了句话（回答/反问），这一轮不执行任何动作。 */
     public boolean isReply() {
         return reply != null;
+    }
+
+    /** 模型建议的后续步骤（复合意图，≤1 步）：非空时运行时可以顺手执行只读的、证据充分的那部分。 */
+    public boolean hasFollowUps() {
+        return !followUps.isEmpty();
     }
 
     /**

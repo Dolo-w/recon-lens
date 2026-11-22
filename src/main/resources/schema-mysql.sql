@@ -362,6 +362,16 @@ CREATE TABLE IF NOT EXISTS recon_chat_turn (
   UNIQUE KEY uk_chat_turn_seq (session_id, seq)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ============ 意图路由 fallback 语料：没听懂的原话，append-only ============
+-- 路由层的负样本挖掘：每一条都是候选的新词表条目或新意图。落库跨重启积累。
+CREATE TABLE IF NOT EXISTS recon_chat_fallback (
+  id          BIGINT       AUTO_INCREMENT PRIMARY KEY,
+  session_id  BIGINT       NULL,
+  query_text  VARCHAR(512) NOT NULL,
+  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_chat_fallback_time (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ============ 会话草稿账本：这个会话起草过哪些规则 ============
 -- 为什么单独一张表而不是塞进 state_json：它是**事实**（发生过），不是焦点（会被覆盖）。
 -- 塞进槽位的话，压缩/覆盖一次，"我改过三版"这件事就没了 —— 而审批人恰恰要拿它做判断。

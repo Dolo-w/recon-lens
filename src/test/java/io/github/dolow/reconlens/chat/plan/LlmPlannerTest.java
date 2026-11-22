@@ -327,4 +327,64 @@ class LlmPlannerTest {
 
         assertThat(LlmPlanner.evidenceOf(call, facts)).isEqualTo(ChatPlan.Evidence.CONFLICT);
     }
+
+    /** 带工具清单的解析器：next 只在工具协议开启时才有意义。 */
+    private LlmPlanner plannerWithTools(String... names) {
+        java.util.List<io.github.dolow.reconlens.tool.ToolSpec> specs = java.util.Arrays.stream(names)
+                .map(name -> new io.github.dolow.reconlens.tool.ToolSpec(name, name + " 的说明",
+                        "{\"type\":\"object\",\"properties\":{}}", null,
+                        args -> io.github.dolow.reconlens.tool.ToolOutcome.text("ok")))
+                .toList();
+        io.github.dolow.reconlens.tool.ToolRegistry registry = new io.github.dolow.reconlens.tool.ToolRegistry() {
+            @Override
+            public java.util.List<io.github.dolow.reconlens.tool.ToolSpec> specs() {
+                return specs;
+            }
+
+            @Override
+            public java.util.Optional<io.github.dolow.reconlens.tool.ToolSpec> find(String name) {
+                return specs.stream().filter(spec -> spec.name().equals(name)).findFirst();
+            }
+        };
+        return new LlmPlanner(new LlmChatClient("", "", "deepseek-chat", 1000, json), json,
+                false, new ToolCallPlanner(registry, json));
+    }
+
+    @Test
+    @DisplayName("复合意图：可选的 next 只读工具被接住，挂在主计划后面")
+    void next只读工具被接住() {
+        ChatPlan plan = plannerWithTools("recon_job_summary", "recon_list_diffs").parse("""
+                {"action":"tool","name":"recon_job_summary","args":{"jobId":2},
+                 "next":{"action":"tool","name":"recon_list_diffs","args":{"jobId":2}}}
+                """).orElseThrow();
+        assertThat(plan.isToolCall()).isTrue();
+        assertThat(plan.toolName()).isEqualTo("recon_job_summary");
+        assertThat(plan.hasFollowUps()).isTrue();
+        assertThat(plan.followUps().get(0).toolName()).isEqualTo("recon_list_diffs");
+        assertThat(plan.followUps().get(0).call().jobId()).isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName("next 是写动作直接丢弃：自动执行的前提是猜错没代价")
+    void next写动作丢弃() {
+        ChatPlan plan = plannerWithTools("recon_job_summary", "recon_run").parse("""
+                {"action":"tool","name":"recon_job_summary","args":{"jobId":2},
+                 "next":{"action":"tool","name":"recon_run","args":{"ruleCode":"BILL_VS_SETTLE"}}}
+                """).orElseThrow();
+        assertThat(plan.isToolCall()).isTrue();
+        assertThat(plan.hasFollowUps()).isFalse();
+    }
+
+    @Test
+    @DisplayName("next 不是干净的工具调用（reply/编造工具名）：宁缺毋滥，不加 followUps")
+    void next不干净丢弃() {
+        assertThat(plannerWithTools("recon_list_diffs").parse("""
+                {"action":"tool","name":"recon_list_diffs","args":{"jobId":2},
+                 "next":{"action":"reply","text":"要不要我顺便看看差异？"}}
+                """).orElseThrow().hasFollowUps()).isFalse();
+        assertThat(plannerWithTools("recon_list_diffs").parse("""
+                {"action":"tool","name":"recon_list_diffs","args":{"jobId":2},
+                 "next":{"action":"tool","name":"recon_not_exist","args":{}}}
+                """).orElseThrow().hasFollowUps()).isFalse();
+    }
 }
