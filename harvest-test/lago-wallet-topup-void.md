@@ -1,0 +1,276 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://getlago.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Top-up and void credits
+
+> Add and void credits, to the customer's wallet.
+
+## Credit purchases and top-ups
+
+Lago automatically generates an invoice for each purchase. Taxes do not apply to
+credit purchases, which are considered as advance payments.
+
+Purchased credits reach the customer's wallet once the payment status of the top-up invoice is
+`succeeded`. Free credits reach it as soon as the top-up is created.
+
+The invoice uses the [wallet's payment terms](https://getlago.com/docs/guide/wallet-and-prepaid-credits/overview.md#payment-terms), falling back to the customer's or billing entity's terms when the wallet has none of its own. This applies to manual and recurring credit purchases.
+
+For example, a top-up invoice dated **April 10, 2026** with **Net 15** is due **April 25**. The credits become available when payment is confirmed, even if the customer pays before that deadline. With **Due on receipt**, the same invoice is due **April 10**. See [all payment-term options](https://getlago.com/docs/guide/invoicing/invoicing-settings/payment-term.md#choose-a-payment-term).
+
+> [!NOTE]
+>
+> Lago rounds top-up credits so that their value falls on a whole cent, to comply with the decimal rounding rules for amounts. This applies to purchased and free credits alike.
+
+> [tab] Dashboard
+>
+> To top up a wallet through the user interface:
+>
+> 1. Open the **"Wallets"** tab and click **"Edit wallet"** on the right;
+>
+> 2. Select **"Top up credits"**;
+>
+> 3. Enter the number of credits to be purchased and/or granted for free;
+>
+> 4. Define transaction metadata (optional);
+>
+> 5. Determine whether the wallet transaction generates an invoice after a top-up or only following a successful payment; and
+>
+> 6. Click **"Top up credits"** to confirm.
+>
+> > [!NOTE]
+> >
+> > Coupons **do not apply** to credit purchases and top-ups.
+
+> [tab] API
+>
+> ```bash Top up a credit wallet theme={"dark"}
+> LAGO_URL="https://api.getlago.com"
+> API_KEY="__YOUR_API_KEY__"
+>
+> curl --location --request POST "$LAGO_URL/api/v1/wallet_transactions" \
+>   --header "Authorization: Bearer $API_KEY" \
+>   --header 'Content-Type: application/json' \
+>   --data-raw '{
+>     "wallet_transaction": {
+>       "wallet_id": "1a901a90-1a90-1a90-1a90-1a901a901a90",
+>       "paid_credits": "20.0",
+>       "granted_credits": "10.0",
+>       "invoice_requires_successful_payment": false,
+>       "metadata": [
+>         {
+>           "key": "top-up-type",
+>           "value": "manual"
+>         }
+>       ]
+>     }
+>   }'
+> ```
+
+## Invoicing top-up after successful payment option
+
+When enabled, this option delays issuing an invoice for a wallet top-up until a successful payment is made. If disabled, the invoice is issued immediately upon the wallet top-up, regardless of the payment status.
+This setting can be applied to individual transactions.
+
+## Void credits
+
+You can deduct an exact number of credits from the balance of a wallet. This action is instantaneous and cannot be undone.
+
+> [tab] Dashboard
+>
+> To void credits through the user interface:
+>
+> 1. Open the **"Wallets"** tab and click **"Edit wallet"** on the right;
+> 2. Select **"Void credits"**;
+> 3. Enter the number of credits to void; and
+> 4. Click **"Void credits"** to confirm.
+
+> [tab] API
+>
+> ```bash Void credits from a wallet theme={"dark"}
+> LAGO_URL="https://api.getlago.com"
+> API_KEY="__YOUR_API_KEY__"
+>
+> curl --location --request POST "$LAGO_URL/api/v1/wallet_transactions" \
+>   --header "Authorization: Bearer $API_KEY" \
+>   --header 'Content-Type: application/json' \
+>   --data-raw '{
+>     "wallet_transaction": {
+>       "wallet_id": "1a901a90-1a90-1a90-1a90-1a901a901a90",
+>       "voided_credits": "20.0",
+>       "metadata": [
+>         {
+>           "key": "top-up-type",
+>           "value": "manual-void"
+>         }
+>       ]
+>     }
+>   }'
+> ```
+
+## Setup recurring top-ups
+
+> [!NOTE]
+>
+> Recurring top-up rules require Lago Premium. For automatic collection of paid top-ups through Stripe, [connect Stripe](https://getlago.com/docs/integrations/payments/stripe/payments.md) and collect a payment method for the customer. Purchased credits become available only after the purchase invoice is marked `succeeded`.
+
+When you create or edit a wallet, you can enable recurring top-ups. Two methods are available, `fixed` and `target`. Both are triggered either by an `interval` or by a `threshold`.
+
+The start date of a recurring top-up is ignored when it is the same as the creation date of the wallet. For example, if you create a wallet on Jan 1st, 2026, and set a monthly recurring top-up to start on Jan 1st, 2026, the top-up does not trigger until Feb 1st, 2026.
+
+### Fixed recurring top-up
+
+A fixed recurring top-up adds a predetermined number of credits to the wallet, either purchased or granted for free.
+
+### Target recurring top-up
+
+A target recurring top-up adds a variable number of credits to the wallet to reach a target balance. The number of credits comes from the gap between the ongoing balance at the moment of the trigger and the target balance.
+
+Set the target with `target_ongoing_balance`. It must be greater than or equal to `threshold_credits` when the rule is triggered by a threshold.
+
+```bash Set a target recurring top-up on creation theme={"dark"}
+LAGO_URL="https://api.getlago.com"
+API_KEY="__YOUR_API_KEY__"
+
+curl --location --request POST "$LAGO_URL/api/v1/wallets" \
+  --header "Authorization: Bearer $API_KEY" \
+  --header 'Content-Type: application/json' \
+  --data-raw '{
+    "wallet": {
+      "external_customer_id": "hooli_1234",
+      "name": "Prepaid credits",
+      "rate_amount": "1.0",
+      "paid_credits": "100.0",
+      "granted_credits": "0.0",
+      "currency": "USD",
+      "recurring_transaction_rules": [
+        {
+          "method": "target",
+          "trigger": "threshold",
+          "threshold_credits": "20.0",
+          "target_ongoing_balance": "100.0",
+          "invoice_requires_successful_payment": false
+        }
+      ]
+    }
+  }'
+```
+
+### Interval trigger
+
+For an `interval` trigger, specify the frequency of the automatic top-up: `weekly`, `monthly`, `quarterly`, `semiannual` or `yearly`.
+
+Once the interval is defined, Lago performs a top-up:
+
+* Weekly, on the same day each week (e.g., every Monday).
+* Monthly, on the same date each month (e.g., every 2nd of the month).
+* Quarterly, on the same date every three months (e.g., every 2nd of the quarter).
+* Semiannual, on the same date every six months (e.g., every 2nd of the semester).
+* Yearly, on the same date every year (e.g., every 2nd of January).
+
+> [tab] Dashboard
+>
+> To set up an `interval` recurring top-up through the user interface:
+>
+> 1. Create or edit a wallet;
+> 2. Click **"Add a recurring top-up rule"**;
+> 3. Select `interval` as recurring type;
+> 4. Define your interval;
+> 5. Define when the rule should start; and
+> 6. Define transaction metadata for the top-ups (optional);
+
+> [tab] API
+>
+> ```bash Setup an interval recurring top-up theme={"dark"}
+> LAGO_URL="https://api.getlago.com"
+> API_KEY="__YOUR_API_KEY__"
+>
+> curl --location --request POST "$LAGO_URL/api/v1/wallets" \
+>   --header "Authorization: Bearer $API_KEY" \
+>   --header 'Content-Type: application/json' \
+>   --data-raw '{
+>     "wallet": {
+>       "external_customer_id": "hooli_1234",
+>       "name": "Prepaid credits",
+>       "rate_amount": "1.0",
+>       "paid_credits": "0.0",
+>       "granted_credits": "0.0",
+>       "currency": "USD",
+>       "recurring_transaction_rules": [
+>         {
+>           "method": "fixed",
+>           "trigger": "interval",
+>           "interval": "weekly",
+>           "started_at": null,
+>           "paid_credits": "100.0",
+>           "granted_credits": "0.0",
+>           "invoice_requires_successful_payment": false,
+>           "transaction_metadata": [
+>             {
+>               "key": "top-up-type",
+>               "value": "automatic"
+>             }
+>           ]
+>         }
+>       ]
+>     }
+>   }'
+> ```
+
+### Threshold trigger
+
+With a `threshold` trigger, set a specific number of `credits` that will trigger an automatic top-up. Lago monitors the `ongoing balance`, and if it falls to or below the defined credit threshold, an automatic top-up is initiated.
+
+> [tab] Dashboard
+>
+> To set up a `threshold` recurring top-up through the user interface:
+>
+> 1. Create or edit a wallet;
+> 2. Click **"Add a recurring top-up rule"**;
+> 3. Select `threshold` as recurring type;
+> 4. Define the credits threshold; and
+> 5. Define transaction metadata for the top-ups (optional);
+
+> [tab] API
+>
+> ```bash Set a recurring top-up on creation theme={"dark"}
+> LAGO_URL="https://api.getlago.com"
+> API_KEY="__YOUR_API_KEY__"
+>
+> curl --location --request POST "$LAGO_URL/api/v1/wallets" \
+>   --header "Authorization: Bearer $API_KEY" \
+>   --header 'Content-Type: application/json' \
+>   --data-raw '{
+>     "wallet": {
+>       "external_customer_id": "hooli_1234",
+>       "name": "Prepaid credits",
+>       "rate_amount": "1.0",
+>       "paid_credits": "100.0",
+>       "granted_credits": "50.0",
+>       "currency": "USD",
+>       "recurring_transaction_rules": [
+>         {
+>           "method": "fixed",
+>           "trigger": "threshold",
+>           "threshold_credits": "100.0",
+>           "paid_credits": "100.0",
+>           "granted_credits": "0.0",
+>           "invoice_requires_successful_payment": true,
+>           "transaction_metadata": [
+>             {
+>               "key": "top-up-type",
+>               "value": "automatic"
+>             }
+>           ]
+>         }
+>       ]
+>     }
+>   }'
+> ```
+
+### Expiration date
+
+Define an expiration date for your recurring transaction rule. Once that date is reached, the rule is terminated and generates no further top-up.
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.

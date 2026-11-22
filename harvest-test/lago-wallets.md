@@ -1,0 +1,60 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://getlago.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Wallet transaction traceability
+
+> Reconcile prepaid credit purchases and deductions, and connect wallet transaction history to the ongoing balance used for current spend.
+
+Wallet traceability lets you follow the credit flow between inbound (top-up) and outbound (usage deduction) transactions. For a given inbound transaction, you can see which outbound transactions consumed its credits, and for a given outbound transaction, you can see which inbound transactions funded it.
+
+Use [Lago Cloud](https://getlago.com/docs/guide/lago-cloud.md) for a managed prepaid billing workflow. For the customer's current spend view, read the [ongoing wallet balance](https://getlago.com/docs/guide/wallet-and-prepaid-credits/overview.md#real-time-wallet-balance): it includes current usage, taxes and draft invoices, and typically refreshes in under a second after a new event is included in usage. The invoiced balance updates when invoices are finalized; the transaction links below explain how credits were applied.
+
+For example, if a \$25 deduction uses \$15 from one top-up and \$10 from another, the deduction's **Fundings** tab identifies both sources. Each top-up's **Consumptions** tab shows its contribution to that deduction. See [top-ups and voids](https://getlago.com/docs/guide/wallet-and-prepaid-credits/wallet-top-up-and-void.md), [expiration rules](https://getlago.com/docs/guide/wallet-and-prepaid-credits/overview.md#expiration-date-and-termination), and [balance alerts](https://getlago.com/docs/guide/alerts/credits-consumption-alerts.md) for the other parts of the credit lifecycle.
+
+## Track how credits were consumed
+
+For an **inbound** wallet transaction, you can see all outbound transactions that consumed credits from it.
+
+> [tab] Dashboard
+>
+> 1. Go to a specific customer;
+> 2. Open the **"Wallets"** tab and click on a specific wallet;
+> 3. Click on an inbound wallet transaction;
+> 4. Go to the **"Consumptions"** tab; and
+> 5. See all outbound wallet transactions linked to this top-up and the amount consumed by each.
+
+> [tab] API
+>
+> ```bash List consumptions for a wallet transaction theme={"dark"}
+> LAGO_URL="https://api.getlago.com"
+> API_KEY="__YOUR_API_KEY__"
+>
+> curl --location --request GET "$LAGO_URL/api/v1/wallet_transactions/:lago_id/consumptions" \
+>   --header "Authorization: Bearer $API_KEY"
+> ```
+
+## Track how credits were funded
+
+For an **outbound** wallet transaction, you can see all inbound transactions that funded it.
+
+> [tab] Dashboard
+>
+> 1. Go to a specific customer;
+> 2. Open the **"Wallets"** tab and click on a specific wallet;
+> 3. Click on an outbound wallet transaction;
+> 4. Go to the **"Fundings"** tab; and
+> 5. See all inbound wallet transactions that funded this deduction and the amount each provided.
+
+> [tab] API
+>
+> ```bash List fundings for a wallet transaction theme={"dark"}
+> LAGO_URL="https://api.getlago.com"
+> API_KEY="__YOUR_API_KEY__"
+>
+> curl --location --request GET "$LAGO_URL/api/v1/wallet_transactions/:lago_id/fundings" \
+>   --header "Authorization: Bearer $API_KEY"
+> ```
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.

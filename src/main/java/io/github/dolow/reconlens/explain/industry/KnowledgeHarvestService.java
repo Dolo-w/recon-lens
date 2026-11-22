@@ -83,9 +83,8 @@ public class KnowledgeHarvestService {
      * 返回报告含每块产出。不支持图片/二进制——如实拒绝，不猜内容。
      */
     public HarvestReport ingest(String fileName, byte[] raw) {
-        if (!llm.available()) {
-            return HarvestReport.failed("未配置模型 key，摄取不可用");
-        }
+        // 先做确定性的类型/解析校验，再查 key——报错必须指向真正的问题
+        //（否则没 key 时丢一张图片进来，得到的却是"未配置模型 key"，把人引去配 key 而不是转格式）
         String lower = fileName.toLowerCase(Locale.ROOT);
         String text;
         try {
@@ -104,6 +103,9 @@ public class KnowledgeHarvestService {
             }
         } catch (IOException e) {
             return HarvestReport.failed("文件解析失败: " + e.getMessage());
+        }
+        if (!llm.available()) {
+            return HarvestReport.failed("未配置模型 key，摄取不可用");
         }
         return ingestText(fileName, text);
     }

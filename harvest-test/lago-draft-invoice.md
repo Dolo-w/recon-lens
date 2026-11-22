@@ -1,0 +1,167 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://getlago.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Draft invoices
+
+> A draft invoice is an invoice that is not yet finalized: no number, no payment, no email, no sync. Lago creates it during the grace period so you can review it, fix usage and fees, then finalize it, or delete it if it should never have existed.
+
+When you configure a [grace period](https://getlago.com/docs/guide/invoicing/invoicing-settings/grace-period.md), Lago does not finalize invoices immediately at the end of a billing period. It creates them in `draft` status first. The draft is your review window: a chance to catch missing usage, wrong amounts, or invoices that should never have existed, before anything becomes real.
+
+A draft invoice is not yet accounts receivable. It has no sequential invoice number, no payment attached, and no customer email sent. It is not synced to your accounting, tax, or CRM integrations. All of that happens at finalization. This is what makes a draft safe to edit or remove.
+
+![Invoice detail page showing an invoice in draft status](https://mintcdn.com/lago-docs/x0ux42rCkjpwz1jk/guide/invoicing/images/grace-period-draft-invoice-0a9ccbd1d7dc1b87faeb5a44abf484e1.png?fit=max\&auto=format\&n=x0ux42rCkjpwz1jk\&q=85\&s=c4ff1d6ecde4bf1acb615663920052a9)
+
+Draft invoice in the Lago app
+
+## The lifecycle of a draft
+
+Every draft invoice leaves the `draft` status in one of two ways:
+
+* **It is finalized.** Automatically when the grace period ends, or manually before that. The invoice becomes real: it gets its number, enters your books, and payment collection starts.
+* **It is deleted.** You remove it because it should never have been generated. It disappears as if it had never existed.
+
+Everything else on this page describes what you can do while the invoice is still in the window.
+
+## Edit a draft invoice
+
+While an invoice is in `draft` status, you can:
+
+* **Add usage records** by sending events with a timestamp within the billing period;
+* **Add missing fees** manually from the Dashboard;
+* **Edit existing fees**, adjusting the total amount or the unit count;
+* **Apply coupons** to the customer's account; and
+* **Add credits** to the customer's wallet or credit note wallet.
+
+### Add usage records
+
+To add usage to a draft invoice, send [events](https://getlago.com/docs/guide/events/ingesting-usage.md) whose `timestamp` falls within the invoice's billing period. Events dated after the period are not lost: they land on the next invoice.
+
+> Billing period: January 1 to January 31
+> Grace period: 3 days
+> Today: February 2
+>
+> The draft invoice was generated on February 1. To add usage to it, event timestamps must fall between January 1 and January 31.
+>
+> ✅ Usage event on January 11 (timestamp: `1673457300`): included in the draft
+> ❌ Usage event on February 2 (timestamp: `1675354500`): excluded, billed on the next invoice
+
+After sending new events, refresh the draft invoice to see them taken into account.
+
+### Add a missing fee
+
+Lago does not generate fees for charges with zero units, so some charges may not appear on the draft by default. You can add them by sending usage records, as above, or manually from the Dashboard:
+
+1. Open the draft invoice details;
+2. Click **"Add a fee"** (if applicable);
+3. Select the charge and its filters;
+4. Adjust the display name (optional);
+5. Choose between `Total amount` and `Total units`;
+6. Input your values.
+
+`Total amount` overwrites the fee with the exact amount you enter. `Total units` lets Lago recalculate the fee from your pricing model.
+
+Manual fee editing is only available in the Dashboard.
+
+### Edit an existing fee
+
+1. Open the draft invoice details;
+2. Click the **ellipsis icon** next to the fee;
+3. Adjust the display name (optional);
+4. Choose between `Total amount` and `Total units`;
+5. Input the new values. The same recalculation logic applies as above.
+
+### Coupons and credits
+
+Coupons and credits added during the grace period won't appear on `draft` invoices, but they **will be automatically applied** to the next `finalized` invoice.
+
+## Finalize a draft invoice
+
+When the grace period ends, draft invoices are finalized automatically. You can also finalize a draft manually at any time, from the Dashboard or the API, if you have finished reviewing it and want to bill sooner.
+
+Finalization is the moment the invoice becomes real:
+
+* It receives its sequential invoice number;
+* It enters your accounts receivable and your analytics;
+* Payment collection starts, and the customer email is sent if configured;
+* It syncs to your accounting, tax, and CRM integrations; and
+* The `invoice.created` [webhook](https://getlago.com/docs/guide/webhooks.md) fires.
+
+Once finalized, the invoice is locked. If something is wrong after that point, your remaining option is to [void it](https://getlago.com/docs/guide/invoicing/void.md).
+
+## Delete a draft invoice
+
+Sometimes the mistake is the invoice itself: a duplicate subscription that produced two drafts, test data leaking into production, a misconfiguration generating nonsensical fees.
+
+You can **delete a draft invoice**. It disappears as if it had never been generated. No accounts receivable entry, no voided invoice left in your records, nothing for finance to explain.
+
+Deleting a draft is safe by design. As described above, a draft has no external footprint: no number, no payment, no email, no sync. Removing it leaves nothing behind.
+
+### Delete vs. void
+
+Lago has two removal actions. They answer different questions:
+
+* **Void** applies to `finalized` invoices. The invoice was real, you just won't collect it. Voiding keeps a record, preserves the invoice number, and stays visible for reporting. See [void invoices](https://getlago.com/docs/guide/invoicing/void.md).
+* **Delete** applies to `draft` invoices only. The invoice was a mistake. Deleting removes the record entirely: it no longer appears in the UI, the API, exports, or analytics.
+
+If an invoice has already been finalized, delete is no longer available. Void it instead.
+
+### What happens when you delete a draft
+
+* The **entire invoice** is removed. If the draft consolidated several subscriptions, they all come off together.
+* The **subscription stays active** and usage keeps aggregating. Deleting an invoice never touches the subscription lifecycle.
+* The invoice **disappears from all views**: invoice list, customer page, API responses, exports, and analytics. A direct API lookup returns `404`.
+* It never appears in overdue balances, payment requests, or dunning campaigns.
+* **No customer email** is sent, **no payment** is created or reversed, and **no sync** is triggered to payment providers, ERPs, CRMs, or tax providers.
+* The action is **traceable**: an audit log entry records who deleted which invoice and when, and an `invoice.deleted` [webhook](https://getlago.com/docs/guide/webhooks.md) fires with the full invoice payload before the object disappears.
+
+> [!WARNING]
+>
+> Deletion cannot be undone. If the amounts are wrong but the billing itself is legitimate, edit the fees on the draft and finalize it instead of deleting it.
+
+### Impact on billing
+
+Deleting a draft means "this billing should not have happened." Lago does not re-bill the deleted period. The next billing run starts fresh from the next period.
+
+What this means in practice:
+
+* **Usage-based charges**: events from the deleted period are not re-invoiced. They stay in your event store but no future invoice targets that window.
+* **Recurring billable metrics**: nothing is lost. Recurring metrics accumulate from the beginning of the subscription, so the running total naturally appears on the next invoice.
+* **Subscription fees and fixed charges**: the deleted period's fee is never billed. The next period bills its own fee, independently.
+* **Progressive billing**: invoices already issued mid-period are finalized, real AR. They are never affected by deleting the period-end draft. Their credits apply only to the period they belong to, so they are not carried to the next invoice.
+* **Coupons**: a draft never consumes coupons. A one-time coupon pending for the period stays unused and applies to the next finalized invoice.
+
+### How to delete a draft invoice
+
+> [tab] Dashboard
+>
+> 1. Open the draft invoice;
+> 2. Click the **ellipsis icon** and select **"Delete invoice"**;
+> 3. Confirm in the modal.
+>
+> The invoice disappears from the invoice list and is no longer reachable.
+
+> [tab] API
+>
+> ```bash Delete a draft invoice theme={"dark"}
+>   LAGO_URL="https://api.getlago.com"
+>   API_KEY="__YOUR_API_KEY__"
+>   INVOICE_ID="__YOUR_INVOICE_ID__"
+>
+>   curl --location --request DELETE "$LAGO_URL/api/v1/invoices/$INVOICE_ID" \
+>     --header "Authorization: Bearer $API_KEY"
+> ```
+>
+> A successful call returns the invoice with `status: "deleted"`. Any subsequent `GET` on this invoice returns `404`.
+>
+> Calling the endpoint on a non-draft invoice returns `405` with the code `not_deletable`.
+
+### Permissions and guardrails
+
+* **Draft-only.** Delete is available only while the invoice is in `draft` status. For any other status, the action is hidden in the UI and rejected by the API.
+* **Dedicated permission.** The action is guarded by the `invoices:delete` permission, separate from `invoices:void`. By default, only the Admin role holds it.
+* **API keys** use the existing `invoices:write` scope.
+* **No race with finalization.** If a draft is deleted at the same moment the grace period expires, exactly one action wins. An invoice is never both finalized and deleted.
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.
