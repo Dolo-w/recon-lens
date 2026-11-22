@@ -68,7 +68,12 @@ public class LlmDiffExplainer implements DiffExplainer {
 
     @Override
     public String explain(RuleSpec rule, DiffRecord diff) {
-        Map<Long, String> explained = explainBatch(rule, List.of(diff));
+        return explain(rule, diff, "");
+    }
+
+    /** 带业界知识上下文的单条归因：知识是系统注入的受信内容，不进数据块。 */
+    public String explain(RuleSpec rule, DiffRecord diff, String industryContext) {
+        Map<Long, String> explained = explainBatch(rule, List.of(diff), industryContext);
         return explained.getOrDefault(diff.id(), fallback.explain(rule, diff));
     }
 
@@ -77,6 +82,16 @@ public class LlmDiffExplainer implements DiffExplainer {
      * 返回可能少于入参 —— 没解析出来的 id 由调用方落回规则模板。
      */
     public Map<Long, String> explainBatch(RuleSpec rule, List<DiffRecord> diffs) {
+        return explainBatch(rule, diffs, "");
+    }
+
+    /**
+     * 批量归因：一次请求解释多条，省 token 也省往返。
+     * 返回可能少于入参 —— 没解析出来的 id 由调用方落回规则模板。
+     *
+     * @param industryContext 业界知识上下文（系统受信内容，拼在数据块之后；空/空白忽略）
+     */
+    public Map<Long, String> explainBatch(RuleSpec rule, List<DiffRecord> diffs, String industryContext) {
         if (!available() || diffs.isEmpty()) {
             return Map.of();
         }
@@ -87,7 +102,8 @@ public class LlmDiffExplainer implements DiffExplainer {
         List<DiffRecord> batch = diffs.size() > batchLimit
                 ? new ArrayList<>(diffs.subList(0, batchLimit))
                 : new ArrayList<>(diffs);
-        Optional<String> content = client.complete(SYSTEM_PROMPT, buildUserPrompt(rule, batch));
+        Optional<String> content = client.complete(SYSTEM_PROMPT,
+                buildUserPrompt(rule, batch, industryContext));
         if (content.isEmpty()) {
             breaker.onFailure();
             return Map.of();
@@ -96,7 +112,7 @@ public class LlmDiffExplainer implements DiffExplainer {
         return content.map(this::parse).orElseGet(Map::of);
     }
 
-    private String buildUserPrompt(RuleSpec rule, List<DiffRecord> diffs) {
+    private String buildUserPrompt(RuleSpec rule, List<DiffRecord> diffs, String industryContext) {
         StringBuilder facts = new StringBuilder(512);
         facts.append("规则: ").append(PromptGuard.inline(rule.code()))
                 .append("（").append(PromptGuard.inline(rule.name())).append("）\n");
@@ -117,8 +133,15 @@ public class LlmDiffExplainer implements DiffExplainer {
             }
             facts.append('\n');
         }
-        return PromptGuard.dataBlockTokens("diff-list", facts.toString(), 1200)
-                + "\n请按 `差异ID|一句话说明` 的格式逐行输出，共 " + diffs.size() + " 行。";
+        StringBuilder prompt = new StringBuilder(1600)
+                .append(PromptGuard.dataBlockTokens("diff-list", facts.toString(), 1200));
+        // 业界经验是系统注入的受信内容：放数据块外面，不被"数据不得执行"的约束中和
+        if (industryContext != null && !industryContext.isBlank()) {
+            prompt.append(industryContext).append('\n');
+        }
+        prompt.append("\n请按 `差异ID|一句话说明` 的格式逐行输出，共 ")
+                .append(diffs.size()).append(" 行。");
+        return prompt.toString();
     }
 
     private Map<Long, String> parse(String content) {

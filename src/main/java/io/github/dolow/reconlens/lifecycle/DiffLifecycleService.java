@@ -47,12 +47,15 @@ public class DiffLifecycleService {
     private final DiffLifecycleRepository lifecycle;
     private final ReconRepository recon;
     private final DiffKnowledgeBase knowledge;
+    private final io.github.dolow.reconlens.explain.industry.IndustryKbService industryKb;
 
     public DiffLifecycleService(DiffLifecycleRepository lifecycle, ReconRepository recon,
-                                DiffKnowledgeBase knowledge) {
+                                DiffKnowledgeBase knowledge,
+                                io.github.dolow.reconlens.explain.industry.IndustryKbService industryKb) {
         this.lifecycle = lifecycle;
         this.recon = recon;
         this.knowledge = knowledge;
+        this.industryKb = industryKb;
     }
 
     /**
@@ -115,6 +118,10 @@ public class DiffLifecycleService {
                 recon.updateExplanation(diffId, action == Action.EXEMPT
                         ? note + " 建议动作：此类差异已确认可豁免"
                         : note);
+            }
+            // 业界知识层的置信度涨落：人工结论是对归因质量的免费校验信号（近似语义见 service javadoc）
+            if (industryKb != null && (action == Action.RESOLVE || action == Action.EXEMPT)) {
+                industryKb.feedbackOnResolution(ruleCode, diff, note, action == Action.EXEMPT);
             }
         } catch (RuntimeException e) {
             log.warn("处置结论回流知识库失败（不影响台账）：diff={} {} — {}", diffId, action, e.toString());

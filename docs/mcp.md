@@ -6,7 +6,7 @@ MCP（Model Context Protocol）就是让 Agent 能直接调工具的协议：模
 调 `recon_list_diffs` 看差异、调 `recon_explain_job` 拿归因、调 `recon_define_rule` 换一套对账维度、
 调 `recon_build_model` 把大表先物化好，全程不用人拼 URL。
 
-recon-lens 暴露 18 个工具（启用 Agent 后 24 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
+recon-lens 暴露 18 个工具（启用 Agent 后 26 个），**和 REST 接口共用同一套 service**（`ReconEngine` / `ReconRepository` / `ExplainService` /
 `ModelBuilder`），所以两条路的结果必然一致，不存在两套逻辑。
 
 ## 多轮 Agent 请走 `/mcp`，不要用 stdio

@@ -1,0 +1,152 @@
+# 业界知识种子语料（SEED 通道，confidence 0.7）
+# 条目 = 适用条件(appliesWhen) + 知识短句(text) + 来源(source)。
+# 适用条件全部可选；全空条目会被机器准入拒绝（无条件=对每条差异注入=常驻加税）。
+# fields: entries[].key / appliesWhen.ruleCodes[].diffTypes[].fieldRegex.directions[] / text / source
+# 想投放更多条目：外部目录（recon.explain.industry.dir）同名机制，mtime 热加载。
+entries:
+  - key: IND-ROUNDING-SUBCENT
+    appliesWhen:
+      fieldRegex: ".*(amount|fee|price|tax|total).*"
+    text: 分位以下舍入误差：两侧逐行舍入口径不同（bankers vs 四舍五入）会累积出小额差异，先看两侧配置的舍入模式再查业务
+    source: industry-common-2026-11
+
+  - key: IND-TAX-ROW-VS-SUM
+    appliesWhen:
+      diffTypes: ["amount_mismatch"]
+      fieldRegex: ".*tax.*"
+    text: 税额差异常见根因是逐行计税再汇总与汇总计税再分摊两种口径，先确认两侧税务引擎的计税层级
+    source: industry-common-2026-11
+
+  - key: IND-UNIT-SCALE
+    appliesWhen:
+      fieldRegex: ".*(amount|fee|total).*"
+    text: 金额差整百/整千倍先怀疑单位：元 vs 分 vs 厘，或 GB 的 1000 vs 1024；比率接近 ±1 或 ±999 时优先对单位换算
+    source: industry-common-2026-11
+
+  - key: IND-TIMEZONE-EPOCH
+    appliesWhen:
+      fieldRegex: ".*(_at|time|timestamp).*"
+    text: 时间字段差 8 小时（或整小时偏移）通常是 epoch 秒/毫秒被按本地时区解释，先对时区口径再查数据
+    source: industry-common-2026-11
+
+  - key: IND-DATE-CUTOFF
+    appliesWhen:
+      diffTypes: ["missing_left", "missing_right"]
+    text: 单边缺行且集中在账期首尾，通常是两侧 cut-off 时点不同：一侧按自然日一侧按结算日，先对齐账期边界定义
+    source: industry-common-2026-11
+
+  - key: IND-NULL-VS-ZERO
+    appliesWhen:
+      fieldRegex: ".*(amount|count|fee).*"
+    text: 一侧 NULL 一侧 0 的字段差异多数不是错账：NULL 常表示"未发生"，0 表示"发生且为零"，先确认两侧对空值的业务语义
+    source: industry-common-2026-11
+
+  - key: IND-STATUS-ENUM-DRIFT
+    appliesWhen:
+      fieldRegex: ".*(status|state|type).*"
+    text: 状态字段不一致常是枚举值集合漂移：一侧升级加了新状态另一侧没同步，差异值往往是新枚举字面量
+    source: industry-common-2026-11
+
+  - key: IND-PENDING-NOT-MISSING
+    appliesWhen:
+      diffTypes: ["pending_left", "pending_right"]
+    text: 单侧未就绪（PENDING）不等于漏单（MISSING）：数据源晚到很常见，按水位等待或次日复核，别按漏单去追资损
+    source: industry-common-2026-11
+
+  - key: IND-DUPLICATE-REPLAY
+    appliesWhen:
+      diffTypes: ["duplicate"]
+    text: 重复键差异先查重放：上游重试/消息重投会把同一业务单发两次，有唯一约束或幂等键的先对幂等实现
+    source: industry-common-2026-11
+
+  - key: IND-VOIDED-STILL-EXPORTED
+    appliesWhen:
+      fieldRegex: ".*(invoice|fee).*"
+    text: 已作废（voided）的发票/费用行可能仍出现在账单导出里：先按状态字段过滤对账口径，再判断是不是数据错误
+    source: lago-source-2026-11
+
+  - key: IND-CREDIT-NOTE-OFFSET
+    appliesWhen:
+      fieldRegex: ".*(credit|refund|offset).*"
+    text: credit note 金额是冲销凭证不是数据错误：发票侧多出的负数金额优先查退款/折让流程，别当计费 bug 排查
+    source: lago-source-2026-11
+
+  - key: IND-PREPAID-ORDER
+    appliesWhen:
+      fieldRegex: ".*(prepaid|credit|balance).*"
+    text: 预付费/赠送金抵扣差异先对抵扣顺序（先赠后付 vs 先付后赠）与抵扣时点，顺序不同会造成余额对不上但账都是对的
+    source: industry-common-2026-11
+
+  - key: IND-COUPON-STACKING
+    appliesWhen:
+      fieldRegex: ".*(discount|coupon|amount).*"
+    text: 折扣金额差异常源于多券叠加顺序与作用基数（先折后税 vs 先税后折），先对优惠计算的管线顺序
+    source: industry-common-2026-11
+
+  - key: IND-PRORATION-BOUNDARY
+    appliesWhen:
+      diffTypes: ["amount_mismatch"]
+      fieldRegex: ".*(fee|charge|amount).*"
+    text: 按比例计费（按天/按秒折算）的差异集中在升配/降配日：两侧对边界日的归属规则不同（含头不含尾等），先对折算公式
+    source: industry-common-2026-11
+
+  - key: IND-MID-CYCLE-PRICE-CHANGE
+    appliesWhen:
+      diffTypes: ["amount_mismatch"]
+      fieldRegex: ".*(price|unit_amount|rate|fee).*"
+    text: 月中调价会造成同商品同月两种单价：按事件发生时刻回溯匹配价格版本（事件级计价），按账单出账时刻匹配必然出错
+    source: industry-common-2026-11
+
+  - key: IND-TIER-BOUNDARY
+    appliesWhen:
+      fieldRegex: ".*(tier|price|unit_amount).*"
+    text: 阶梯计价差异多在边界量的归属：第 100 单算上一档还是下一档（含/不含端点），先对阶梯表边界定义再查用量
+    source: industry-common-2026-11
+
+  - key: IND-GB-BINARY-DECIMAL
+    appliesWhen:
+      fieldRegex: ".*(usage|quantity|volume|gb).*"
+    text: 用量差约 2.4%（1024/1000）是 GB 二进制与十进制定义混用：云厂商间普遍存在，先对单位定义再查用量统计口径
+    source: industry-common-2026-11
+
+  - key: IND-TOKEN-ROUNDUP
+    appliesWhen:
+      fieldRegex: ".*(token|usage|quantity).*"
+    text: LLM 计费用的 token 数差异常因取整口径：请求与 completion 分别向上取整 vs 合并取整，逐次累计后放大；先对取整粒度
+    source: industry-common-2026-11
+
+  - key: IND-MIN-CHARGE
+    appliesWhen:
+      fieldRegex: ".*(fee|amount|minimum).*"
+    text: 小额账单差异可能是最低消费兜底：一侧有 min-charge 一侧没有，或兜底阈值不同，先确认最低消费配置
+    source: industry-common-2026-11
+
+  - key: IND-FX-SETTLEMENT-DATE
+    appliesWhen:
+      fieldRegex: ".*(amount|fx|exchange|currency).*"
+    text: 外币金额差异先看汇率取值时点：下单日汇率 vs 结算日汇率，以及中间价与现汇价的口径差，时点对上金额多半就对上
+    source: industry-common-2026-11
+
+  - key: IND-FEE-COVERAGE-PERIOD
+    appliesWhen:
+      fieldRegex: ".*(fee|period|from|to).*"
+    text: 费用归属期（fee_from/fee_to）与出账期不一致是常见错账源：跨期费用按归属期摊还是按出账期记，先对齐口径
+    source: lago-api-2026-11
+
+  - key: IND-CURRENCY-MINOR-UNIT
+    appliesWhen:
+      fieldRegex: ".*(amount|cents|minor).*"
+    text: 币种最小单位不同（日元无分、科威特第纳尔三位小数）：分换算规则不能跨币种套用，先确认币种的 minor units
+    source: industry-common-2026-11
+
+  - key: IND-IDEMPOTENT-RETRY
+    appliesWhen:
+      diffTypes: ["duplicate", "amount_mismatch"]
+    text: 幂等重试引发的差异：同一请求键重试成功后两侧各记一次或不记，先查幂等键的写入时序（先落库再返回 vs 先返回再落库）
+    source: industry-common-2026-11
+
+  - key: IND-TRUNCATE-VS-ROUND
+    appliesWhen:
+      fieldRegex: ".*(amount|fee|price|quantity).*"
+    text: 金额差恒为正且小于最小计费单位时，查截断 vs 舍入：一侧 truncation 一侧 rounding 会稳定产生单向小差异
+    source: industry-common-2026-11

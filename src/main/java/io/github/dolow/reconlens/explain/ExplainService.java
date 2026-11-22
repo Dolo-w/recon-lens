@@ -1,9 +1,11 @@
 package io.github.dolow.reconlens.explain;
 
 import io.github.dolow.reconlens.domain.DiffRecord;
+import io.github.dolow.reconlens.domain.IndustryKnowledge;
 import io.github.dolow.reconlens.domain.ReconJob;
 import io.github.dolow.reconlens.dsl.RuleSpec;
 import io.github.dolow.reconlens.engine.ReconEngine;
+import io.github.dolow.reconlens.explain.industry.IndustryKbService;
 import io.github.dolow.reconlens.explain.pattern.DiffPattern;
 import io.github.dolow.reconlens.explain.pattern.PatternLibrary;
 import io.github.dolow.reconlens.store.DiffKnowledgeRepository.Entry;
@@ -69,15 +71,19 @@ public class ExplainService {
     private final AtomicLong patternHits = new AtomicLong();
     private final AtomicLong llmExplained = new AtomicLong();
     private final AtomicLong templateFallbacks = new AtomicLong();
+    /** 业界知识层：先验行业经验，注入 L2 归因上下文（可为 null——测试手工构造时未必提供）。 */
+    private final IndustryKbService industryKb;
 
     public ExplainService(RuleBasedExplainer ruleBased, LlmDiffExplainer llm, DiffKnowledgeBase knowledge,
-                          PatternLibrary patterns, ReconEngine engine, ReconRepository repository) {
+                          PatternLibrary patterns, ReconEngine engine, ReconRepository repository,
+                          IndustryKbService industryKb) {
         this.ruleBased = ruleBased;
         this.llm = llm;
         this.knowledge = knowledge;
         this.patterns = patterns;
         this.engine = engine;
         this.repository = repository;
+        this.industryKb = industryKb;
     }
 
     /** 解释一条差异并落库，返回解释文本。 */
@@ -123,8 +129,11 @@ public class ExplainService {
         }
 
         // 第二步：只把没命中的送进模型。全部命中时这一次调用根本不会发生。
+        // 业界经验按批内差异合并注入（去重后一次计数），LLM 拿到的上下文带行业先验
+        String industryContext = industryKb != null && !needLlm.isEmpty()
+                ? industryContextFor(job.ruleCode(), needLlm) : "";
         Map<Long, String> batch = llm.available() && !needLlm.isEmpty()
-                ? llm.explainBatch(rule, needLlm)
+                ? llm.explainBatch(rule, needLlm, industryContext)
                 : Map.of();
 
         int explained = 0;
@@ -226,6 +235,18 @@ public class ExplainService {
                         }));
     }
 
+    /** 批内逐条选择业界知识，按 entryKey 去重合并后一次拼装计数——同一知识不重复注入不重复计热度。 */
+    private String industryContextFor(String ruleCode, List<DiffRecord> diffs) {
+        java.util.LinkedHashMap<String, IndustryKnowledge> merged = new java.util.LinkedHashMap<>();
+        for (DiffRecord diff : diffs) {
+            for (IndustryKnowledge e : industryKb.select(ruleCode, diff.diffType(), diff.field(),
+                    CauseKey.directionOf(diff))) {
+                merged.putIfAbsent(e.entryKey(), e);
+            }
+        }
+        return industryKb.contextOf(List.copyOf(merged.values()));
+    }
+
     /** 分层归因，返回文本、来源层与模式 ID —— 调用方需要知道这次省没省下模型调用。 */
     Attribution attribute(RuleSpec rule, String ruleCode, DiffRecord diff) {
         Optional<Entry> hit = knowledge.lookup(ruleCode, diff);
@@ -238,7 +259,10 @@ public class ExplainService {
             return new Attribution(patternText(pattern.get()), Layer.PATTERN, pattern.get().id());
         }
         if (llm.available()) {
-            String text = llm.explain(rule, diff);
+            String context = industryKb == null ? ""
+                    : industryKb.injectContext(ruleCode, diff.diffType(), diff.field(),
+                            CauseKey.directionOf(diff));
+            String text = llm.explain(rule, diff, context);
             if (text != null && !text.isBlank()) {
                 llmExplained.incrementAndGet();
                 knowledge.remember(ruleCode, diff, text);

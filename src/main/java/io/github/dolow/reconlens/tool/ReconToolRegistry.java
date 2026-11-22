@@ -58,7 +58,8 @@ public class ReconToolRegistry implements ToolRegistry {
         this.specs = List.of(
                 listRules(), listJobs(), listTables(), describeTable(), defineRule(), buildModel(), run(),
                 jobSummary(), listDiffs(), explainDiff(), explainJob(), diagnose(),
-                listPrices(), priceImpact(), diffLifecycle(), evidencePack(), lagoSync(), listPatterns());
+                listPrices(), priceImpact(), diffLifecycle(), evidencePack(), lagoSync(), listPatterns(),
+                listIndustryKb(), harvestKnowledge());
     }
 
     @Override
@@ -906,6 +907,36 @@ public class ReconToolRegistry implements ToolRegistry {
                 """,
                 null,
                 a -> ToolOutcome.text(tools.listPatterns()));
+    }
+
+    private ToolSpec listIndustryKb() {
+        return new ToolSpec(ToolNames.LIST_INDUSTRY_KB,
+                "列出业界知识库（先验行业经验：常见病因/厂商行为/口径惯例），含治理信号"
+                        + "（冷知识清单/graveyard）。置信度由核销反馈自动涨落，无需人工维护。",
+                """
+                {"type":"object","properties":{"limit":{"type":"integer","description":"条目数上限，默认 100"}},"additionalProperties":false}
+                """,
+                null,
+                a -> ToolOutcome.text(tools.listIndustryKb(
+                        ToolArgs.optionalInteger(a, "limit", 100))));
+    }
+
+    private ToolSpec harvestKnowledge() {
+        return new ToolSpec(ToolNames.HARVEST_KNOWLEDGE,
+                "AI 采集业界知识（全自动入库，无人工核证，置信度由闭环涨落管理）："
+                        + "mode=distill 按主题蒸馏行业常识；mode=ingest 从资料正文（PDF/文档提取结果）提炼。"
+                        + "采集产物由机器准入闸把关（结构合法/条件非空/去重/可溯源）。",
+                """
+                {"type":"object","properties":{"mode":{"type":"string","enum":["distill","ingest"],"description":"distill=常识蒸馏；ingest=资料正文提炼"},
+                  "theme":{"type":"string","description":"distill=主题（如 billing-pricing）；ingest=来源文件名"},
+                  "content":{"type":"string","description":"ingest 模式的资料正文"}},
+                 "required":["mode"],"additionalProperties":false}
+                """,
+                null,
+                a -> ToolOutcome.text(tools.harvestKnowledge(
+                        ToolArgs.text(a, "mode", true),
+                        ToolArgs.text(a, "theme", false),
+                        ToolArgs.text(a, "content", false))));
     }
 
     /** 供会话侧直接取结构化视图（不解析文本）。 */

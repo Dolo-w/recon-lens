@@ -24,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -97,7 +98,11 @@ class KnowledgeFirstExplainTest {
     private void rebuildService() {
         service = new ExplainService(template, llm,
                 new DiffKnowledgeBase(knowledgeRepository, properties),
-                new io.github.dolow.reconlens.explain.pattern.PatternLibrary(properties), engine, repository);
+                new io.github.dolow.reconlens.explain.pattern.PatternLibrary(properties), engine, repository,
+                new io.github.dolow.reconlens.explain.industry.IndustryKbService(
+                        new io.github.dolow.reconlens.store.IndustryKbRepository(
+                                new org.springframework.jdbc.core.JdbcTemplate(
+                                        new org.springframework.jdbc.datasource.DriverManagerDataSource()))));
     }
 
     /** shape 相同、金额不同的两条差异 —— 它们应该共用同一条归因。 */
@@ -125,8 +130,8 @@ class KnowledgeFirstExplainTest {
 
         assertThat(service.explainJob(10L, 100)).isEqualTo(1);
 
-        verify(llm, never()).explainBatch(any(), anyList());
-        verify(llm, never()).explain(any(), any());
+        verify(llm, never()).explainBatch(any(), anyList(), anyString());
+        verify(llm, never()).explain(any(), any(), anyString());
         verify(repository).updateExplanation(1L, "入账时点不同，对方 23:59 批次延迟");
     }
 
@@ -137,16 +142,16 @@ class KnowledgeFirstExplainTest {
     @Test
     void secondBatchOfTheSameShapeNeverReachesTheModel() {
         pending(10L, diff(1L, 10L, "ORD-1", "100.00", "100.50"));
-        when(llm.explainBatch(any(), anyList())).thenReturn(Map.of(1L, "汇率进位导致的分币差"));
+        when(llm.explainBatch(any(), anyList(), anyString())).thenReturn(Map.of(1L, "汇率进位导致的分币差"));
 
         service.explainJob(10L, 100);
-        verify(llm, times(1)).explainBatch(any(), anyList());
+        verify(llm, times(1)).explainBatch(any(), anyList(), anyString());
 
         pending(11L, diff(2L, 11L, "ORD-2", "888.00", "888.90"));
         service.explainJob(11L, 100);
 
         // 第二批同形状差异必须走知识库：模型调用次数不能涨
-        verify(llm, times(1)).explainBatch(any(), anyList());
+        verify(llm, times(1)).explainBatch(any(), anyList(), anyString());
         verify(repository).updateExplanation(2L, "汇率进位导致的分币差");
         assertThat(service.knowledgeSnapshot().hits()).isEqualTo(1);
     }
@@ -154,7 +159,7 @@ class KnowledgeFirstExplainTest {
     @Test
     void modelAnswerIsWrittenBackWithLowConfidence() {
         pending(10L, diff(1L, 10L, "ORD-1", "100.00", "100.50"));
-        when(llm.explainBatch(any(), anyList())).thenReturn(Map.of(1L, "对方批次未同步"));
+        when(llm.explainBatch(any(), anyList(), anyString())).thenReturn(Map.of(1L, "对方批次未同步"));
 
         service.explainJob(10L, 100);
 
@@ -171,7 +176,7 @@ class KnowledgeFirstExplainTest {
         DiffRecord answered = diff(1L, 10L, "ORD-1", "100.00", "100.50");
         DiffRecord missed = diff(2L, 10L, "ORD-3", "500.00", "520.00");
         pending(10L, answered, missed);
-        when(llm.explainBatch(any(), anyList())).thenReturn(Map.of(1L, "对方批次未同步"));
+        when(llm.explainBatch(any(), anyList(), anyString())).thenReturn(Map.of(1L, "对方批次未同步"));
 
         service.explainJob(10L, 100);
 
@@ -190,7 +195,7 @@ class KnowledgeFirstExplainTest {
         service.explainJob(10L, 100);
 
         verify(repository).updateExplanation(1L, "模板兜底文案");
-        verify(llm, never()).explainBatch(any(), anyList());
+        verify(llm, never()).explainBatch(any(), anyList(), anyString());
         assertThat(service.knowledgeSnapshot().lookups()).isEqualTo(1);
         assertThat(service.knowledgeSnapshot().absent()).isEqualTo(1);
     }
@@ -207,13 +212,13 @@ class KnowledgeFirstExplainTest {
         properties.getExplain().getKnowledge().setMinConfidence(0.9);
         rebuildService();
         pending(10L, diff);
-        when(llm.explainBatch(any(), anyList())).thenReturn(Map.of(1L, "更靠谱的说法"));
+        when(llm.explainBatch(any(), anyList(), anyString())).thenReturn(Map.of(1L, "更靠谱的说法"));
 
         service.explainJob(10L, 100);
 
         assertThat(service.knowledgeSnapshot().lowConfidence()).isEqualTo(1);
         assertThat(service.knowledgeSnapshot().hits()).isZero();
-        verify(llm).explainBatch(any(), anyList());
+        verify(llm).explainBatch(any(), anyList(), anyString());
         // 多候选：模型的新答案也插进来了，top-1 可能换行 —— misses 要按"原来那条候选"查
         assertThat(knowledgeRepository.findCandidates(key.digest(), 10).stream()
                 .filter(e -> "模型猜的".equals(e.cause())).findFirst().orElseThrow().misses())
@@ -226,11 +231,11 @@ class KnowledgeFirstExplainTest {
         properties.getExplain().getKnowledge().setEnabled(false);
         rebuildService();
         pending(10L, diff(1L, 10L, "ORD-1", "100.00", "100.50"));
-        when(llm.explainBatch(any(), anyList())).thenReturn(Map.of(1L, "模型说法"));
+        when(llm.explainBatch(any(), anyList(), anyString())).thenReturn(Map.of(1L, "模型说法"));
 
         service.explainJob(10L, 100);
 
-        verify(llm).explainBatch(any(), anyList());
+        verify(llm).explainBatch(any(), anyList(), anyString());
         assertThat(knowledgeRepository.recent(10))
                 .as("关掉之后不该再有任何写回")
                 .isEmpty();
@@ -254,7 +259,7 @@ class KnowledgeFirstExplainTest {
         pending(11L, diff(2L, 11L, "ORD-9", "77.00", "77.30"));
         service.explainJob(11L, 100);
 
-        verify(llm, never()).explainBatch(any(), anyList());
+        verify(llm, never()).explainBatch(any(), anyList(), anyString());
         verify(repository).updateExplanation(2L, "渠道方未同步退款 建议动作：去查退款流水");
     }
 
@@ -263,7 +268,7 @@ class KnowledgeFirstExplainTest {
     void singleExplainAlsoConsultsTheKnowledgeBaseFirst() {
         DiffRecord diff = diff(1L, 10L, "ORD-1", "100.00", "100.50");
         when(repository.findDiff(1L)).thenReturn(Optional.of(diff));
-        when(llm.explain(any(), any())).thenReturn("对方批次未同步");
+        when(llm.explain(any(), any(), anyString())).thenReturn("对方批次未同步");
         pending(10L, diff);
 
         assertThat(service.explain(1L)).isEqualTo("对方批次未同步");
@@ -271,7 +276,7 @@ class KnowledgeFirstExplainTest {
                 .as("第二次同一形状的差异应该命中知识库，文案一致")
                 .isEqualTo("对方批次未同步");
 
-        verify(llm, times(1)).explain(any(), any());
+        verify(llm, times(1)).explain(any(), any(), anyString());
     }
 
     // ------------------------------------------------------------------
@@ -292,7 +297,7 @@ class KnowledgeFirstExplainTest {
 
         assertThat(service.explainJob(10L, 100)).isEqualTo(1);
 
-        verify(llm, never()).explainBatch(any(), anyList());
+        verify(llm, never()).explainBatch(any(), anyList(), anyString());
         verify(repository).updateExplanation(org.mockito.ArgumentMatchers.eq(1L),
                 org.mockito.ArgumentMatchers.contains("机器联想"));
         verify(repository).updateExplanation(org.mockito.ArgumentMatchers.eq(1L),
@@ -316,7 +321,7 @@ class KnowledgeFirstExplainTest {
 
         assertThat(service.explainJob(10L, 100)).isEqualTo(1);
 
-        verify(llm, never()).explainBatch(any(), anyList());
+        verify(llm, never()).explainBatch(any(), anyList(), anyString());
         verify(repository).updateExplanation(1L, "财务确认：这是 9 月税率调整");
     }
 

@@ -100,6 +100,13 @@
       <version>5.3.0</version>
     </dependency>
 
+    <!-- 业界知识采集：PDF 文档文本提取（K5 多源摄取）。PDFBox 不在 BOM 里，显式钉版本。 -->
+    <dependency>
+      <groupId>org.apache.pdfbox</groupId>
+      <artifactId>pdfbox</artifactId>
+      <version>3.0.3</version>
+    </dependency>
+
     <!-- 演示默认用 H2；生产用 MySQL（见 application-mysql.yml） -->
     <dependency>
       <groupId>com.h2database</groupId>

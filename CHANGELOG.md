@@ -4,6 +4,27 @@
 
 ## [未发布]
 
+### 新增（2026-11-22 傍晚：业界知识层 —— 记忆不再只有自己产生的，行业先验 AI 自动采集入库）
+
+- **`recon_industry_kb` 表 + `IndustryKnowledge` 模型**：条目 = 适用条件（`appliesWhen` JSON：
+  ruleCodes / diffTypes / fieldRegex / directions）+ 知识短句（≤500 字）+ 来源 + 置信度。
+  与 `recon_diff_kb`（经验知识）互补——它装的是先验行业经验（常见病因 / 厂商行为 / 口径惯例）。
+- **三路写入，全自动机器准入（无人工核证闸）**：
+  - AI 蒸馏（`recon_harvest_knowledge` mode=distill）：LLM 预训练行业常识按主题批量起草；
+  - 多源摄取（mode=ingest）：PDF（PDFBox 文本提取）/ Markdown / HTML / 纯文本丢进来，
+    代码层清洗（剥标签 / 去噪声 / 分块），LLM 提炼候选——图片如实拒绝（本机链路无 OCR）；
+  - YAML seed（`patterns/industry-knowledge/seed.yml`，24 条起步语料）+ 外部目录投放。
+  - 准入闸纯机械：结构合法 / 条件非空（无条件=每条差异注入=常驻加税，拒绝）/ 可溯源 / 去重。
+- **注入即过滤**：归因分层 L2 调模型前按差异特征条件过滤（内存过滤，字典级量级），
+  置信分层（≥0.6 直接注入 / 0.3-0.6 带「AI 生成·低置信」标注 / <0.3 不注入），
+  条目数与字符预算双封顶。知识是系统受信内容，不进 PromptGuard 数据块。
+- **置信度生命周期（后置闭环治理）**：注入计数 usedCount；人工核销反馈涨落
+  （note 复述条目措辞 ≥6 字 → 采纳 +0.05；改判/豁免 → 驳回 -0.1）；跌破 0.2 自动进
+  GRAVEYARD 停注入。人工角色从核证每条变成看报表：`GET /api/knowledge/industry`
+  出条目清单 + 冷知识清单（零命中）+ graveyard。反馈失败绝不影响核销动作。
+- 工具面：基础 20 → 总 26（`recon_industry_kb` / `recon_harvest_knowledge`）；
+  全量 1055 绿（1041 → 1055，+14）。迁移脚本 docs/migrations/2026-11-22-industry-kb.sql（带回滚）。
+
 ### 新增（2026-11-22 下午：fallback 挖掘出口 + golden 意图回归集 —— 路由闭环最后一公里）
 
 - `FallbackMiningService` + `GET /api/chat/stats/fallbacks?minCount=2&limit=20`：把 recon_chat_fallback

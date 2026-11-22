@@ -264,6 +264,26 @@ CREATE TABLE IF NOT EXISTS recon_diff_kb (
   KEY idx_kb_lookup (rule_code, diff_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ============ 业界知识库：先验行业经验（与 recon_diff_kb 的经验知识互补） ============
+-- 条目 = 适用条件(JSON) + 知识短句 + 来源。AI 蒸馏/人工对话/YAML seed 三路写入全走
+-- 机器准入（无人工核证闸）；质量靠后置闭环——注入计数 + 核销反馈涨落置信度，
+-- 跌破阈值进 GRAVEYARD 自动停注入。
+CREATE TABLE IF NOT EXISTS recon_industry_kb (
+  id             BIGINT        AUTO_INCREMENT PRIMARY KEY,
+  entry_key      VARCHAR(96)   NOT NULL,
+  applies_when   VARCHAR(2048) NOT NULL,
+  knowledge_text VARCHAR(500)  NOT NULL,
+  source         VARCHAR(128)  NOT NULL,
+  origin         VARCHAR(16)   NOT NULL,
+  confidence     DECIMAL(4,3)  NOT NULL DEFAULT 0.400,
+  status         VARCHAR(16)   NOT NULL DEFAULT 'ACTIVE',
+  used_count     INT           NOT NULL DEFAULT 0,
+  rejected_count INT           NOT NULL DEFAULT 0,
+  updated_at     TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_industry_kb_key (entry_key),
+  KEY idx_industry_kb_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ============ 预处理模型表：把"每次对账都要重做的扫描 + 汇总"提前做一次 ============
 -- 模型表本身（recon_model_<规则>_l/r）由 recon_build_model 动态建，这里只登记元信息。
 -- dimension/aggregated 记的是构建时用的粒度，row_count/build_ms 是实测成本，方便对比与排查新鲜度。

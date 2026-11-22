@@ -42,6 +42,8 @@ public final class ToolNames {
     public static final String EVIDENCE_PACK = "recon_evidence_pack";
     public static final String LAGO_SYNC = "recon_lago_sync";
     public static final String LIST_PATTERNS = "recon_list_patterns";
+    public static final String LIST_INDUSTRY_KB = "recon_industry_kb";
+    public static final String HARVEST_KNOWLEDGE = "recon_harvest_knowledge";
 
     // ---- Agent 专属（只在 recon.agent.enabled=true 时注册，实现在 mcp.AgentMcpTools）----
     public static final String DRAFT_RULE = "recon_draft_rule";
@@ -99,5 +101,6 @@ public final class ToolNames {
     public static final java.util.List<String> BASE = java.util.List.of(
             LIST_RULES, LIST_JOBS, LIST_TABLES, DESCRIBE_TABLE, DEFINE_RULE, BUILD_MODEL, RUN,
             JOB_SUMMARY, LIST_DIFFS, EXPLAIN_DIFF, EXPLAIN_JOB, DIAGNOSE,
-            LIST_PRICES, PRICE_IMPACT, DIFF_LIFECYCLE, EVIDENCE_PACK, LAGO_SYNC, LIST_PATTERNS);
+            LIST_PRICES, PRICE_IMPACT, DIFF_LIFECYCLE, EVIDENCE_PACK, LAGO_SYNC, LIST_PATTERNS,
+            LIST_INDUSTRY_KB, HARVEST_KNOWLEDGE);
 }

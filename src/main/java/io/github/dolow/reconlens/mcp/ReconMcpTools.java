@@ -67,6 +67,8 @@ public class ReconMcpTools {
     private final EvidencePackService evidencePack;
     private final LagoConnectorService lagoConnector;
     private final ReconProperties properties;
+    private final io.github.dolow.reconlens.explain.industry.IndustryKbService industryKb;
+    private final io.github.dolow.reconlens.explain.industry.KnowledgeHarvestService harvester;
 
     public ReconMcpTools(RuleCatalog catalog, ReconEngine engine, ReconRepository repository, ExplainService explain,
                          ModelBuilder modelBuilder, DiagnosisService diagnosis,
@@ -74,7 +76,9 @@ public class ReconMcpTools {
                          org.springframework.beans.factory.ObjectProvider<io.github.dolow.reconlens.rule.RuleTrialScheduler> trialScheduler,
                          PriceCatalogService priceCatalog, PriceImpactService priceImpact,
                          DiffLifecycleService lifecycle, EvidencePackService evidencePack,
-                         LagoConnectorService lagoConnector, ReconProperties properties) {
+                         LagoConnectorService lagoConnector, ReconProperties properties,
+                         io.github.dolow.reconlens.explain.industry.IndustryKbService industryKb,
+                         io.github.dolow.reconlens.explain.industry.KnowledgeHarvestService harvester) {
         this.catalog = catalog;
         this.engine = engine;
         this.repository = repository;
@@ -89,6 +93,8 @@ public class ReconMcpTools {
         this.evidencePack = evidencePack;
         this.lagoConnector = lagoConnector;
         this.properties = properties;
+        this.industryKb = industryKb;
+        this.harvester = harvester;
     }
 
     /**
@@ -646,6 +652,69 @@ public class ReconMcpTools {
             }
             sb.append('\n');
         }
+        return sb.toString();
+    }
+
+    /** 业界知识层（K5）：先验行业经验条目 + 治理信号。 */
+    public String listIndustryKb(int limit) {
+        List<io.github.dolow.reconlens.domain.IndustryKnowledge> entries = industryKb.listAll(limit);
+        if (entries.isEmpty()) {
+            return "业界知识库为空。可用 recon_harvest_knowledge 让模型蒸馏生成（mode=distill），"
+                    + "或往 patterns/industry-knowledge/ 放 YAML 种子后重启。";
+        }
+        StringBuilder sb = new StringBuilder("业界知识库 ACTIVE ").append(industryKb.countActive())
+                .append(" 条（先验行业经验，注入 L2 归因上下文；置信度由核销反馈自动涨落）：\n");
+        for (io.github.dolow.reconlens.domain.IndustryKnowledge e : entries) {
+            sb.append("- ").append(e.entryKey()).append(" [").append(e.origin())
+                    .append(" conf=").append(e.confidence())
+                    .append(" used=").append(e.usedCount())
+                    .append(" rej=").append(e.rejectedCount())
+                    .append(e.status() == io.github.dolow.reconlens.domain.IndustryKnowledge.Status.GRAVEYARD
+                            ? " 已停注入" : "")
+                    .append("] ").append(e.text()).append('\n');
+        }
+        List<io.github.dolow.reconlens.domain.IndustryKnowledge> cold = industryKb.coldEntries();
+        if (!cold.isEmpty()) {
+            sb.append("\n冷知识清单（零命中，要么适用面窄要么过时，值得人工看一眼）：")
+                    .append(cold.size()).append(" 条\n");
+        }
+        List<io.github.dolow.reconlens.domain.IndustryKnowledge> dead = industryKb.graveyard();
+        if (!dead.isEmpty()) {
+            sb.append("graveyard（被核销反馈驳回至停注入）：").append(dead.size()).append(" 条\n");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * AI 采集（K5）：mode=distill 让模型按主题蒸馏行业常识；mode=ingest 解析给定文本
+     * （PDF/文档经文件导入后传正文）。全自动入库，无人工核证——置信度由闭环涨落管理。
+     */
+    public String harvestKnowledge(String mode, String theme, String content) {
+        if (!harvester.available()) {
+            return "采集不可用：未配置模型 key（recon.llm.*）。";
+        }
+        io.github.dolow.reconlens.explain.industry.KnowledgeHarvestService.HarvestReport report;
+        if ("distill".equalsIgnoreCase(mode)) {
+            report = harvester.distill(theme == null || theme.isBlank() ? "billing-pricing" : theme, 12);
+        } else if ("ingest".equalsIgnoreCase(mode)) {
+            if (content == null || content.isBlank()) {
+                return "mode=ingest 需要 content 参数（PDF/文档提取出的正文文本）。";
+            }
+            report = harvester.ingest(theme == null || theme.isBlank() ? "ingest.md" : theme,
+                    content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } else {
+            return "mode 只支持 distill（模型常识蒸馏）或 ingest（资料正文提炼）。";
+        }
+        if (report.failed()) {
+            return "采集失败：" + report.error();
+        }
+        StringBuilder sb = new StringBuilder("采集完成：新增 ").append(report.created())
+                .append(" / 更新 ").append(report.updated())
+                .append(" / 准入拒绝 ").append(report.rejected()).append('\n');
+        if (!report.keys().isEmpty()) {
+            sb.append("入库条目：").append(String.join(", ", report.keys())).append('\n');
+        }
+        sb.append("条目置信度由后续核销反馈自动涨落；被驳回多次会自动停注入（graveyard）。");
         return sb.toString();
     }
 
